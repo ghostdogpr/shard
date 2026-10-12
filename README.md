@@ -1,4 +1,4 @@
-# <img src="vuepress/docs/.vuepress/public/shard.svg" height="34" alt="" valign="middle">&nbsp; Shard
+# <img src="docs/public/shard.svg" height="34" alt="" valign="middle">&nbsp; Shard
 
 [![Maven Central](https://img.shields.io/maven-central/v/com.github.ghostdogpr/shard-core_3)](https://central.sonatype.com/artifact/com.github.ghostdogpr/shard-core_3)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](https://www.apache.org/licenses/LICENSE-2.0)
@@ -8,7 +8,7 @@
 Shard exposes a **purely functional API** and depends heavily on [ZIO](https://zio.dev).
 
 The [Documentation](https://ghostdogpr.github.io/shard/) explains how to use Shard, in particular:
-- how to [get started](https://ghostdogpr.github.io/shard/docs/)
-- the [architecture](https://ghostdogpr.github.io/shard/docs/architecture.html) behind Shard
-- how to [configure](https://ghostdogpr.github.io/shard/docs/config.html) it
-- parts you can [customize](https://ghostdogpr.github.io/shard/docs/customization.html)
+- how to [get started](https://ghostdogpr.github.io/shard/getting-started)
+- the [architecture](https://ghostdogpr.github.io/shard/architecture) behind Shard
+- how to [configure](https://ghostdogpr.github.io/shard/config) it
+- parts you can [customize](https://ghostdogpr.github.io/shard/customization)

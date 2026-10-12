@@ -14,14 +14,13 @@ project/metals.sbt
 *.class
 *.log
 
-vuepress/node_modules/*
+docs/.vitepress/cache
 *.lock
-vuepress/package-lock.json
 
 package-lock.json
 node_modules/
 .DS_Store
-vuepress/docs/.vuepress/dist
+docs/.vitepress/dist
 project/project/metals.sbt
 project/project/project/metals.sbt
 .cursor

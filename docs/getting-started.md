@@ -12,7 +12,7 @@ We expect our game to be successful, so we need to be able to scale out (deploy 
 A guild is limited to 30 members.
 Let's consider the case where 2 users try to join a guild at the exact same time, but our guild already had 29 members.
 
-![naive diagram](/shard/usecase1.png)
+![naive diagram](/usecase1.png)
 
 If we implement this naively, 2 different servers might receive our 2 requests to join the guild.
 They will both check the current size of the guild at the same time, which will be 29 and they will both accept the new guild member. Now our guild has 31 members :scream:.
@@ -25,7 +25,7 @@ That way, if 2 different game servers try to do it at the same time, the 2nd one
 **Entity Sharding** is a way to implement the second approach. In this case our entities (here, our guilds) will be spread across our game servers so that
 each entity exists in only one place at the time.
 
-![single writer diagram](/shard/usecase2.png)
+![single writer diagram](/usecase2.png)
 
 If our entity might be on any game server, how do we know where it is? This is the second characteristic of entity sharding, known as location transparency: we only need to know the entity ID.
 Using the entity ID, the sharding system will be able to find on which server the entity is located.
@@ -54,7 +54,7 @@ Entities usually run on multiple pods, but a single entity will only run on a si
 - A **shard** is a logical group of entities that will always be located on the same pod.
 There might be millions of entities, so instead of keeping millions of entities-to-pods mappings, we group entities into shards and maintain reasonably-sized shards-to-pods mappings.
 
-![terminology diagram](/shard/terminology.png)
+![terminology diagram](/terminology.png)
 
 ## Key components
 
@@ -69,7 +69,7 @@ There are 4 pluggable parts that can be implemented with the technology of your 
 - The `MessageCodec[Msg]` type class defines how to encode and decode messages of a given type. Shard provides backends using **Kryo** (reflective, no derivation) and **Proteus** (macro-derived, protobuf wire format).
 - The `PodsHealth` trait defines how to check if a pod is healthy or not. Shard provides an implementation using the **k8s API**.
 
-![architecture diagram](/shard/arch.png)
+![architecture diagram](/arch.png)
 
 ## An example
 
@@ -79,8 +79,8 @@ The first thing we need to do is starting the Shard Manager. This component is a
 To make it simpler and run our example without 3rd parties, we're going to run a simple `PodsHealth` implementation that just pings a pod to see if it's alive, and in-memory `Storage`.
 We need a proper messaging protocol to communicate with pods, so we're going to use `shard-protocol-grpc`.
 ```
-libraryDependencies += "com.github.ghostdogpr" %% "shard-manager"       % "3.0.0-RC1"
-libraryDependencies += "com.github.ghostdogpr" %% "shard-protocol-grpc" % "3.0.0-RC1"
+libraryDependencies += "com.github.ghostdogpr" %% "shard-manager"       % "@VERSION@"
+libraryDependencies += "com.github.ghostdogpr" %% "shard-protocol-grpc" % "@VERSION@"
 ```
 The Shard Manager exposes a small GraphQL API, which means we need to start a small webserver. This can be done by calling `Server.run` and providing all the required dependencies.
 ```scala
@@ -107,8 +107,8 @@ We now need to define our **entity behavior**: what kind of messages can our ent
 
 First, we need the following dependencies:
 ```
-libraryDependencies += "com.github.ghostdogpr" %% "shard-entities"      % "3.0.0-RC1"
-libraryDependencies += "com.github.ghostdogpr" %% "shard-protocol-grpc" % "3.0.0-RC1"
+libraryDependencies += "com.github.ghostdogpr" %% "shard-entities"      % "@VERSION@"
+libraryDependencies += "com.github.ghostdogpr" %% "shard-protocol-grpc" % "@VERSION@"
 ```
 
 Let's start with defining the messages our entities can receive. We will have 2: one for joining a guild and one for leaving.

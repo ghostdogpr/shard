@@ -1,10 +1,10 @@
 # Architecture
 
-Make sure to read the [Getting Started](README.md#getting-started) and [Terminology](README.md#terminology) first.
+Make sure to read the [Getting Started](getting-started.md) and [Terminology](getting-started.md#terminology) first.
 
 ## Main Concepts
 
-![architecture diagram](/shard/arch2.png)
+![architecture diagram](/arch2.png)
 
 - The **Shard Manager** is a single node in charge of maintaining the pods <-> shards assignments.
   Only one Shard Manager should be alive at any given time.

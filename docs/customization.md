@@ -1,11 +1,11 @@
 # Customization
 
-As demonstrated in the [Getting Started](README.md#key-components), there are several parts of the system that are entirely customizable.
+As demonstrated in the [Getting Started](getting-started.md#key-components), there are several parts of the system that are entirely customizable.
 For each of them, Shard provides at least a fake implementation for testing and a prod-ready implementation using common technologies. 
 
 Feel free to implement your own!
 
-![architecture diagram](/shard/arch.png)
+![architecture diagram](/arch.png)
 
 ## Storage
 
@@ -29,7 +29,7 @@ For testing, you can use the `Storage.memory` layer that keeps data in memory.
 
 Shard provides an implementation of `Storage` using Redis with the Redis4cats library (there's also an alternative using Redisson). To use it, add the following dependency:
 ```scala
-libraryDependencies += "com.github.ghostdogpr" %% "shard-storage-redis" % "3.0.0-RC1"
+libraryDependencies += "com.github.ghostdogpr" %% "shard-storage-redis" % "@VERSION@"
 ```
 You can then simply use the `StorageRedis.live` layer.
 
@@ -96,7 +96,7 @@ For testing, you can use the `Pods.noop` layer that does nothing.
 
 Shard provides an implementation of `Pods` using the gRPC protocol. To use it, add the following dependency:
 ```scala
-libraryDependencies += "com.github.ghostdogpr" %% "shard-protocol-grpc" % "3.0.0-RC1"
+libraryDependencies += "com.github.ghostdogpr" %% "shard-protocol-grpc" % "@VERSION@"
 ```
 You can then simply use the `GrpcPods.live` layer.
 
@@ -144,7 +144,7 @@ Uses the [Kryo](https://github.com/EsotericSoftware/kryo) binary serialization l
 Reflective — no derivation, no compile-time constraints on the message type. The given covers every type uniformly.
 
 ```scala
-libraryDependencies += "com.github.ghostdogpr" %% "shard-serialization-kryo" % "3.0.0-RC1"
+libraryDependencies += "com.github.ghostdogpr" %% "shard-serialization-kryo" % "@VERSION@"
 ```
 
 ```scala
@@ -173,7 +173,7 @@ Uses [Proteus](https://github.com/ghostdogpr/proteus) (macro-derived, protobuf-c
 The codec is derived per message type at compile time. Message types must be a case class, sealed trait, or enum at the root — bare primitives (`Int`, `String`, …) need to be wrapped in a case class.
 
 ```scala
-libraryDependencies += "com.github.ghostdogpr" %% "shard-serialization-proteus" % "3.0.0-RC1"
+libraryDependencies += "com.github.ghostdogpr" %% "shard-serialization-proteus" % "@VERSION@"
 ```
 
 ```scala
@@ -206,7 +206,7 @@ For testing, you can use the `PodsHealth.noop` layer that always returns true, o
 
 Shard provides an implementation of `PodsHealth` using the [Kubernetes](https://kubernetes.io) API. To use it, add the following dependency:
 ```scala
-libraryDependencies += "com.github.ghostdogpr" %% "shard-health-k8s" % "3.0.0-RC1"
+libraryDependencies += "com.github.ghostdogpr" %% "shard-health-k8s" % "@VERSION@"
 ```
 You can then simply use the `K8sPodsHealth.live` layer. This is requiring a `Pods` layer that comes from [zio-k8s](https://coralogix.github.io/zio-k8s/docs/overview/overview_gettingstarted).
 
