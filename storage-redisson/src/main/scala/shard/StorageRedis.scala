@@ -15,7 +15,7 @@ object StorageRedis {
   /**
    * A layer that returns a Storage implementation using Redis
    */
-  val live: ZLayer[RedissonClient with RedisConfig, Nothing, Storage] =
+  val live: ZLayer[RedissonClient & RedisConfig, Nothing, Storage] =
     ZLayer {
       for {
         config      <- ZIO.service[RedisConfig]

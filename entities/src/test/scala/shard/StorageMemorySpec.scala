@@ -9,7 +9,7 @@ object StorageMemorySpec extends ZIOSpecDefault {
   private val roleB = Role("b")
   private val pod   = PodAddress("localhost", 1234)
 
-  def spec: Spec[TestEnvironment with Scope, Any] =
+  def spec: Spec[TestEnvironment & Scope, Any] =
     suite("StorageMemorySpec")(
       test("Assignments are kept separately for each role") {
         for {

@@ -23,7 +23,7 @@ No. Shard covers only a small portion of what Akka/Pekko does, specifically the 
 
 ## What Scala and JDK versions are required?
 
-Scala 3.3.x LTS and later. CI runs on JDK 21.
+Scala 3.9.x LTS and later, on JDK 17 or newer.
 
 ## Is Scala.js or Scala Native supported?
 

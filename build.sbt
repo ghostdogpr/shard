@@ -1,4 +1,4 @@
-val scala3 = "3.3.7"
+val scala3 = "3.9.0"
 
 val zioVersion            = "2.1.24"
 val proteusVersion        = "0.5.0"
@@ -251,9 +251,9 @@ lazy val commonSettings = Def.settings(
     "-language:higherKinds",
     "-language:existentials",
     "-unchecked",
-    "-Xfatal-warnings",
+    "-Werror",
     "-language:postfixOps",
     "-explain-types",
-    "-Ykind-projector"
+    "-Xkind-projector"
   )
 )

@@ -68,7 +68,7 @@ object ProteusMessageCodecSpec extends ZIOSpecDefault {
   private val codec       = summon[MessageCodec[Msg]]
   private val nestedCodec = summon[MessageCodec[NestedMsg]]
 
-  def spec: Spec[TestEnvironment with Scope, Any] =
+  def spec: Spec[TestEnvironment & Scope, Any] =
     suite("ProteusMessageCodecSpec")(
       test("roundtrips a message with no Replier") {
         val msg     = Msg.Plain("hello", 42)

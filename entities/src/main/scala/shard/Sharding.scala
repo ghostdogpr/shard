@@ -273,10 +273,10 @@ class Sharding private (
         val notify = Clock.currentDateTime.flatMap(cdt =>
           lastUnhealthyNodeReported
             .updateAndGet(old =>
-              if (old.plusNanos(config.unhealthyPodReportInterval.toNanos) isBefore cdt) cdt
+              if (old.plusNanos(config.unhealthyPodReportInterval.toNanos).isBefore(cdt)) cdt
               else old
             )
-            .map(_ isEqual cdt)
+            .map(_.isEqual(cdt))
         )
         ZIO.whenZIODiscard(notify)(shardManager.notifyUnhealthyPod(pod).forkDaemon)
       }
@@ -550,7 +550,7 @@ class Sharding private (
     terminateMessage: Promise[Nothing, Unit] => Option[Req] = (_: Promise[Nothing, Unit]) => None,
     entityMaxIdleTime: Option[Duration] = None,
     loadEntity: Req => Boolean = (_: Req) => true
-  ): URIO[Scope with R, Unit] =
+  ): URIO[Scope & R, Unit] =
     registerRecipient(entityType, behavior, terminateMessage, entityMaxIdleTime, loadEntity) *>
       eventsHub.publish(ShardingRegistrationEvent.EntityRegistered(entityType)).unit
 
@@ -559,7 +559,7 @@ class Sharding private (
     behavior: (String, Queue[Req]) => RIO[R, Nothing],
     terminateMessage: Promise[Nothing, Unit] => Option[Req] = (_: Promise[Nothing, Unit]) => None,
     loadEntity: Req => Boolean = (_: Req) => true
-  ): URIO[Scope with R, Unit] = registerRecipient(topicType, behavior, terminateMessage, None, loadEntity) *>
+  ): URIO[Scope & R, Unit] = registerRecipient(topicType, behavior, terminateMessage, None, loadEntity) *>
     eventsHub.publish(ShardingRegistrationEvent.TopicRegistered(topicType)).unit
 
   def getShardingRegistrationEvents: ZStream[Any, Nothing, ShardingRegistrationEvent] =
@@ -571,7 +571,7 @@ class Sharding private (
     terminateMessage: Promise[Nothing, Unit] => Option[Req] = (_: Promise[Nothing, Unit]) => None,
     entityMaxIdleTime: Option[Duration],
     loadEntity: Req => Boolean
-  ): URIO[Scope with R, Unit] =
+  ): URIO[Scope & R, Unit] =
     for {
       entityManager <- EntityManager.make(
                          recipientType,
@@ -646,7 +646,7 @@ object Sharding {
   /**
    * A layer that sets up sharding communication between pods.
    */
-  val live: ZLayer[Pods with ShardManagerClient with Storage with Config, Throwable, Sharding] =
+  val live: ZLayer[Pods & ShardManagerClient & Storage & Config, Throwable, Sharding] =
     ZLayer.scoped {
       for {
         config                    <- ZIO.service[Config]
@@ -704,7 +704,7 @@ object Sharding {
   /**
    * Same as `register`, but will automatically call `unregister` when the `Scope` is terminated.
    */
-  def registerScoped: RIO[Sharding with Scope, Unit] =
+  def registerScoped: RIO[Sharding & Scope, Unit] =
     Sharding.register.withFinalizer(_ => Sharding.unregister)
 
   /**
@@ -717,7 +717,7 @@ object Sharding {
    * Start a computation that is guaranteed to run only on a single pod.
    * Each pod should call `registerSingleton` but only a single pod will actually run it at any given time.
    */
-  def registerSingleton[R](name: String, run: URIO[R, Nothing]): URIO[Sharding with R, Unit] =
+  def registerSingleton[R](name: String, run: URIO[R, Nothing]): URIO[Sharding & R, Unit] =
     ZIO.serviceWithZIO[Sharding](_.registerSingleton[R](name, run))
 
   /**
@@ -734,7 +734,7 @@ object Sharding {
     terminateMessage: Promise[Nothing, Unit] => Option[Req] = (_: Promise[Nothing, Unit]) => None,
     entityMaxIdleTime: Option[Duration] = None,
     loadEntity: Req => Boolean = (_: Req) => true
-  ): URIO[Sharding with Scope with R, Unit] =
+  ): URIO[Sharding & Scope & R, Unit] =
     ZIO.serviceWithZIO[Sharding](
       _.registerEntity[R, Req](entityType, behavior, terminateMessage, entityMaxIdleTime, loadEntity)
     )
@@ -752,7 +752,7 @@ object Sharding {
     behavior: (String, Queue[Req]) => RIO[R, Nothing],
     terminateMessage: Promise[Nothing, Unit] => Option[Req] = (_: Promise[Nothing, Unit]) => None,
     loadEntity: Req => Boolean = (_: Req) => true
-  ): URIO[Sharding with Scope with R, Unit] =
+  ): URIO[Sharding & Scope & R, Unit] =
     ZIO.serviceWithZIO[Sharding](_.registerTopic[R, Req](topicType, behavior, terminateMessage, loadEntity))
 
   /**

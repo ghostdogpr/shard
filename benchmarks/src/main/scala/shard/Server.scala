@@ -57,8 +57,8 @@ object Server {
   private val grpcConfig: ULayer[GrpcConfig] =
     ZLayer.succeed(GrpcConfig.default.copy(executor = Some(ForkJoinPool.commonPool())))
 
-  val sharding: ZLayer[Config, Throwable, Sharding with GrpcConfig] =
-    ZLayer.makeSome[Config, Sharding with GrpcConfig](
+  val sharding: ZLayer[Config, Throwable, Sharding & GrpcConfig] =
+    ZLayer.makeSome[Config, Sharding & GrpcConfig](
       memory,
       grpcConfig,
       shardManagerClient,

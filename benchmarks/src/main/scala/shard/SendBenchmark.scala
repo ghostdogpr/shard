@@ -4,6 +4,7 @@ import org.openjdk.jmh.annotations._
 import zio.{ durationInt, Fiber, Runtime, Unsafe, ZIO }
 
 import java.util.concurrent.TimeUnit
+import scala.compiletime.uninitialized
 
 @State(Scope.Thread)
 @BenchmarkMode(Array(Mode.Throughput))
@@ -12,7 +13,7 @@ import java.util.concurrent.TimeUnit
 @Measurement(iterations = 3, time = 3, timeUnit = TimeUnit.SECONDS)
 @Fork(1)
 class SendBenchmark {
-  private var fiber: Fiber[Any, Any] = _
+  private var fiber: Fiber[Any, Any] = uninitialized
 
   @Setup
   def setup(): Unit =

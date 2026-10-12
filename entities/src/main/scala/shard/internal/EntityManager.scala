@@ -68,7 +68,7 @@ private[shard] object EntityManager {
       def sleep(duration: Duration): UIO[Unit] =
         (Clock.sleep(duration) *> currentTimeInMilliseconds <*> entitiesLastReceivedAt.get).flatMap { case (cdt, map) =>
           val lastReceivedAt = map.getOrElse(entityId, 0L)
-          val remaining      = maxIdleTime minus Duration.fromMillis(cdt - lastReceivedAt)
+          val remaining      = maxIdleTime.minus(Duration.fromMillis(cdt - lastReceivedAt))
           // do not use ZIO.when to prevent zio stack memory leak
           if (remaining > Duration.Zero) sleep(remaining) else ZIO.unit
         }
