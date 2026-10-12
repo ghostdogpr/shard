@@ -1,8 +1,8 @@
 # Getting Started
 
-**Shardcake** is a **Scala open source library** that makes it easy to distribute entities across multiple servers and interact with those entities using their ID without knowing their actual location (this is also known as *location transparency*). 
+**Shard** is a **Scala open source library** that makes it easy to distribute entities across multiple servers and interact with those entities using their ID without knowing their actual location (this is also known as *location transparency*). 
 
-Shardcake exposes a **purely functional API** and depends heavily on [ZIO](https://zio.dev). It is recommended to be familiar with ZIO to read this documentation.
+Shard exposes a **purely functional API** and depends heavily on [ZIO](https://zio.dev). It is recommended to be familiar with ZIO to read this documentation.
 
 ## A simple use case
 
@@ -12,7 +12,7 @@ We expect our game to be successful, so we need to be able to scale out (deploy 
 A guild is limited to 30 members.
 Let's consider the case where 2 users try to join a guild at the exact same time, but our guild already had 29 members.
 
-![naive diagram](/shardcake/usecase1.png)
+![naive diagram](/shard/usecase1.png)
 
 If we implement this naively, 2 different servers might receive our 2 requests to join the guild.
 They will both check the current size of the guild at the same time, which will be 29 and they will both accept the new guild member. Now our guild has 31 members :scream:.
@@ -25,12 +25,12 @@ That way, if 2 different game servers try to do it at the same time, the 2nd one
 **Entity Sharding** is a way to implement the second approach. In this case our entities (here, our guilds) will be spread across our game servers so that
 each entity exists in only one place at the time.
 
-![single writer diagram](/shardcake/usecase2.png)
+![single writer diagram](/shard/usecase2.png)
 
 If our entity might be on any game server, how do we know where it is? This is the second characteristic of entity sharding, known as location transparency: we only need to know the entity ID.
 Using the entity ID, the sharding system will be able to find on which server the entity is located.
 
-**Shardcake** provides components to:
+**Shard** provides components to:
 - automatically manage the assignments of entities to game servers
 - send messages to your entities using their IDs
 
@@ -54,38 +54,38 @@ Entities usually run on multiple pods, but a single entity will only run on a si
 - A **shard** is a logical group of entities that will always be located on the same pod.
 There might be millions of entities, so instead of keeping millions of entities-to-pods mappings, we group entities into shards and maintain reasonably-sized shards-to-pods mappings.
 
-![terminology diagram](/shardcake/terminology.png)
+![terminology diagram](/shard/terminology.png)
 
 ## Key components
 
-Shardcake is composed of 2 main components:
+Shard is composed of 2 main components:
 - The **Shard Manager** is an independent component that needs a single instance running. It is in charge of assigning shards to pods.
 - **Entities** will run on your application servers and process messages that are sent to them. Note that the entity behavior (including entity persistence) is entirely up to you.
-Shardcake only takes care of starting entities on the right pods as well as the communication between them.
+Shard only takes care of starting entities on the right pods as well as the communication between them.
 
 There are 4 pluggable parts that can be implemented with the technology of your choice.
-- The `Storage` trait defines where shard assignments will be stored. Shardcake provides an implementation using **Redis**.
-- The `Pods` trait defines how to communicate with remote pods. Shardcake provides an implementation using **gRPC** as the protocol.
-- The `MessageCodec[Msg]` type class defines how to encode and decode messages of a given type. Shardcake provides backends using **Kryo** (reflective, no derivation) and **Proteus** (macro-derived, protobuf wire format).
-- The `PodsHealth` trait defines how to check if a pod is healthy or not. Shardcake provides an implementation using the **k8s API**.
+- The `Storage` trait defines where shard assignments will be stored. Shard provides an implementation using **Redis**.
+- The `Pods` trait defines how to communicate with remote pods. Shard provides an implementation using **gRPC** as the protocol.
+- The `MessageCodec[Msg]` type class defines how to encode and decode messages of a given type. Shard provides backends using **Kryo** (reflective, no derivation) and **Proteus** (macro-derived, protobuf wire format).
+- The `PodsHealth` trait defines how to check if a pod is healthy or not. Shard provides an implementation using the **k8s API**.
 
-![architecture diagram](/shardcake/arch.png)
+![architecture diagram](/shard/arch.png)
 
 ## An example
 
 ### Shard Manager
-The first thing we need to do is starting the Shard Manager. This component is available by importing the `shardcake-manager` dependency, and requires implementations of `Storage`, `Pods` and `PodsHealth` to work.
+The first thing we need to do is starting the Shard Manager. This component is available by importing the `shard-manager` dependency, and requires implementations of `Storage`, `Pods` and `PodsHealth` to work.
 
 To make it simpler and run our example without 3rd parties, we're going to run a simple `PodsHealth` implementation that just pings a pod to see if it's alive, and in-memory `Storage`.
-We need a proper messaging protocol to communicate with pods, so we're going to use `shardcake-protocol-grpc`.
+We need a proper messaging protocol to communicate with pods, so we're going to use `shard-protocol-grpc`.
 ```
-libraryDependencies += "com.devsisters" %% "shardcake-manager"       % "3.0.0-RC1"
-libraryDependencies += "com.devsisters" %% "shardcake-protocol-grpc" % "3.0.0-RC1"
+libraryDependencies += "com.github.ghostdogpr" %% "shard-manager"       % "3.0.0-RC1"
+libraryDependencies += "com.github.ghostdogpr" %% "shard-protocol-grpc" % "3.0.0-RC1"
 ```
 The Shard Manager exposes a small GraphQL API, which means we need to start a small webserver. This can be done by calling `Server.run` and providing all the required dependencies.
 ```scala
-import com.devsisters.shardcake._
-import com.devsisters.shardcake.interfaces._
+import shard._
+import shard.interfaces._
 import zio._
 
 object ShardManagerApp extends ZIOAppDefault {
@@ -107,8 +107,8 @@ We now need to define our **entity behavior**: what kind of messages can our ent
 
 First, we need the following dependencies:
 ```
-libraryDependencies += "com.devsisters" %% "shardcake-entities"      % "3.0.0-RC1"
-libraryDependencies += "com.devsisters" %% "shardcake-protocol-grpc" % "3.0.0-RC1"
+libraryDependencies += "com.github.ghostdogpr" %% "shard-entities"      % "3.0.0-RC1"
+libraryDependencies += "com.github.ghostdogpr" %% "shard-protocol-grpc" % "3.0.0-RC1"
 ```
 
 Let's start with defining the messages our entities can receive. We will have 2: one for joining a guild and one for leaving.
@@ -126,7 +126,7 @@ object GuildMessage {
 We also need to define an **Entity Type**. This is done by extending `EntityType` with the message type as well as a unique `String` identifier for this type.
 The `EntityType` constructor requires a given `MessageCodec[GuildMessage]` in scope, which decides how messages are serialized on the wire. Here we pull in the Kryo backend's universal given by importing it next to the declaration:
 ```scala
-import com.devsisters.shardcake.kryo.given
+import shard.kryo.given
 
 object Guild extends EntityType[GuildMessage]("guild")
 ```
@@ -234,24 +234,21 @@ The only changes we would need to make would be:
 - to use an actual `Storage` implementation for sharding (e.g. Redis)
 - to save our guild state somewhere instead of in memory, so that we don't lose this state if the guild entity is moved from one pod to another
 
-The running code for this example [can be found here](https://github.com/devsisters/shardcake/tree/series/3.x/examples/src/main/scala/example/simple), 
-as well as [a more complex example](https://github.com/devsisters/shardcake/tree/series/3.x/examples/src/main/scala/example/complex) using Redis to persist data and where you can run multiple pods.
+The running code for this example [can be found here](https://github.com/ghostdogpr/shard/tree/series/3.x/examples/src/main/scala/example/simple), 
+as well as [a more complex example](https://github.com/ghostdogpr/shard/tree/series/3.x/examples/src/main/scala/example/complex) using Redis to persist data and where you can run multiple pods.
 
 To understand how Sharding works under the hood, have a look at the [Architecture](architecture.md) section.
 The [Configuration](config.md) section explains how to configure the sharding system.
-Finally, the [Customization](customization.md) section describes how you can use your own storage, message codec or messaging protocol, as well as the options provided by Shardcake.
+Finally, the [Customization](customization.md) section describes how you can use your own storage, message codec or messaging protocol, as well as the options provided by Shard.
 
 ::: tip Differences with Akka Cluster Sharding ?
 [Akka Cluster Sharding](https://doc.akka.io/docs/akka/current/typed/cluster-sharding.html) is the main alternative for sharding in Scala.
-Here is how Shardcake differs from Akka:
-- Shardcake is a **purely functional library** based on `ZIO`, while Akka is a library leaning towards the "better Java" style of Scala and is based on `Future`.
+Here is how Shard differs from Akka:
+- Shard is a **purely functional library** based on `ZIO`, while Akka is a library leaning towards the "better Java" style of Scala and is based on `Future`.
 
 - With Akka, all application servers **must be part of a cluster**. This is particularly tricky to configure and sensitive to all kinds of failures.
-This is not the case with Shardcake since the Shard Manager is an external component that relies on systems like Kubernetes to monitor pod health.
+This is not the case with Shard since the Shard Manager is an external component that relies on systems like Kubernetes to monitor pod health.
 
 - Akka is way more than a sharding library, this is basically an entire framework that has a lot of features.
-Shardcake is much **simpler and modular**. It lets you customize multiple things, including the messaging protocol between pods.
-
-- Akka is backed by [Lightbend](https://www.lightbend.com), who provides **commercial support**,
-while Shardcake is backed by [Devsisters](https://www.devsisters.com) and the **ZIO community**.
+Shard is much **simpler and modular**. It lets you customize multiple things, including the messaging protocol between pods.
 :::

@@ -4,7 +4,7 @@ Make sure to read the [Getting Started](README.md#getting-started) and [Terminol
 
 ## Main Concepts
 
-![architecture diagram](/shardcake/arch2.png)
+![architecture diagram](/shard/arch2.png)
 
 - The **Shard Manager** is a single node in charge of maintaining the pods <-> shards assignments.
   Only one Shard Manager should be alive at any given time.

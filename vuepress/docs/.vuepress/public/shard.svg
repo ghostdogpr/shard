@@ -1,0 +1,17 @@
+<svg width="260" height="260" viewBox="0 0 260 260" xmlns="http://www.w3.org/2000/svg">
+
+  <!-- Hexagon in blue, cut into six shards, one drifting out (behind) -->
+  <polygon points="130,130 130,22 223.5,76" fill="#6DB3E6" transform="translate(10,-17.3)"/>
+  <polygon points="130,130 223.5,76 223.5,184" fill="#3B95D6" transform="translate(4,0)"/>
+  <polygon points="130,130 223.5,184 130,238" fill="#2A78B5" transform="translate(2,3.5)"/>
+  <polygon points="130,130 130,238 36.5,184" fill="#6DB3E6" transform="translate(-2,3.5)"/>
+  <polygon points="130,130 36.5,184 36.5,76" fill="#3B95D6" transform="translate(-4,0)"/>
+  <polygon points="130,130 36.5,76 130,22" fill="#2A78B5" transform="translate(-2,-3.5)"/>
+
+  <!-- Scala curved bars in red (on top) -->
+  <g transform="translate(95,50)" fill="#CB4239">
+    <path d="M0 0 h70a20 20 0 0 1 0 40h-70a20 20 0 0 1 0-40z"/>
+    <path d="M0 60 h70a20 20 0 0 1 0 40h-70a20 20 0 0 1 0-40z"/>
+    <path d="M0 120 h70a20 20 0 0 1 0 40h-70a20 20 0 0 1 0-40z"/>
+  </g>
+</svg>

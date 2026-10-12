@@ -18,13 +18,13 @@ val testContainersVersion = "0.44.1"
 inThisBuild(
   List(
     scalaVersion := scala3,
-    organization := "com.devsisters",
-    homepage     := Some(url("https://devsisters.github.io/shardcake/")),
+    organization := "com.github.ghostdogpr",
+    homepage     := Some(url("https://ghostdogpr.github.io/shard/")),
     licenses     := List("Apache-2.0" -> url("http://www.apache.org/licenses/LICENSE-2.0")),
     scmInfo      := Some(
       ScmInfo(
-        url("https://github.com/devsisters/shardcake"),
-        "scm:git:git@github.com:devsisters/shardcake.git"
+        url("https://github.com/ghostdogpr/shard"),
+        "scm:git:git@github.com:ghostdogpr/shard.git"
       )
     ),
     developers   := List(
@@ -38,7 +38,7 @@ inThisBuild(
   )
 )
 
-name := "shardcake"
+name := "shard"
 addCommandAlias("fmt", "all scalafmtSbt scalafmt test:scalafmt")
 addCommandAlias("check", "all scalafmtSbtCheck scalafmtCheck test:scalafmtCheck grpcProtocol/checkProto")
 
@@ -61,7 +61,7 @@ lazy val root = project
 
 lazy val core = project
   .in(file("core"))
-  .settings(name := "shardcake-core")
+  .settings(name := "shard-core")
   .settings(commonSettings)
   .settings(
     libraryDependencies ++=
@@ -74,7 +74,7 @@ lazy val core = project
 
 lazy val manager = project
   .in(file("manager"))
-  .settings(name := "shardcake-manager")
+  .settings(name := "shard-manager")
   .settings(commonSettings)
   .dependsOn(core)
   .settings(
@@ -86,7 +86,7 @@ lazy val manager = project
 
 lazy val entities = project
   .in(file("entities"))
-  .settings(name := "shardcake-entities")
+  .settings(name := "shard-entities")
   .settings(commonSettings)
   .dependsOn(core)
   .settings(
@@ -99,7 +99,7 @@ lazy val entities = project
 
 lazy val healthK8s = project
   .in(file("health-k8s"))
-  .settings(name := "shardcake-health-k8s")
+  .settings(name := "shard-health-k8s")
   .settings(commonSettings)
   .dependsOn(core)
   .settings(
@@ -114,7 +114,7 @@ lazy val healthK8s = project
 
 lazy val storageRedis = project
   .in(file("storage-redis"))
-  .settings(name := "shardcake-storage-redis")
+  .settings(name := "shard-storage-redis")
   .settings(commonSettings)
   .dependsOn(core)
   .settings(
@@ -128,7 +128,7 @@ lazy val storageRedis = project
 
 lazy val storageRedisson = project
   .in(file("storage-redisson"))
-  .settings(name := "shardcake-storage-redisson")
+  .settings(name := "shard-storage-redisson")
   .settings(commonSettings)
   .dependsOn(core)
   .settings(
@@ -140,7 +140,7 @@ lazy val storageRedisson = project
 
 lazy val serializationKryo = project
   .in(file("serialization-kryo"))
-  .settings(name := "shardcake-serialization-kryo")
+  .settings(name := "shard-serialization-kryo")
   .settings(commonSettings)
   .dependsOn(entities)
   .settings(
@@ -155,7 +155,7 @@ lazy val checkProto    = taskKey[Unit]("Fail if sharding.proto is out of sync wi
 
 lazy val serializationProteus = project
   .in(file("serialization-proteus"))
-  .settings(name := "shardcake-serialization-proteus")
+  .settings(name := "shard-serialization-proteus")
   .settings(commonSettings)
   .dependsOn(entities)
   .settings(
@@ -167,7 +167,7 @@ lazy val serializationProteus = project
 
 lazy val grpcProtocol = project
   .in(file("protocol-grpc"))
-  .settings(name := "shardcake-protocol-grpc")
+  .settings(name := "shard-protocol-grpc")
   .settings(commonSettings)
   .dependsOn(core, entities)
   .settings(
@@ -183,7 +183,7 @@ lazy val grpcProtocol = project
       val output = (Compile / sourceDirectory).value / "protobuf"
       runner.value
         .run(
-          "com.devsisters.shardcake.protocol.GenerateProto",
+          "shard.protocol.GenerateProto",
           cp.files,
           Seq(output.getAbsolutePath),
           log

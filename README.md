@@ -1,16 +1,14 @@
-# Shardcake
+# <img src="vuepress/docs/.vuepress/public/shard.svg" height="34" alt="" valign="middle">&nbsp; Shard
 
-[![Release Artifacts][Badge-SonatypeReleases]][Link-SonatypeReleases]
+[![Maven Central](https://img.shields.io/maven-central/v/com.github.ghostdogpr/shard-core_3)](https://central.sonatype.com/artifact/com.github.ghostdogpr/shard-core_3)
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](https://www.apache.org/licenses/LICENSE-2.0)
 
-[Link-SonatypeReleases]: https://central.sonatype.com/artifact/com.devsisters/shardcake-core_2.13 "Sonatype Releases"
-[Badge-SonatypeReleases]: https://img.shields.io/maven-central/v/com.devsisters/shardcake-core_2.13.svg "Sonatype Releases"
+**Shard** is a **Scala open source library** that makes it easy to distribute entities across multiple servers and interact with those entities using their ID without knowing their actual location (this is also known as *location transparency*). 
 
-**Shardcake** is a **Scala open source library** that makes it easy to distribute entities across multiple servers and interact with those entities using their ID without knowing their actual location (this is also known as *location transparency*). 
+Shard exposes a **purely functional API** and depends heavily on [ZIO](https://zio.dev).
 
-Shardcake exposes a **purely functional API** and depends heavily on [ZIO](https://zio.dev).
-
-The [Documentation](https://devsisters.github.io/shardcake/) explains how to use Shardcake, in particular:
-- how to [get started](https://devsisters.github.io/shardcake/docs/)
-- the [architecture](https://devsisters.github.io/shardcake/docs/architecture.html) behind Shardcake
-- how to [configure](https://devsisters.github.io/shardcake/docs/config.html) it
-- parts you can [customize](https://devsisters.github.io/shardcake/docs/customization.html)
+The [Documentation](https://ghostdogpr.github.io/shard/) explains how to use Shard, in particular:
+- how to [get started](https://ghostdogpr.github.io/shard/docs/)
+- the [architecture](https://ghostdogpr.github.io/shard/docs/architecture.html) behind Shard
+- how to [configure](https://ghostdogpr.github.io/shard/docs/config.html) it
+- parts you can [customize](https://ghostdogpr.github.io/shard/docs/customization.html)

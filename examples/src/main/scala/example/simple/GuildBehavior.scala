@@ -1,7 +1,7 @@
 package example.simple
 
-import com.devsisters.shardcake.{ EntityType, Replier, Sharding, StreamReplier }
-import com.devsisters.shardcake.javaSerialization.given
+import shard.{ EntityType, Replier, Sharding, StreamReplier }
+import shard.javaSerialization.given
 import zio.stream.ZStream
 import zio.{ Dequeue, RIO, Ref, ZIO }
 

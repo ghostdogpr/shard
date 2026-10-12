@@ -1,20 +1,20 @@
 module.exports = {
-    base: '/shardcake/',
+    base: '/shard/',
     head: [
         ['link', {
             rel: 'icon',
-            href: '/shardcake.png'
+            href: '/shard/favicon.png'
         }]
     ],
     locales: {
         '/': {
             lang: 'en-US',
-            title: 'Shardcake',
+            title: 'Shard',
             description: 'Entity Sharding library for Scala',
         }
     },
     themeConfig: {
-        logo: '/shardcake.png',
+        logo: '/shard.svg',
         locales: {
             '/': {
                 selectText: 'Language',
@@ -34,7 +34,7 @@ module.exports = {
                     },
                     {
                         text: 'Github',
-                        link: 'https://github.com/devsisters/shardcake'
+                        link: 'https://github.com/ghostdogpr/shard'
                     }
                 ],
                 sidebar: {

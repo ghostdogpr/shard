@@ -1,7 +1,7 @@
 package example.complex
 
-import com.devsisters.shardcake._
-import com.devsisters.shardcake.interfaces._
+import shard._
+import shard.interfaces._
 import zio._
 
 object ShardManagerApp extends ZIOAppDefault {

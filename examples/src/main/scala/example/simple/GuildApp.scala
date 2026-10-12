@@ -1,7 +1,7 @@
 package example.simple
 
-import com.devsisters.shardcake._
-import com.devsisters.shardcake.interfaces._
+import shard._
+import shard.interfaces._
 import example.simple.GuildBehavior._
 import example.simple.GuildBehavior.GuildMessage.Join
 import zio.{ Config => _, _ }

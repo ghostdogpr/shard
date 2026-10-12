@@ -1,6 +1,6 @@
 ---
 home: true
-heroImage: /shardcake.png
+heroImage: /shard.svg
 actionText: Get Started →
 actionLink: /docs/
 features:

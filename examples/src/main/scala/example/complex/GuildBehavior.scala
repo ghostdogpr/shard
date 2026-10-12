@@ -1,7 +1,7 @@
 package example.complex
 
-import com.devsisters.shardcake.{ EntityType, Replier, Sharding }
-import com.devsisters.shardcake.kryo.given
+import shard.{ EntityType, Replier, Sharding }
+import shard.kryo.given
 import dev.profunktor.redis4cats.RedisCommands
 import zio.{ Dequeue, Promise, RIO, Task, ZIO }
 

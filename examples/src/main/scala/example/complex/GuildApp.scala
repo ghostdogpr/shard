@@ -1,6 +1,6 @@
 package example.complex
 
-import com.devsisters.shardcake._
+import shard._
 import dev.profunktor.redis4cats.RedisCommands
 import example.complex.GuildBehavior.GuildMessage.{ Join, Terminate }
 import example.complex.GuildBehavior._

@@ -1,11 +1,11 @@
 # Customization
 
 As demonstrated in the [Getting Started](README.md#key-components), there are several parts of the system that are entirely customizable.
-For each of them, Shardcake provides at least a fake implementation for testing and a prod-ready implementation using common technologies. 
+For each of them, Shard provides at least a fake implementation for testing and a prod-ready implementation using common technologies. 
 
 Feel free to implement your own!
 
-![architecture diagram](/shardcake/arch.png)
+![architecture diagram](/shard/arch.png)
 
 ## Storage
 
@@ -27,9 +27,9 @@ Assignments are stored per `Role`, since each role has its own independent set o
 
 For testing, you can use the `Storage.memory` layer that keeps data in memory.
 
-Shardcake provides an implementation of `Storage` using Redis with the Redis4cats library (there's also an alternative using Redisson). To use it, add the following dependency:
+Shard provides an implementation of `Storage` using Redis with the Redis4cats library (there's also an alternative using Redisson). To use it, add the following dependency:
 ```scala
-libraryDependencies += "com.devsisters" %% "shardcake-storage-redis" % "3.0.0-RC1"
+libraryDependencies += "com.github.ghostdogpr" %% "shard-storage-redis" % "3.0.0-RC1"
 ```
 You can then simply use the `StorageRedis.live` layer.
 
@@ -41,7 +41,7 @@ It also requires a `Redis` object, which is an alias to `RedisCommands[Task, Str
 Here's an example how to build it:
 
 ```scala
-import com.devsisters.shardcake.StorageRedis.Redis
+import shard.StorageRedis.Redis
 import dev.profunktor.redis4cats.Redis
 import dev.profunktor.redis4cats.connection.RedisClient
 import dev.profunktor.redis4cats.data.RedisCodec
@@ -94,9 +94,9 @@ trait Pods {
 ```
 For testing, you can use the `Pods.noop` layer that does nothing.
 
-Shardcake provides an implementation of `Pods` using the gRPC protocol. To use it, add the following dependency:
+Shard provides an implementation of `Pods` using the gRPC protocol. To use it, add the following dependency:
 ```scala
-libraryDependencies += "com.devsisters" %% "shardcake-protocol-grpc" % "3.0.0-RC1"
+libraryDependencies += "com.github.ghostdogpr" %% "shard-protocol-grpc" % "3.0.0-RC1"
 ```
 You can then simply use the `GrpcPods.live` layer.
 
@@ -121,7 +121,7 @@ trait MessageCodec[Msg] {
 The expected pattern is to import a backend's package-level given right where the type is declared:
 
 ```scala
-import com.devsisters.shardcake.kryo.given
+import shard.kryo.given
 
 object Guild extends EntityType[GuildMessage]("guild")
 ```
@@ -130,10 +130,10 @@ Different entity / topic types can use different backends side by side — just 
 
 ### Java serialization (tests only)
 
-Bundled with `shardcake-entities`, intended for tests and examples. Not recommended for production.
+Bundled with `shard-entities`, intended for tests and examples. Not recommended for production.
 
 ```scala
-import com.devsisters.shardcake.javaSerialization.given
+import shard.javaSerialization.given
 
 object Guild extends EntityType[GuildMessage]("guild")
 ```
@@ -144,22 +144,22 @@ Uses the [Kryo](https://github.com/EsotericSoftware/kryo) binary serialization l
 Reflective — no derivation, no compile-time constraints on the message type. The given covers every type uniformly.
 
 ```scala
-libraryDependencies += "com.devsisters" %% "shardcake-serialization-kryo" % "3.0.0-RC1"
+libraryDependencies += "com.github.ghostdogpr" %% "shard-serialization-kryo" % "3.0.0-RC1"
 ```
 
 ```scala
-import com.devsisters.shardcake.EntityType
-import com.devsisters.shardcake.kryo.given
+import shard.EntityType
+import shard.kryo.given
 
 object Guild extends EntityType[GuildMessage]("guild")
 ```
 
-For a custom Kryo configuration (extra registered serializers, references off, etc.), define your own given instead of importing `com.devsisters.shardcake.kryo.given`.
+For a custom Kryo configuration (extra registered serializers, references off, etc.), define your own given instead of importing `shard.kryo.given`.
 
 ```scala
-import com.devsisters.shardcake.EntityType
-import com.devsisters.shardcake.kryo.KryoMessageCodec
-import com.devsisters.shardcake.interfaces.MessageCodec
+import shard.EntityType
+import shard.kryo.KryoMessageCodec
+import shard.interfaces.MessageCodec
 import com.typesafe.config.ConfigFactory
 
 given [Msg]: MessageCodec[Msg] = KryoMessageCodec.fromConfig[Msg](ConfigFactory.load("my-kryo.conf"))
@@ -173,11 +173,11 @@ Uses [Proteus](https://github.com/ghostdogpr/proteus) (macro-derived, protobuf-c
 The codec is derived per message type at compile time. Message types must be a case class, sealed trait, or enum at the root — bare primitives (`Int`, `String`, …) need to be wrapped in a case class.
 
 ```scala
-libraryDependencies += "com.devsisters" %% "shardcake-serialization-proteus" % "3.0.0-RC1"
+libraryDependencies += "com.github.ghostdogpr" %% "shard-serialization-proteus" % "3.0.0-RC1"
 ```
 
 ```scala
-import com.devsisters.shardcake.proteus.given
+import shard.proteus.given
 
 object Guild extends EntityType[GuildMessage]("guild")
 ```
@@ -204,12 +204,12 @@ trait PodsHealth {
 ```
 For testing, you can use the `PodsHealth.noop` layer that always returns true, or the `PodsHealth.local` layer that uses `ping` from the [Messaging Protocol](#messaging-protocol) to check if a pod is alive.
 
-Shardcake provides an implementation of `PodsHealth` using the [Kubernetes](https://kubernetes.io) API. To use it, add the following dependency:
+Shard provides an implementation of `PodsHealth` using the [Kubernetes](https://kubernetes.io) API. To use it, add the following dependency:
 ```scala
-libraryDependencies += "com.devsisters" %% "shardcake-health-k8s" % "3.0.0-RC1"
+libraryDependencies += "com.github.ghostdogpr" %% "shard-health-k8s" % "3.0.0-RC1"
 ```
 You can then simply use the `K8sPodsHealth.live` layer. This is requiring a `Pods` layer that comes from [zio-k8s](https://coralogix.github.io/zio-k8s/docs/overview/overview_gettingstarted).
 
 ::: tip Examples
-Check the [examples](https://github.com/devsisters/shardcake/tree/series/3.x/examples/src/main/scala/example/complex) folder that contains a full example using Redis, gRPC and the Kryo message codec.
+Check the [examples](https://github.com/ghostdogpr/shard/tree/series/3.x/examples/src/main/scala/example/complex) folder that contains a full example using Redis, gRPC and the Kryo message codec.
 :::

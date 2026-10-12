@@ -1,7 +1,7 @@
 package example
 
-import com.devsisters.shardcake.{ Config, ManagerConfig, Role, Server, ShardManager, ShardManagerClient }
-import com.devsisters.shardcake.interfaces.{ Pods, PodsHealth, Storage }
+import shard.{ Config, ManagerConfig, Role, Server, ShardManager, ShardManagerClient }
+import shard.interfaces.{ Pods, PodsHealth, Storage }
 import sttp.client4.Backend
 import sttp.client4.httpclient.zio._
 import zio.Clock.ClockLive

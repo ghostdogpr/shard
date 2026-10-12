@@ -1,7 +1,7 @@
 package example
 
-import com.devsisters.shardcake._
-import com.devsisters.shardcake.interfaces.{ Pods, Storage }
+import shard._
+import shard.interfaces.{ Pods, Storage }
 import io.grpc.{ Metadata, Status }
 import zio.test._
 import zio.{ Config => _, _ }

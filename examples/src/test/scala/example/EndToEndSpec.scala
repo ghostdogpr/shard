@@ -1,8 +1,8 @@
 package example
 
-import com.devsisters.shardcake.StorageRedis.Redis
-import com.devsisters.shardcake._
-import com.devsisters.shardcake.interfaces.PodsHealth
+import shard.StorageRedis.Redis
+import shard._
+import shard.interfaces.PodsHealth
 import com.dimafeng.testcontainers.GenericContainer
 import dev.profunktor.redis4cats.Redis
 import dev.profunktor.redis4cats.connection.RedisClient
