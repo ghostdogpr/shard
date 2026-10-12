@@ -21,6 +21,16 @@ private[shard] trait EntityManager[-Req] {
 private[shard] object EntityManager {
   private type Signal = Promise[Nothing, Unit]
 
+  /**
+   * A running entity: its queue, the fiber running its behavior and, once termination has started, the signal the
+   * entity completes when it is done.
+   */
+  private final case class Entry[Req](
+    queue: Queue[Req],
+    fiber: Fiber.Runtime[Throwable, Unit],
+    termination: Option[Signal]
+  )
+
   def make[R, Req: Tag](
     recipientType: RecipientType[Req],
     behavior: (String, Queue[Req]) => RIO[R, Nothing],
@@ -31,7 +41,7 @@ private[shard] object EntityManager {
     loadEntity: Req => Boolean
   ): URIO[R, EntityManager[Req]] =
     for {
-      entities               <- Ref.Synchronized.make[Map[String, Either[Queue[Req], Signal]]](Map())
+      entities               <- Ref.Synchronized.make[Map[String, Entry[Req]]](Map())
       entitiesLastReceivedAt <- Ref.make[Map[String, EpochMillis]](Map())
       env                    <- ZIO.environment[R]
     } yield new EntityManagerLive[Req](
@@ -53,7 +63,7 @@ private[shard] object EntityManager {
     recipientType: RecipientType[Req],
     behavior: (String, Queue[Req]) => Task[Nothing],
     terminateMessage: Signal => Option[Req],
-    entities: Ref.Synchronized[Map[String, Either[Queue[Req], Signal]]],
+    entities: Ref.Synchronized[Map[String, Entry[Req]]],
     entitiesLastReceivedAt: Ref[Map[String, EpochMillis]],
     sharding: Sharding,
     config: Config,
@@ -80,25 +90,48 @@ private[shard] object EntityManager {
     }
 
     def terminateEntity(entityId: String): UIO[Unit] =
-      entities.updateZIO(map =>
-        map.get(entityId) match {
-          case Some(Left(queue)) =>
-            Promise
-              .make[Nothing, Unit]
-              .flatMap { p =>
-                terminateMessage(p) match {
-                  case Some(msg) =>
-                    // if a queue is found, offer the termination message, and set the queue to None so that no new message is enqueued
-                    queue.offer(msg).exit.as(map.updated(entityId, Right(p)))
-                  case None      =>
-                    queue.shutdown.as(map - entityId)
+      entities
+        .modifyZIO(map =>
+          map.get(entityId) match {
+            case Some(entry @ Entry(queue, fiber, None)) =>
+              Promise
+                .make[Nothing, Unit]
+                .flatMap { p =>
+                  terminateMessage(p) match {
+                    case Some(msg) =>
+                      // if a queue is found, offer the termination message, and mark the entity as terminating so that no new message is enqueued
+                      queue
+                        .offer(msg)
+                        .exit
+                        .as((List(p -> fiber), map.updated(entityId, entry.copy(termination = Some(p)))))
+                    case None      =>
+                      queue.shutdown.as((Nil, map - entityId))
+                  }
                 }
-              }
-          case _                 =>
-            // if no queue is found, do nothing
-            ZIO.succeed(map)
-        }
-      )
+            case _                                       =>
+              // if no running entity is found, do nothing
+              ZIO.succeed((Nil, map))
+          }
+        )
+        // interrupt the entity if it doesn't terminate in time, without making the caller wait
+        .flatMap(terminating => awaitTermination(terminating).forkDaemon.when(terminating.nonEmpty).unit)
+
+    /**
+     * Waits for entities to complete their termination signal, and interrupts the ones that didn't after
+     * `entityTerminationTimeout`, so that an entity never keeps running once its shard has moved.
+     */
+    private def awaitTermination(terminating: List[(Signal, Fiber.Runtime[Throwable, Unit])]): UIO[Unit] =
+      // interruptible so that the timeout works even when termination starts from an uninterruptible region (e.g. a finalizer)
+      ZIO.foreachDiscard(terminating)(_._1.await).interruptible.timeout(config.entityTerminationTimeout).flatMap {
+        case Some(_) => ZIO.unit
+        case None    =>
+          ZIO.filter(terminating) { case (p, fiber) => (p.isDone <*> fiber.poll).map(_ == (false, None)) }.flatMap {
+            stuck =>
+              ZIO.logWarning(
+                s"${stuck.size} entities of type ${recipientType.name} did not terminate within ${config.entityTerminationTimeout.render}, interrupting them"
+              ) *> Fiber.interruptAll(stuck.map(_._2))
+          }
+      }
 
     def send(
       entityId: String,
@@ -118,11 +151,11 @@ private[shard] object EntityManager {
         // find the queue for that entity, or create it if needed
         map <- entities.get
         _   <- map.get(entityId) match {
-                 case Some(Left(queue))        =>
+                 case Some(Entry(queue, _, None)) =>
                    offerToQueue(entityId, queue, req, replyId, pendingReply)
-                 case None if !loadEntity(req) =>
+                 case None if !loadEntity(req)    =>
                    pendingReply.fold[UIO[Unit]](ZIO.unit)(_.end)
-                 case _                        =>
+                 case _                           =>
                    getOrCreateQueue(entityId).flatMap {
                      case Right(_)    =>
                        // the queue is shutting down, try again a little later
@@ -152,13 +185,13 @@ private[shard] object EntityManager {
     private def getOrCreateQueue(entityId: String): IO[EntityNotManagedByThisPod, Either[Queue[Req], Signal]] =
       entities.modifyZIO(map =>
         map.get(entityId) match {
-          case Some(queue @ Left(_)) =>
+          case Some(Entry(queue, _, None)) =>
             // the queue already exists, return it
-            ZIO.succeed((queue, map))
-          case Some(p @ Right(_))    =>
+            ZIO.succeed((Left(queue), map))
+          case Some(Entry(_, _, Some(p)))  =>
             // the queue is shutting down, stash and retry
-            ZIO.succeed((p, map))
-          case None                  =>
+            ZIO.succeed((Right(p), map))
+          case None                        =>
             sharding.isShuttingDown.flatMap {
               case true  =>
                 // don't start any fiber while sharding is shutting down
@@ -166,7 +199,6 @@ private[shard] object EntityManager {
               case false =>
                 // queue doesn't exist, create a new one
                 Queue.unbounded[Req].flatMap { queue =>
-                  val leftQueue = Left(queue)
                   (for {
                     // start the expiration fiber
                     expirationFiber <- startExpirationFiber(entityId)
@@ -174,16 +206,33 @@ private[shard] object EntityManager {
                     _               <- behavior(entityId, queue)
                                          .ensuring(
                                            // shutdown the queue when the fiber ends
-                                           entities.update(_ - entityId) *>
+                                           removeEntry(entityId) *>
                                              gauge.decrement *>
-                                             entitiesLastReceivedAt.update(_ - entityId) *>
                                              queue.shutdown *>
                                              expirationFiber.interrupt
                                          )
-                  } yield ()).forkDaemon.as((leftQueue, map.updated(entityId, leftQueue)))
+                  } yield ()).interruptible.forkDaemon // must stay interruptible to be stopped after entityTerminationTimeout
+                    .map(fiber => (Left(queue), map.updated(entityId, Entry(queue, fiber, None))))
                 }
             }
         }
+      )
+
+    /**
+     * Removes the entry of the current fiber's entity, unless the entity was already restarted by a newer fiber
+     * (e.g. its shard came back while this one was terminating).
+     */
+    private def removeEntry(entityId: String): UIO[Unit] =
+      ZIO.fiberIdWith(fiberId =>
+        entities
+          .modify(map =>
+            map.get(entityId) match {
+              case Some(entry) if entry.fiber.id != fiberId => (false, map)
+              case _                                        => (true, map - entityId)
+            }
+          )
+          .flatMap(ZIO.when(_)(entitiesLastReceivedAt.update(_ - entityId)))
+          .unit
       )
 
     def terminateEntitiesOnShards(shards: Set[ShardId]): UIO[Unit] =
@@ -196,25 +245,28 @@ private[shard] object EntityManager {
     def terminateAllEntities: UIO[Unit] =
       entities.getAndSet(Map()).flatMap(terminateEntities)
 
-    private def terminateEntities(entitiesToTerminate: Map[String, Either[Queue[Req], Signal]]): UIO[Unit] =
+    private def terminateEntities(entitiesToTerminate: Map[String, Entry[Req]]): UIO[Unit] =
       for {
         // send termination message to all entities
-        promises <- ZIO.foreach(entitiesToTerminate.toList) { case (_, queue) =>
-                      Promise
-                        .make[Nothing, Unit]
-                        .flatMap(p =>
-                          queue match {
-                            case Left(queue) =>
-                              (terminateMessage(p) match {
-                                case Some(terminate) => queue.offer(terminate).catchAllCause(_ => p.succeed(()))
-                                case None            => queue.shutdown *> p.succeed(())
-                              }).as(p)
-                            case Right(p)    => ZIO.succeed(p)
-                          }
-                        )
-                    }
-        // wait until they are all terminated
-        _        <- ZIO.foreachDiscard(promises)(_.await).timeout(config.entityTerminationTimeout)
+        terminating <- ZIO.foreach(entitiesToTerminate.values.toList) { entry =>
+                         entry.termination match {
+                           case Some(p) => ZIO.some(p -> entry.fiber)
+                           case None    =>
+                             Promise.make[Nothing, Unit].flatMap { p =>
+                               terminateMessage(p) match {
+                                 case Some(terminate) =>
+                                   entry.queue
+                                     .offer(terminate)
+                                     .catchAllCause(_ => p.succeed(()))
+                                     .as(Some(p -> entry.fiber))
+                                 case None            =>
+                                   entry.queue.shutdown.as(None)
+                               }
+                             }
+                         }
+                       }
+        // wait until they are all terminated, interrupting the ones that take too long
+        _           <- awaitTermination(terminating.flatten)
       } yield ()
   }
 }

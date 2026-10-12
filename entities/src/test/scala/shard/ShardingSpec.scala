@@ -2,6 +2,7 @@ package shard
 
 import shard.CounterActor.CounterMessage._
 import shard.CounterActor._
+import shard.StubbornActor.{ Stubborn, StubbornMessage }
 import shard.interfaces.Storage
 import shard.javaSerialization.given
 import zio.stream.{ SubscriptionRef, ZStream }
@@ -105,6 +106,45 @@ object ShardingSpec extends ZIOSpecDefault {
           } yield assertTrue(c0 == 1, c1 == 2, c2 == 0)
         }
       },
+      test("Entity ignoring its termination message is interrupted after the timeout") {
+        ZIO.scoped {
+          for {
+            running  <- Ref.make(0)
+            _        <- Sharding.registerEntity(
+                          Stubborn,
+                          StubbornActor.behavior(running),
+                          p => Some(StubbornMessage.Terminate(p)),
+                          entityMaxIdleTime = Some(1.second)
+                        )
+            _        <- Sharding.registerScoped
+            stubborn <- Sharding.messenger(Stubborn)
+            _        <- stubborn.send("s1")(StubbornMessage.Ping.apply)
+            before   <- running.get
+            // 1s of idle time, then 3s of termination timeout (Config.default)
+            _        <- Clock.sleep(7.seconds)
+            after    <- running.get
+          } yield assertTrue(before == 1, after == 0)
+        }
+      },
+      test("Entity terminated from a finalizer is still interrupted after the timeout") {
+        ZIO.scoped {
+          for {
+            running  <- Ref.make(0)
+            _        <- Sharding.registerEntity(
+                          Stubborn,
+                          StubbornActor.behavior(running),
+                          p => Some(StubbornMessage.Terminate(p))
+                        )
+            _        <- Sharding.registerScoped
+            stubborn <- Sharding.messenger(Stubborn)
+            _        <- stubborn.send("s2")(StubbornMessage.Ping.apply)
+            _        <- ZIO.unit.ensuring(Sharding.terminateLocalEntity(Stubborn, "s2"))
+            // 3s of termination timeout (Config.default)
+            _        <- Clock.sleep(5.seconds)
+            after    <- running.get
+          } yield assertTrue(after == 0)
+        }
+      },
       test("Cluster singleton") {
         ZIO.scoped {
           for {
@@ -181,4 +221,24 @@ object CounterActor {
               Sharding.terminateLocalEntity(Counter, entityId).ensuring(replier.reply(()))
           }.forever
         )
+}
+
+object StubbornActor {
+  sealed trait StubbornMessage
+
+  object StubbornMessage {
+    case class Ping(replier: Replier[Unit])         extends StubbornMessage
+    case class Terminate(p: Promise[Nothing, Unit]) extends StubbornMessage
+  }
+
+  object Stubborn extends EntityType[StubbornMessage]("stubborn")
+
+  // never completes its termination signal, so it only stops when interrupted
+  def behavior(running: Ref[Int])(entityId: String, messages: Dequeue[StubbornMessage]): RIO[Sharding, Nothing] =
+    ZIO.acquireReleaseWith(running.update(_ + 1))(_ => running.update(_ - 1)) { _ =>
+      messages.take.flatMap {
+        case StubbornMessage.Ping(replier) => replier.reply(())
+        case StubbornMessage.Terminate(_)  => ZIO.unit
+      }.forever
+    }
 }
