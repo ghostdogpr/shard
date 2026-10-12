@@ -97,41 +97,38 @@ private[shard] object EntityManager {
               Promise
                 .make[Nothing, Unit]
                 .flatMap { p =>
-                  val terminating = Some((entityId, p, fiber))
                   terminateMessage(p) match {
                     case Some(msg) =>
                       // if a queue is found, offer the termination message, and mark the entity as terminating so that no new message is enqueued
-                      queue.offer(msg).exit.as((terminating, map.updated(entityId, entry.copy(termination = Some(p)))))
+                      queue
+                        .offer(msg)
+                        .exit
+                        .as((List(p -> fiber), map.updated(entityId, entry.copy(termination = Some(p)))))
                     case None      =>
-                      queue.shutdown.as((terminating, map - entityId))
+                      queue.shutdown.as((Nil, map - entityId))
                   }
                 }
             case _                                       =>
               // if no running entity is found, do nothing
-              ZIO.succeed((None, map))
+              ZIO.succeed((Nil, map))
           }
         )
-        .flatMap {
-          // interrupt the entity if it doesn't terminate in time, without making the caller wait
-          case Some(terminating) => awaitTermination(List(terminating)).forkDaemon.unit
-          case None              => ZIO.unit
-        }
+        // interrupt the entity if it doesn't terminate in time, without making the caller wait
+        .flatMap(terminating => awaitTermination(terminating).forkDaemon.when(terminating.nonEmpty).unit)
 
     /**
-     * Waits for each entity to complete its termination signal or to stop, and interrupts the ones that are still
-     * running after `entityTerminationTimeout`, so that an entity never keeps running once its shard has moved.
+     * Waits for entities to complete their termination signal, and interrupts the ones that didn't after
+     * `entityTerminationTimeout`, so that an entity never keeps running once its shard has moved.
      */
-    private def awaitTermination(terminating: List[(String, Signal, Fiber.Runtime[Throwable, Unit])]): UIO[Unit] =
-      ZIO.foreachParDiscard(terminating) { case (entityId, p, fiber) =>
-        p.await
-          .race(fiber.await.unit)
-          .timeout(config.entityTerminationTimeout)
-          .flatMap {
-            case Some(_) => ZIO.unit
-            case None    =>
+    private def awaitTermination(terminating: List[(Signal, Fiber.Runtime[Throwable, Unit])]): UIO[Unit] =
+      ZIO.foreachDiscard(terminating)(_._1.await).timeout(config.entityTerminationTimeout).flatMap {
+        case Some(_) => ZIO.unit
+        case None    =>
+          ZIO.filter(terminating) { case (p, fiber) => (p.isDone <*> fiber.poll).map(_ == (false, None)) }.flatMap {
+            stuck =>
               ZIO.logWarning(
-                s"Entity $entityId of type ${recipientType.name} did not terminate within ${config.entityTerminationTimeout.render}, interrupting it"
-              ) *> fiber.interrupt.unit
+                s"${stuck.size} entities of type ${recipientType.name} did not terminate within ${config.entityTerminationTimeout.render}, interrupting them"
+              ) *> Fiber.interruptAll(stuck.map(_._2))
           }
       }
 
@@ -250,25 +247,25 @@ private[shard] object EntityManager {
     private def terminateEntities(entitiesToTerminate: Map[String, Entry[Req]]): UIO[Unit] =
       for {
         // send termination message to all entities
-        terminating <- ZIO.foreach(entitiesToTerminate.toList) { case (entityId, entry) =>
+        terminating <- ZIO.foreach(entitiesToTerminate.values.toList) { entry =>
                          entry.termination match {
-                           case Some(p) => ZIO.succeed((entityId, p, entry.fiber))
+                           case Some(p) => ZIO.some(p -> entry.fiber)
                            case None    =>
-                             Promise
-                               .make[Nothing, Unit]
-                               .tap(p =>
-                                 terminateMessage(p) match {
-                                   case Some(terminate) =>
-                                     entry.queue.offer(terminate).catchAllCause(_ => p.succeed(()))
-                                   // without a termination message, shutting down the queue stops the behavior
-                                   case None            => entry.queue.shutdown
-                                 }
-                               )
-                               .map(p => (entityId, p, entry.fiber))
+                             Promise.make[Nothing, Unit].flatMap { p =>
+                               terminateMessage(p) match {
+                                 case Some(terminate) =>
+                                   entry.queue
+                                     .offer(terminate)
+                                     .catchAllCause(_ => p.succeed(()))
+                                     .as(Some(p -> entry.fiber))
+                                 case None            =>
+                                   entry.queue.shutdown.as(None)
+                               }
+                             }
                          }
                        }
         // wait until they are all terminated, interrupting the ones that take too long
-        _           <- awaitTermination(terminating)
+        _           <- awaitTermination(terminating.flatten)
       } yield ()
   }
 }
