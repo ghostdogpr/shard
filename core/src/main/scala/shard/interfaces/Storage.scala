@@ -1,7 +1,7 @@
 package shard.interfaces
 
 import shard.{ Pod, PodAddress, Role, ShardId }
-import zio.{ Ref, Task, ZLayer }
+import zio.{ Ref, Task, UIO, ZIO, ZLayer }
 import zio.stream.{ SubscriptionRef, ZStream }
 
 /**
@@ -38,20 +38,30 @@ trait Storage {
 object Storage {
 
   /**
-   * A layer that stores data in-memory.
+   * A layer that stores data in-memory, with separate assignments for each role.
    * This is useful for testing with a single pod only.
    */
   val memory: ZLayer[Any, Nothing, Storage] =
     ZLayer {
       for {
-        assignmentsRef <- SubscriptionRef.make(Map.empty[ShardId, Option[PodAddress]])
-        podsRef        <- Ref.make(Map.empty[PodAddress, Pod])
+        assignmentsRefs <- Ref.Synchronized.make(Map.empty[Role, SubscriptionRef[Map[ShardId, Option[PodAddress]]]])
+        podsRef         <- Ref.make(Map.empty[PodAddress, Pod])
       } yield new Storage {
-        def getAssignments(role: Role): Task[Map[ShardId, Option[PodAddress]]]                       = assignmentsRef.get
+        private def assignmentsRef(role: Role): UIO[SubscriptionRef[Map[ShardId, Option[PodAddress]]]] =
+          assignmentsRefs.modifyZIO(refs =>
+            refs.get(role) match {
+              case Some(ref) => ZIO.succeed((ref, refs))
+              case None      =>
+                SubscriptionRef.make(Map.empty[ShardId, Option[PodAddress]]).map(ref => (ref, refs.updated(role, ref)))
+            }
+          )
+
+        def getAssignments(role: Role): Task[Map[ShardId, Option[PodAddress]]]                       =
+          assignmentsRef(role).flatMap(_.get)
         def saveAssignments(role: Role, assignments: Map[ShardId, Option[PodAddress]]): Task[Unit]   =
-          assignmentsRef.set(assignments)
+          assignmentsRef(role).flatMap(_.set(assignments))
         def assignmentsStream(role: Role): ZStream[Any, Throwable, Map[ShardId, Option[PodAddress]]] =
-          assignmentsRef.changes
+          ZStream.unwrap(assignmentsRef(role).map(_.changes))
         def getPods: Task[Map[PodAddress, Pod]]                                                      = podsRef.get
         def savePods(pods: Map[PodAddress, Pod]): Task[Unit]                                         = podsRef.set(pods)
       }
