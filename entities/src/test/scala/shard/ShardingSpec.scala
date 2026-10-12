@@ -126,6 +126,25 @@ object ShardingSpec extends ZIOSpecDefault {
           } yield assertTrue(before == 1, after == 0)
         }
       },
+      test("Entity terminated from a finalizer is still interrupted after the timeout") {
+        ZIO.scoped {
+          for {
+            running  <- Ref.make(0)
+            _        <- Sharding.registerEntity(
+                          Stubborn,
+                          StubbornActor.behavior(running),
+                          p => Some(StubbornMessage.Terminate(p))
+                        )
+            _        <- Sharding.registerScoped
+            stubborn <- Sharding.messenger(Stubborn)
+            _        <- stubborn.send("s2")(StubbornMessage.Ping.apply)
+            _        <- ZIO.unit.ensuring(Sharding.terminateLocalEntity(Stubborn, "s2"))
+            // 3s of termination timeout (Config.default)
+            _        <- Clock.sleep(5.seconds)
+            after    <- running.get
+          } yield assertTrue(after == 0)
+        }
+      },
       test("Cluster singleton") {
         ZIO.scoped {
           for {

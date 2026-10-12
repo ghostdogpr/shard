@@ -121,7 +121,8 @@ private[shard] object EntityManager {
      * `entityTerminationTimeout`, so that an entity never keeps running once its shard has moved.
      */
     private def awaitTermination(terminating: List[(Signal, Fiber.Runtime[Throwable, Unit])]): UIO[Unit] =
-      ZIO.foreachDiscard(terminating)(_._1.await).timeout(config.entityTerminationTimeout).flatMap {
+      // interruptible so that the timeout works even when termination starts from an uninterruptible region (e.g. a finalizer)
+      ZIO.foreachDiscard(terminating)(_._1.await).interruptible.timeout(config.entityTerminationTimeout).flatMap {
         case Some(_) => ZIO.unit
         case None    =>
           ZIO.filter(terminating) { case (p, fiber) => (p.isDone <*> fiber.poll).map(_ == (false, None)) }.flatMap {
