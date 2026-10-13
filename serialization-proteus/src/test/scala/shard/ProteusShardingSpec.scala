@@ -19,7 +19,7 @@ object ProteusShardingSpec extends ZIOSpecDefault {
   import ProteusShardingSpec.CounterActor._
   import ProteusShardingSpec.CounterActor.CounterMessage._
 
-  def spec: Spec[TestEnvironment with Scope, Any] =
+  def spec: Spec[TestEnvironment & Scope, Any] =
     suite("ProteusShardingSpec")(
       suite("local-pod shortcut")(tests*).provideShared(
         LocalSharding.live,

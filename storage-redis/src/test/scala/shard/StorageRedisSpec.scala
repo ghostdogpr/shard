@@ -51,7 +51,7 @@ object StorageRedisSpec extends ZIOSpecDefault {
 
   private val role = Role.default
 
-  def spec: Spec[TestEnvironment with Scope, Any] =
+  def spec: Spec[TestEnvironment & Scope, Any] =
     suite("StorageRedisSpec")(
       test("save and get pods") {
         val expected =
