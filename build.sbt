@@ -38,13 +38,12 @@ inThisBuild(
   )
 )
 
-name := "shard"
-addCommandAlias("fmt", "all scalafmtSbt scalafmt test:scalafmt")
-addCommandAlias("check", "all scalafmtSbtCheck scalafmtCheck test:scalafmtCheck grpcProtocol/checkProto")
+addCommandAlias("fmt", "all scalafmtSbt scalafmt Test/scalafmt")
+addCommandAlias("check", "all scalafmtSbtCheck scalafmtCheck Test/scalafmtCheck grpcProtocol/checkProto")
 
 lazy val root = project
   .in(file("."))
-  .settings(publish / skip := true)
+  .settings(name := "shard", publish / skip := true)
   .aggregate(
     core,
     manager,
@@ -177,21 +176,22 @@ lazy val grpcProtocol = project
       "io.grpc"                % "grpc-netty"       % grpcNettyVersion,
       "io.grpc"                % "grpc-services"    % grpcNettyVersion
     ),
-    generateProto := {
+    generateProto := Def.uncached {
       val cp     = (Compile / fullClasspath).value
+      val conv   = fileConverter.value
       val log    = streams.value.log
       val output = (Compile / sourceDirectory).value / "protobuf"
       runner.value
         .run(
           "shard.protocol.GenerateProto",
-          cp.files,
+          cp.map(a => conv.toPath(a.data)),
           Seq(output.getAbsolutePath),
           log
         )
         .get
       log.info(s"Regenerated $output/sharding.proto")
     },
-    checkProto    := {
+    checkProto    := Def.uncached {
       val log   = streams.value.log
       val proto = (Compile / sourceDirectory).value / "protobuf" / "sharding.proto"
       val _     = generateProto.value
