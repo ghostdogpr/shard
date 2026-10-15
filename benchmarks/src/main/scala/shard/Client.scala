@@ -13,7 +13,7 @@ object Client {
       .scoped[Sharding](
         for {
           ping <- Sharding.messenger(PingPongEntity)
-          _    <- ZIO.foreachParDiscard(1 to count)(_ => ping.send("ping")(Ping("ping", _))).withParallelism(parallelism)
+          _    <- ZIO.foreachParDiscard(1 to count)(_ => ping.send("ping")(Ping("ping"))).withParallelism(parallelism)
         } yield ()
       )
       .provide(config, Server.sharding)
@@ -23,13 +23,10 @@ object Client {
       .scoped[Sharding](
         for {
           ping <- Sharding.messenger(PingPongEntity)
-          _    <- ZIO
-                    .foreachParDiscard(1 to streams) { _ =>
-                      ping
-                        .sendAndReceiveStream("ping")(StreamPing("ping", messagesPerStream, _))
-                        .flatMap(_.runDrain)
-                    }
-                    .withParallelism(parallelism)
+          _    <-
+            ZIO
+              .foreachParDiscard(1 to streams)(_ => ping.stream("ping")(StreamPing("ping", messagesPerStream)).runDrain)
+              .withParallelism(parallelism)
         } yield ()
       )
       .provide(config, Server.sharding)

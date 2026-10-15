@@ -2,6 +2,7 @@ package example
 
 import shard.StorageRedis.Redis
 import shard._
+import shard.errors.SendTimeout
 import shard.interfaces.PodsHealth
 import com.dimafeng.testcontainers.GenericContainer
 import dev.profunktor.redis4cats.Redis
@@ -10,17 +11,14 @@ import dev.profunktor.redis4cats.data.RedisCodec
 import dev.profunktor.redis4cats.effect.Log
 import dev.profunktor.redis4cats.pubsub.PubSub
 import example.simple.GuildBehavior
-import example.simple.GuildBehavior.Guild
+import example.simple.GuildBehavior.{ Guild, GuildFull }
 import example.simple.GuildBehavior.GuildMessage.{ Join, Stream, Timeout }
 import sttp.client4.UriContext
 import zio.{ Config => _, _ }
 import zio.Clock.ClockLive
 import zio.interop.catz._
-import zio.test.Assertion._
 import zio.test.TestAspect.{ sequential, withLiveClock }
 import zio.test._
-
-import scala.util.Try
 
 object EndToEndSpec extends ZIOSpecDefault {
 
@@ -76,22 +74,23 @@ object EndToEndSpec extends ZIOSpecDefault {
       test("Send message to entities") {
         ZIO.scoped {
           for {
-            _       <- Sharding.registerEntity(Guild, GuildBehavior.behavior)
+            _       <- Sharding.registerEntity(Guild)(GuildBehavior.behavior)
             _       <- Sharding.registerScoped
             guild   <- Sharding.messenger(Guild)
-            _       <- guild.send("guild1")(Join("user1", _))
-            timeout <- guild.send("guild1")(Timeout(_)).exit
-            _       <- guild.send("guild1")(Join("user2", _))
-            _       <- guild.send("guild1")(Join("user3", _))
-            _       <- guild.send("guild1")(Join("user4", _))
-            members <- guild.send[Try[Set[String]]]("guild1")(Join("user5", _))
-            failure <- guild.send[Try[Set[String]]]("guild1")(Join("user6", _))
-            stream  <- guild.sendAndReceiveStream[String]("guild1")(Stream(_))
-            res     <- stream.runCollect
-          } yield assert(members)(isSuccess(hasSize(equalTo(5)))) &&
-            assertTrue(failure.isFailure) &&
-            assertTrue(timeout.toTry.isFailure) &&
-            assert(res)(hasSize(equalTo(5)))
+            _       <- guild.send("guild1")(Join("user1"))
+            timeout <- guild.send("guild1")(Timeout()).flip
+            _       <- guild.send("guild1")(Join("user2"))
+            _       <- guild.send("guild1")(Join("user3"))
+            _       <- guild.send("guild1")(Join("user4"))
+            members <- guild.send("guild1")(Join("user5"))
+            failure <- guild.send("guild1")(Join("user6")).flip
+            res     <- guild.stream("guild1")(Stream()).runCollect
+          } yield assertTrue(
+            members.size == 5,
+            failure == GuildFull(5),
+            timeout == SendTimeout(Guild.name, "guild1"),
+            res.size == 5
+          )
         }
       }
     ).provideShared(

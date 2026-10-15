@@ -78,20 +78,17 @@ trait Pods {
   def unassignShards(pod: PodAddress, shards: Set[ShardId]): Task[Unit]
   def ping(pod: PodAddress): Task[Unit]
 
-  def sendMessage(pod: PodAddress, message: BinaryMessage): Task[Option[Array[Byte]]]
-  def sendStream(
-    pod: PodAddress,
-    entityId: String,
-    messages: ZStream[Any, Throwable, BinaryMessage]
-  ): Task[Option[Array[Byte]]]
-  def sendMessageAndReceiveStream(pod: PodAddress, message: BinaryMessage): ZStream[Any, Throwable, Array[Byte]]
+  def sendMessage(pod: PodAddress, message: BinaryMessage): Task[BinaryReply]
+  def sendStream(pod: PodAddress, messages: ZStream[Any, Throwable, BinaryMessage]): Task[BinaryReply]
   def sendStreamAndReceiveStream(
     pod: PodAddress,
-    entityId: String,
     messages: ZStream[Any, Throwable, BinaryMessage]
-  ): ZStream[Any, Throwable, Array[Byte]]
+  ): ZStream[Any, Throwable, BinaryReply]
 }
 ```
+A `BinaryReply` is the result of a message (success, typed failure, defect, interruption or rejection), or an element of a stream of replies.
+When the pod can't be reached, the transport should fail with `PodUnavailable` so that the message is retried.
+
 For testing, you can use the `Pods.noop` layer that does nothing.
 
 Shard provides an implementation of `Pods` using the gRPC protocol. To use it, add the following dependency:
@@ -104,17 +101,16 @@ On pods, you also need expose the gRPC API. This is done by adding the `GrpcShar
 
 ## Message Codec
 
-The `MessageCodec[Msg]` type class defines how a specific message type is encoded for transport between pods and how its replies are encoded and decoded.
+The `MessageCodec[Msg]` type class defines how a specific message type is encoded for transport between pods and how its replies and errors are encoded and decoded.
 
 ```scala
-trait MessageCodec[Msg] {
-  def encodeMessage(message: Msg): Array[Byte]
-  def decodeMessage(bytes: Array[Byte]): Msg
-  def replyEncoder(decoded: Msg): Any => Array[Byte]
-  def replyDecoder[Res](sample: Msg): Array[Byte] => Res
-  def streamReplyDecoder[Res](sample: Msg): Array[Byte] => Res
+trait MessageCodec[Msg[+_, +_]] {
+  def encodeMessage(message: Msg[Any, Any]): Array[Byte]
+  def decodeMessage(bytes: Array[Byte]): Msg[Any, Any]
+  def replyCodec(message: Msg[Any, Any]): ReplyCodec
 }
 ```
+`replyCodec` returns the codecs for the reply and error types of a given message.
 
 `RecipientType[Msg]` (the parent of `EntityType[Msg]` and `TopicType[Msg]`) requires a given `MessageCodec[Msg]` at the declaration site.
 
@@ -162,7 +158,7 @@ import shard.kryo.KryoMessageCodec
 import shard.interfaces.MessageCodec
 import com.typesafe.config.ConfigFactory
 
-given [Msg]: MessageCodec[Msg] = KryoMessageCodec.fromConfig[Msg](ConfigFactory.load("my-kryo.conf"))
+given [Msg[+_, +_]]: MessageCodec[Msg] = KryoMessageCodec.fromConfig[Msg](ConfigFactory.load("my-kryo.conf"))
 
 object Guild extends EntityType[GuildMessage]("guild")
 ```
@@ -170,7 +166,9 @@ object Guild extends EntityType[GuildMessage]("guild")
 ### Proteus
 
 Uses [Proteus](https://github.com/ghostdogpr/proteus) (macro-derived, protobuf-compatible wire format).
-The codec is derived per message type at compile time. Message types must be a case class, sealed trait, or enum at the root — bare primitives (`Int`, `String`, …) need to be wrapped in a case class.
+The codec is derived per message type at compile time, along with codecs for the reply and error types of each variant.
+Message types must be a sealed trait or an enum, whose variants extend it with fixed type arguments.
+Reply and error types must be a case class, sealed trait, enum, `Unit`, `Nothing` or have a `ProtobufCodec` in scope: other types (`Int`, `Set[String]`, …) need to be wrapped in a case class.
 
 ```scala
 libraryDependencies += "com.github.ghostdogpr" %% "shard-serialization-proteus" % "@VERSION@"

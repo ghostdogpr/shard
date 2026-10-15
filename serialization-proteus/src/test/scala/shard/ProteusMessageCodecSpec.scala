@@ -7,132 +7,108 @@ import zio.test._
 
 object ProteusMessageCodecSpec extends ZIOSpecDefault {
 
-  sealed trait Msg derives _root_.proteus.ProtobufCodec
-  object Msg {
-    final case class Plain(name: String, count: Int)                        extends Msg
-    final case class WithReplier(id: Int, replier: Replier[Reply])          extends Msg
-    final case class WithStreamReplier(replier: StreamReplier[StreamReply]) extends Msg
-    final case class FireAndForget(payload: String)                         extends Msg
+  final case class Reply(text: String, ok: Boolean)
+  final case class StreamReply(value: Int)
+  final case class Input(delta: Int)
+  final case class Page[A](items: List[A])
+
+  sealed trait Error
+  object Error {
+    final case class NotFound(id: Int) extends Error
+    final case class Invalid()         extends Error
   }
 
-  final case class Reply(text: String, ok: Boolean) derives _root_.proteus.ProtobufCodec
-  final case class StreamReply(value: Int) derives _root_.proteus.ProtobufCodec
-
-  sealed trait NestedMsg derives _root_.proteus.ProtobufCodec
-  object NestedMsg {
-    final case class ToProtocol(request: Protocol[Command, PEvent]) extends NestedMsg
-    final case class Plain(payload: String)                         extends NestedMsg
+  enum Msg[+E, +A] {
+    case Plain(name: String, count: Int) extends Msg[Nothing, Unit]
+    case WithReply(id: Int)              extends Msg[Error, Reply]
+    case WithStreamReply(from: Int)      extends Msg[Error.Invalid, Streamed[Error, StreamReply]]
+    case WithDuplex()                    extends Msg[Nothing, Duplex[Input, Nothing, StreamReply]]
+    case Generic(replies: List[Reply])   extends Msg[Nothing, Page[Reply]]
+    case Singleton                       extends Msg[Nothing, Reply]
   }
 
-  sealed trait Protocol[Command, PEvent]
-  object Protocol {
-    final case class Run[Command, PEvent](command: Command)                            extends Protocol[Command, PEvent]
-    final case class Prepare[Command, PEvent](transactionId: String, command: Command) extends Protocol[Command, PEvent]
-    final case class ReadyToPersist[Command, PEvent](
-      transactionId: String,
-      replier: Replier[PersistReadied[PEvent]]
-    ) extends Protocol[Command, PEvent]
-    final case class Commit[Command, PEvent](transactionId: String)                    extends Protocol[Command, PEvent]
+  private val codec = summon[MessageCodec[Msg]]
 
-    given _root_.proteus.ProtobufCodec[Protocol[ProteusMessageCodecSpec.Command, ProteusMessageCodecSpec.PEvent]] =
-      _root_.proteus.ProtobufCodec.derived
-  }
-
-  final case class Command(context: String, function: Function, replier: Replier[CommandReply])
-      derives _root_.proteus.ProtobufCodec
-
-  sealed trait Function derives _root_.proteus.ProtobufCodec
-  object Function {
-    final case class Add(amount: Int) extends Function
-    final case class Get()            extends Function
-  }
-
-  sealed trait CommandReply derives _root_.proteus.ProtobufCodec
-  object CommandReply {
-    final case class Added(total: Int) extends CommandReply
-    final case class Got(total: Int)   extends CommandReply
-  }
-
-  sealed trait PEvent derives _root_.proteus.ProtobufCodec
-  object PEvent {
-    final case class Changed(delta: Int) extends PEvent
-  }
-
-  final case class PersistReadied[PEvent](persistenceId: String, events: List[PEvent], fromSequenceNr: Long)
-
-  object PersistReadied {
-    given _root_.proteus.ProtobufCodec[PersistReadied[ProteusMessageCodecSpec.PEvent]] =
-      _root_.proteus.ProtobufCodec.derived
-  }
-
-  private val codec       = summon[MessageCodec[Msg]]
-  private val nestedCodec = summon[MessageCodec[NestedMsg]]
+  private def roundtrip(msg: Msg[Any, Any]): Msg[Any, Any] =
+    codec.decodeMessage(codec.encodeMessage(msg))
 
   def spec: Spec[TestEnvironment with Scope, Any] =
     suite("ProteusMessageCodecSpec")(
-      test("roundtrips a message with no Replier") {
-        val msg     = Msg.Plain("hello", 42)
-        val bytes   = codec.encodeMessage(msg)
-        val decoded = codec.decodeMessage(bytes)
-        assertTrue(decoded == msg)
+      test("roundtrips messages") {
+        val messages: List[Msg[Any, Any]] = List(
+          Msg.Plain("hello", 42),
+          Msg.WithReply(7),
+          Msg.WithStreamReply(3),
+          Msg.WithDuplex(),
+          Msg.Generic(List(Reply("a", true), Reply("b", false))),
+          Msg.Singleton
+        )
+        assertTrue(messages.map(roundtrip) == messages)
       },
-      test("roundtrips a fire-and-forget variant") {
-        val msg     = Msg.FireAndForget("x")
-        val bytes   = codec.encodeMessage(msg)
-        val decoded = codec.decodeMessage(bytes)
-        assertTrue(decoded == msg)
+      test("encodes Unit replies without bytes and has no error codec when the error type is Nothing") {
+        val replyCodec = codec.replyCodec(Msg.Plain("hello", 42))
+        val bytes      = replyCodec.value.encode(())
+        val error      = scala.util.Try(replyCodec.error.encode(Error.Invalid()))
+        assertTrue(bytes.isEmpty, replyCodec.value.decode(bytes) == (), error.isFailure)
       },
-      test("dispatches replyEncoder by variant and round-trips the reply") {
-        val msg        = Msg.WithReplier(7, Replier("rid-1"))
-        val bytes      = codec.encodeMessage(msg)
-        val decoded    = codec.decodeMessage(bytes).asInstanceOf[Msg.WithReplier]
-        val encoder    = codec.replyEncoder(decoded)
+      test("roundtrips the reply and error of a variant") {
+        val replyCodec = codec.replyCodec(roundtrip(Msg.WithReply(7)))
         val reply      = Reply("ok", true)
-        val replyBytes = encoder(reply)
-        val decoded2   = codec.replyDecoder[Reply](msg)(replyBytes)
-        assertTrue(decoded.id == 7, decoded.replier.id == "rid-1", decoded2 == reply)
-      },
-      test("dispatches stream reply encoder by variant and round-trips the reply") {
-        val msg        = Msg.WithStreamReplier(StreamReplier("srid-1"))
-        val bytes      = codec.encodeMessage(msg)
-        val decoded    = codec.decodeMessage(bytes).asInstanceOf[Msg.WithStreamReplier]
-        val encoder    = codec.replyEncoder(decoded)
-        val reply      = StreamReply(99)
-        val replyBytes = encoder(reply)
-        val decoded2   = codec.streamReplyDecoder[StreamReply](msg)(replyBytes)
-        assertTrue(decoded.replier.id == "srid-1", decoded2 == reply)
-      },
-      test("finds a Replier nested inside products and sealed-trait variants") {
-        val msg        = NestedMsg.ToProtocol(
-          Protocol.Run(Command("ctx", Function.Add(1), Replier("nested-rid")))
-        )
-        val bytes      = nestedCodec.encodeMessage(msg)
-        val decoded    = nestedCodec.decodeMessage(bytes).asInstanceOf[NestedMsg.ToProtocol]
-        val encoder    = nestedCodec.replyEncoder(decoded)
-        val reply      = CommandReply.Added(2)
-        val replyBytes = encoder(reply)
-        val decoded2   = nestedCodec.replyDecoder[CommandReply](msg)(replyBytes)
-
+        val error      = Error.NotFound(7)
         assertTrue(
-          decoded.request.asInstanceOf[Protocol.Run[Command, PEvent]].command.replier.id == "nested-rid",
-          decoded2 == reply
+          replyCodec.value.decode(replyCodec.value.encode(reply)) == reply,
+          replyCodec.error.decode(replyCodec.error.encode(error)) == error
         )
       },
-      test("finds concrete generic reply types in nested protocol variants") {
-        val msg        = NestedMsg.ToProtocol(
-          Protocol.ReadyToPersist[Command, PEvent]("tid", Replier("ready-rid"))
-        )
-        val bytes      = nestedCodec.encodeMessage(msg)
-        val decoded    = nestedCodec.decodeMessage(bytes).asInstanceOf[NestedMsg.ToProtocol]
-        val encoder    = nestedCodec.replyEncoder(decoded)
-        val reply      = PersistReadied("pid", List(PEvent.Changed(3)), 4L)
-        val replyBytes = encoder(reply)
-        val decoded2   = nestedCodec.replyDecoder[PersistReadied[PEvent]](msg)(replyBytes)
-
+      test("uses the element and stream error types of a Streamed reply") {
+        val replyCodec = codec.replyCodec(Msg.WithStreamReply(3))
+        val element    = StreamReply(99)
+        val error      = Error.Invalid()
+        val failure    = Error.NotFound(1)
         assertTrue(
-          decoded.request.asInstanceOf[Protocol.ReadyToPersist[Command, PEvent]].replier.id == "ready-rid",
-          decoded2 == reply
+          replyCodec.value.decode(replyCodec.value.encode(element)) == element,
+          replyCodec.error.decode(replyCodec.error.encode(error)) == error,
+          replyCodec.streamError.decode(replyCodec.streamError.encode(failure)) == failure
         )
+      },
+      test("uses the input type of a Duplex reply") {
+        val replyCodec = codec.replyCodec(Msg.WithDuplex())
+        val input      = Input(5)
+        val element    = StreamReply(99)
+        assertTrue(
+          replyCodec.streamInput.decode(replyCodec.streamInput.encode(input)) == input,
+          replyCodec.value.decode(replyCodec.value.encode(element)) == element
+        )
+      },
+      test("supports generic reply types and singleton variants") {
+        val replies = Page(List(Reply("a", true)))
+        val generic = codec.replyCodec(Msg.Generic(Nil))
+        val single  = codec.replyCodec(Msg.Singleton)
+        assertTrue(
+          generic.value.decode(generic.value.encode(replies)) == replies,
+          single.value.decode(single.value.encode(Reply("s", true))) == Reply("s", true)
+        )
+      },
+      test("rejects primitive reply types at compile time") {
+        for {
+          viaGiven  <- typeCheck {
+                         """
+                         enum Bad[+E, +A] {
+                           case GetCount() extends Bad[Nothing, Int]
+                         }
+                         summon[shard.interfaces.MessageCodec[Bad]]
+                         """
+                       }
+          // calling `derived` directly shows why
+          viaDerive <- typeCheck {
+                         """
+                         enum Bad[+E, +A] {
+                           case GetCount() extends Bad[Nothing, Int]
+                         }
+                         shard.proteus.ProteusMessageCodec.derived[Bad]
+                         """
+                       }
+        } yield assertTrue(viaGiven.isLeft, viaDerive.left.exists(_.contains("wrap primitive types")))
       }
     )
 }

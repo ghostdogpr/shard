@@ -1,9 +1,11 @@
 package shard.protocol
 
 import proteus._
+import shard.interfaces.Pods.{ BinaryMessage, BinaryReply }
 
 object Sharding {
-  given ProtobufDeriver = ProtobufDeriver
+  given ProtobufDeriver =
+    ProtobufDeriver.modifier[BinaryReply](Modifiers.oneOf(Modifiers.OneOfFlag.Inline, Modifiers.OneOfFlag.Nested))
 
   case class AssignShardsRequest(shards: List[Int]) derives ProtobufCodec
   case class AssignShardsResponse() derives ProtobufCodec
@@ -11,19 +13,18 @@ object Sharding {
   case class UnassignShardsRequest(shards: List[Int]) derives ProtobufCodec
   case class UnassignShardsResponse() derives ProtobufCodec
 
-  case class SendRequest(entityId: String, entityType: String, body: Array[Byte], replyId: Option[String])
-      derives ProtobufCodec
-  case class SendResponse(body: Option[Array[Byte]]) derives ProtobufCodec
+  given ProtobufCodec[BinaryMessage] = ProtobufCodec.derived
+  given ProtobufCodec[BinaryReply]   = ProtobufCodec.derived
+  case class SendResponse(reply: BinaryReply) derives ProtobufCodec
 
   case class PingShardsRequest() derives ProtobufCodec
   case class PingShardsResponse() derives ProtobufCodec
 
   val assignShards               = Rpc.unary[AssignShardsRequest, AssignShardsResponse]("AssignShards")
   val unassignShards             = Rpc.unary[UnassignShardsRequest, UnassignShardsResponse]("UnassignShards")
-  val send                       = Rpc.unary[SendRequest, SendResponse]("Send")
-  val sendStream                 = Rpc.clientStreaming[SendRequest, SendResponse]("SendStream")
-  val sendAndReceiveStream       = Rpc.serverStreaming[SendRequest, SendResponse]("SendAndReceiveStream")
-  val sendStreamAndReceiveStream = Rpc.bidiStreaming[SendRequest, SendResponse]("SendStreamAndReceiveStream")
+  val send                       = Rpc.unary[BinaryMessage, SendResponse]("Send")
+  val sendStream                 = Rpc.clientStreaming[BinaryMessage, SendResponse]("SendStream")
+  val sendStreamAndReceiveStream = Rpc.bidiStreaming[BinaryMessage, SendResponse]("SendStreamAndReceiveStream")
   val pingShards                 = Rpc.unary[PingShardsRequest, PingShardsResponse]("PingShards")
 
   val service =
@@ -32,7 +33,6 @@ object Sharding {
       .rpc(unassignShards)
       .rpc(send)
       .rpc(sendStream)
-      .rpc(sendAndReceiveStream)
       .rpc(sendStreamAndReceiveStream)
       .rpc(pingShards)
 }

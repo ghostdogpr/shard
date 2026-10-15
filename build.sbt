@@ -168,7 +168,7 @@ lazy val grpcProtocol = project
   .in(file("protocol-grpc"))
   .settings(name := "shard-protocol-grpc")
   .settings(commonSettings)
-  .dependsOn(core, entities)
+  .dependsOn(core, entities, serializationKryo % Test)
   .settings(
     libraryDependencies ++= Seq(
       "com.github.ghostdogpr" %% "proteus-grpc"     % proteusVersion,

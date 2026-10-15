@@ -8,21 +8,21 @@ import zio.stream.ZStream
 import java.util.concurrent.ForkJoinPool
 
 object Server {
-  sealed trait Message
-
-  object Message {
-    case class Ping(msg: String, replier: Replier[String])                         extends Message
-    case class StreamPing(msg: String, count: Int, replier: StreamReplier[String]) extends Message
+  enum Message[+E, +A] {
+    case Ping(msg: String)                   extends Message[Nothing, String]
+    case StreamPing(msg: String, count: Int) extends Message[Nothing, Streamed[Nothing, String]]
   }
 
   object PingPongEntity extends EntityType[Message]("ping-pong")
 
-  private def behavior(entityId: String, messages: Dequeue[Message]): RIO[Sharding, Nothing] =
-    messages.take.flatMap {
-      case Message.Ping(msg, replier)              => replier.reply(msg)
-      case Message.StreamPing(msg, count, replier) =>
-        replier.replyStream(zio.stream.ZStream.repeat(msg).take(count.toLong))
-    }.forever
+  private def behavior(entityId: String): UIO[PingPongEntity.Handler] =
+    ZIO.succeed(new PingPongEntity.Handler {
+      def handle[E, A](message: Message[E, A]): IO[E, A] =
+        message match {
+          case Message.Ping(msg)              => ZIO.succeed(msg)
+          case Message.StreamPing(msg, count) => ZIO.succeed(Streamed(ZStream.repeat(msg).take(count.toLong)))
+        }
+    })
 
   private val shardManagerClient: ZLayer[Config, Nothing, ShardManagerClient] =
     ZLayer {
@@ -70,7 +70,7 @@ object Server {
     ZIO
       .scoped[Sharding](
         for {
-          _ <- Sharding.registerEntity(PingPongEntity, behavior)
+          _ <- Sharding.registerEntity(PingPongEntity)(behavior)
           _ <- Sharding.registerScoped
           _ <- ZIO.never
         } yield ()

@@ -1,5 +1,6 @@
 package shard
 
+import shard.errors.RemoteDefect
 import shard.interfaces.Storage
 import shard.proteus.given
 import zio.stream.{ SubscriptionRef, ZStream }
@@ -12,8 +13,8 @@ import zio.{ Config => _, _ }
  * backend. Reply types are case classes (Proteus only supports messages / enums at the
  * root, not primitives), so we wrap `Int` in a small `Count` case class.
  *
- * The local-pod shortcut means most of the action goes through the typed reply channel
- * path; setting `simulateRemotePods = true` forces the byte-channel path through Proteus.
+ * The local-pod shortcut means most of the action goes through the typed path;
+ * setting `simulateRemotePods = true` forces the binary path through Proteus.
  */
 object ProteusShardingSpec extends ZIOSpecDefault {
   import ProteusShardingSpec.CounterActor._
@@ -39,79 +40,77 @@ object ProteusShardingSpec extends ZIOSpecDefault {
     test("Send fire-and-forget then ask for the count") {
       ZIO.scoped {
         for {
-          _       <- Sharding.registerEntity(Counter, behavior)
-          _       <- Sharding.registerScoped
-          counter <- Sharding.messenger(Counter)
-          _       <- counter.sendDiscard("c1")(IncrementCounter)
-          _       <- counter.sendDiscard("c1")(IncrementCounter)
-          _       <- counter.sendDiscard("c1")(DecrementCounter)
-          _       <- counter.sendDiscard("c2")(IncrementCounter)
-          _       <- Clock.sleep(500.millis)
-          c1      <- counter.send("c1")(GetCounter.apply)
-          c2      <- counter.send("c2")(GetCounter.apply)
+          counter <- startCounter
+          _       <- counter.sendDiscard("c1")(Increment())
+          _       <- counter.sendDiscard("c1")(Increment())
+          _       <- counter.send("c1")(Decrement())
+          _       <- counter.send("c2")(Increment())
+          c1      <- counter.send("c1")(Get())
+          c2      <- counter.send("c2")(Get())
         } yield assertTrue(c1.value == 1, c2.value == 1)
+      }
+    },
+    test("Typed failure over Proteus") {
+      ZIO.scoped {
+        for {
+          counter <- startCounter
+          error   <- counter.send("c1")(Withdraw(5)).flip
+          c1      <- counter.send("c1")(Get())
+        } yield assertTrue(error == CounterError.NotEnough(0), c1.value == 0)
+      }
+    },
+    test("Defect over Proteus") {
+      ZIO.scoped {
+        for {
+          counter <- startCounter
+          exit    <- counter.send("c1")(Crash()).exit
+        } yield assertTrue(exit.causeOption.flatMap(_.dieOption).exists {
+          case RemoteDefect(className, message) => className == "java.lang.IllegalStateException" && message == "crash"
+          case other                            => other.getMessage == "crash"
+        })
       }
     },
     test("Response stream over Proteus") {
       ZIO.scoped {
         for {
-          _       <- Sharding.registerEntity(Counter, behavior)
-          _       <- Sharding.registerScoped
-          counter <- Sharding.messenger(Counter)
-          stream  <- counter.sendAndReceiveStream("c1")(StreamingChanges.apply)
+          counter <- startCounter
           latch   <- Promise.make[Nothing, Unit]
-          fiber   <- stream.take(4).tap(_ => latch.succeed(())).runCollect.fork
+          fiber   <- counter.stream("c1")(Changes()).take(4).tap(_ => latch.succeed(())).runCollect.fork
           _       <- latch.await
-          _       <- counter.sendDiscard("c1")(IncrementCounter)
-          _       <- counter.sendDiscard("c1")(IncrementCounter)
-          _       <- counter.sendDiscard("c1")(DecrementCounter)
+          _       <- counter.sendDiscard("c1")(Increment())
+          _       <- counter.sendDiscard("c1")(Increment())
+          _       <- counter.sendDiscard("c1")(Decrement())
           items   <- fiber.join
         } yield assertTrue(items.map(_.value) == Chunk(0, 1, 2, 1))
       }
     },
-    // The Counter protocol has two reply-bearing variants (GetCounter and StreamingChanges).
-    // Proteus must resolve the right reply codec for the variant carried by `request`.
-    test("Multi-variant sendStreamAndReceiveStream over Proteus") {
+    test("Response stream failures over Proteus") {
       ZIO.scoped {
         for {
-          _       <- Sharding.registerEntity(Counter, behavior)
-          _       <- Sharding.registerScoped
-          counter <- Sharding.messenger(Counter)
-          latch   <- Promise.make[Nothing, Unit]
-          stream  <- counter.sendStreamAndReceiveStream[Count]("c1")(
-                       StreamingChanges.apply,
-                       ZStream.fromZIO(latch.await).drain ++
-                         ZStream.fromIterable(List(IncrementCounter, IncrementCounter, DecrementCounter))
-                     )
-          items   <- stream.tap(_ => latch.succeed(())).take(4).runCollect
-        } yield assertTrue(items.map(_.value) == Chunk(0, 1, 2, 1))
+          counter <- startCounter
+          before  <- counter.stream("c1")(CountDown(-1)).runCollect.flip
+          during  <- counter.stream("c1")(CountDown(2)).runCollect.either
+        } yield assertTrue(
+          before == CounterError.Negative(),
+          during == Left(CounterError.Exhausted(Count(0)))
+        )
       }
     },
-    // Regression test for shard's pendingReplies overwrite bug with Proteus's
-    // per-variant reply encoder. The first message carries the StreamReplier; the
-    // follow-ups (IncrementCounter / DecrementCounter — no Replier field) are emitted
-    // eagerly, ahead of any reply being received. Without the fix, the receiver's
-    // `processBinary` would re-register the pendingReply slot with `fallbackEncode`
-    // (empty bytes) before the actor's `replyStream` captures the real encoder, and the
-    // sender would then fail to decode replies with "OneOf field absent".
-    //
-    // Uses `Reply` (sealed trait, required OneOf field) so an empty payload from
-    // `fallbackEncode` is a hard decode failure rather than a silent default value.
-    test("Eager non-Replier follow-ups don't clobber the reply encoder") {
+    test("Duplex over Proteus") {
       ZIO.scoped {
         for {
-          _       <- Sharding.registerEntity(Counter, behavior)
-          _       <- Sharding.registerScoped
-          counter <- Sharding.messenger(Counter)
-          stream  <- counter.sendStreamAndReceiveStream[Reply]("c1")(
-                       StreamReply.apply,
-                       ZStream.fromIterable(List(IncrementCounter, IncrementCounter, DecrementCounter))
-                     )
-          // Take only the initial ack — `state.changes` subscription timing is unreliable
-          // once eager follow-ups race ahead. The bug shows up as a decode failure on the
-          // very first reply, so one element is enough to assert correctness.
-          first   <- stream.take(1).runCollect.timeoutFail("timeout")(10.seconds)
-        } yield assertTrue(first.size == 1 && first.head == Reply.Ack())
+          counter <- startCounter
+          items   <- counter.duplex("c1")(Add(), ZStream(Count(1), Count(2), Count(3))).takeUntil(_.value == 6).runCollect
+        } yield assertTrue(items.last.value == 6)
+      }
+    },
+    test("Send stream over Proteus") {
+      ZIO.scoped {
+        for {
+          counter <- startCounter
+          _       <- counter.sendStream("c1")(ZStream.fromIterable(1 to 100).as(Increment()))
+          c1      <- counter.send("c1")(Get())
+        } yield assertTrue(c1.value == 100)
       }
     }
   )
@@ -119,53 +118,62 @@ object ProteusShardingSpec extends ZIOSpecDefault {
   // Reply payload wrapped in a case class — Proteus needs a message at the root, not a primitive.
   final case class Count(value: Int)
 
-  // Sealed-trait reply used by the regression test. A required OneOf field means an
-  // empty payload (what `fallbackEncode` would produce) is a hard decode failure.
-  sealed trait Reply
-  object Reply {
-    final case class Ack()            extends Reply
-    final case class Snapshot(v: Int) extends Reply
+  sealed trait CounterError
+  object CounterError {
+    final case class NotEnough(available: Int) extends CounterError
+    final case class Negative()                extends CounterError
+    final case class Exhausted(last: Count)    extends CounterError
   }
 
   object CounterActor {
-    sealed trait CounterMessage
-    object CounterMessage {
-      final case class GetCounter(replier: Replier[Count])             extends CounterMessage
-      case object IncrementCounter                                     extends CounterMessage
-      case object DecrementCounter                                     extends CounterMessage
-      final case class StreamingChanges(replier: StreamReplier[Count]) extends CounterMessage
-      // Pushes a deterministic `Ack` as the first reply, then a `Snapshot` per
-      // Increment/Decrement processed by this actor while the stream is open.
-      final case class StreamReply(replier: StreamReplier[Reply])      extends CounterMessage
+    enum CounterMessage[+E, +A] {
+      case Get()                 extends CounterMessage[Nothing, Count]
+      case Increment()           extends CounterMessage[Nothing, Unit]
+      case Decrement()           extends CounterMessage[Nothing, Unit]
+      case Withdraw(amount: Int) extends CounterMessage[CounterError, Unit]
+      case Crash()               extends CounterMessage[Nothing, Unit]
+      case Changes()             extends CounterMessage[Nothing, Streamed[Nothing, Count]]
+      // counts down to 0 then fails, or fails right away if negative
+      case CountDown(from: Int)  extends CounterMessage[CounterError.Negative, Streamed[CounterError.Exhausted, Count]]
+      case Add()                 extends CounterMessage[Nothing, Duplex[Count, Nothing, Count]]
     }
 
     object Counter extends EntityType[CounterMessage]("counter")
 
-    def behavior(entityId: String, messages: Dequeue[CounterMessage]): RIO[Sharding, Nothing] =
-      ZIO.logInfo(s"Started entity $entityId") *>
-        (SubscriptionRef.make(0) <*> Ref.make[Option[Queue[Reply]]](None)).flatMap { case (state, replyQueueRef) =>
-          messages.take.flatMap {
-            case CounterMessage.GetCounter(replier)       => state.get.flatMap(v => replier.reply(Count(v)))
-            case CounterMessage.IncrementCounter          =>
-              state
-                .updateAndGet(_ + 1)
-                .flatMap(v => replyQueueRef.get.flatMap(ZIO.foreachDiscard(_)(_.offer(Reply.Snapshot(v)))))
-            case CounterMessage.DecrementCounter          =>
-              state
-                .updateAndGet(_ - 1)
-                .flatMap(v => replyQueueRef.get.flatMap(ZIO.foreachDiscard(_)(_.offer(Reply.Snapshot(v)))))
-            case CounterMessage.StreamingChanges(replier) =>
-              replier.replyStream(state.changes.ensuring(state.set(-1)).map(Count(_)))
-            case CounterMessage.StreamReply(replier)      =>
-              // Forces eager follow-ups to reach `processBinary` before the actor subscribes.
-              ZIO.sleep(200.millis) *>
-                (for {
-                  q <- Queue.unbounded[Reply]
-                  _ <- replyQueueRef.set(Some(q))
-                  _ <- replier.replyStream(ZStream.fromQueueWithShutdown(q))
-                  _ <- q.offer(Reply.Ack())
-                } yield ())
-          }.forever
+    def startCounter: RIO[Sharding & Scope, Messenger[CounterMessage]] =
+      Sharding.registerEntity(Counter)(behavior) *> Sharding.registerScoped *> Sharding.messenger(Counter)
+
+    def behavior(entityId: String): UIO[Counter.Handler] =
+      SubscriptionRef.make(0).map { state =>
+        new Counter.Handler {
+          def handle[E, A](message: CounterMessage[E, A]): IO[E, A] =
+            message match {
+              case Get()            => state.get.map(Count(_))
+              case Increment()      => state.update(_ + 1)
+              case Decrement()      => state.update(_ - 1)
+              case Withdraw(amount) =>
+                state.get.flatMap(available =>
+                  if (available < amount) ZIO.fail(CounterError.NotEnough(available)) else state.update(_ - amount)
+                )
+              case Crash()          => ZIO.die(new IllegalStateException("crash"))
+              case Changes()        => ZIO.succeed(Streamed(state.changes.map(Count(_))))
+              case CountDown(from)  =>
+                if (from < 0) ZIO.fail(CounterError.Negative())
+                else
+                  ZIO.succeed(
+                    Streamed(
+                      ZStream.range(0, from + 1).map(n => Count(from - n)) ++ ZStream
+                        .fail(CounterError.Exhausted(Count(0)))
+                    )
+                  )
+              case Add()            =>
+                ZIO.succeed(
+                  Duplex[Count, Nothing, Count](input =>
+                    state.changes.map(Count(_)).drainFork(input.mapZIO(count => state.update(_ + count.value)))
+                  )
+                )
+            }
         }
+      }
   }
 }
