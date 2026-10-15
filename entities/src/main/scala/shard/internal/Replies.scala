@@ -35,11 +35,11 @@ private[shard] object Replies {
     }
 
   def encodeStream(stream: ZStream[Any, Any, Any], codec: ReplyCodec): ZStream[Any, Nothing, BinaryReply] =
-    stream.chunks
-      .flatMap(
-        mapChunk(_)(value => BinaryReply.Element(codec.value.encode(value)))(error =>
-          ZStream.fail(serializationError("encode a stream element", error))
-        )
+    stream
+      .mapChunksZIO(chunk =>
+        ZIO
+          .attempt(chunk.map(value => BinaryReply.Element(codec.value.encode(value))))
+          .mapError(serializationError("encode a stream element", _))
       )
       .catchAllCause(cause =>
         ZStream.succeed(cause.failureOrCause match {
@@ -54,20 +54,7 @@ private[shard] object Replies {
       )
 
   def decodeReply(reply: BinaryReply, codec: ReplyCodec, entityType: String, entityId: String): IO[Any, Any] =
-    reply match {
-      case BinaryReply.Success(body)                                       => decode(codec.value, body, "a reply")
-      case BinaryReply.Failure(body)                                       =>
-        decode(codec.error, body, "a failure").flatMap(ZIO.fail(_))
-      case BinaryReply.Defect(className, msg)                              => ZIO.fail(entityDefect(className, msg))
-      case BinaryReply.SerializationError(msg)                             => ZIO.fail(SerializationError(msg))
-      case BinaryReply.Interrupted                                         => ZIO.fail(EntityInterrupted(entityType, entityId))
-      case BinaryReply.MailboxFull                                         => ZIO.fail(MailboxFull(entityType, entityId))
-      case BinaryReply.Discarded                                           => ZIO.fail(MessageDiscarded(entityType, entityId))
-      case BinaryReply.EntityNotManagedByThisPod                           =>
-        ZIO.fail(Sharding.Retry(EntityNotManagedByThisPod(entityId)))
-      case other @ (BinaryReply.Element(_) | BinaryReply.StreamFailure(_)) =>
-        ZIO.dieMessage(s"Unexpected stream reply $other to a unary message to $entityType $entityId")
-    }
+    ZIO.suspendSucceed(replyExit(reply, codec, entityType, entityId))
 
   def decodeStream(
     replies: ZStream[Any, Any, BinaryReply],
@@ -75,39 +62,38 @@ private[shard] object Replies {
     entityType: String,
     entityId: String
   ): ZStream[Any, Any, Any] = {
-    def decodeOther(reply: BinaryReply): IO[Any, Any] =
+    // an element is decoded, a reply ending the stream becomes its failure
+    def toExit(reply: BinaryReply): Exit[Option[Any], Any] =
       reply match {
+        case BinaryReply.Element(body)       => Exit.succeed(codec.value.decode(body))
         case BinaryReply.StreamFailure(body) =>
-          decode(codec.streamError, body, "a stream failure").flatMap(ZIO.fail(_))
-        case BinaryReply.Interrupted         => ZIO.fail(StreamCancelled)
+          decode(codec.streamError, body, "a stream failure").flatMapExit(Exit.fail).mapErrorExit(Some(_))
+        case BinaryReply.Interrupted         => Exit.fail(Some(StreamCancelled))
         case BinaryReply.Success(_)          =>
-          ZIO.dieMessage(s"Unexpected unary reply to a stream message to $entityType $entityId")
-        case other                           => decodeReply(other, codec, entityType, entityId)
+          Exit.die(new RuntimeException(s"Unexpected unary reply to a stream message to $entityType $entityId"))
+        case other                           => replyExit(other, codec, entityType, entityId).mapErrorExit(Some(_))
       }
 
-    // decodes the elements of a chunk at once, then the reply ending the stream one by one
-    def decodeChunk(chunk: Chunk[BinaryReply]): ZStream[Any, Any, Any] = {
-      val elements = chunk.collectWhile { case BinaryReply.Element(body) => body }
-      val rest     = chunk.drop(elements.length)
-      mapChunk(elements)(codec.value.decode)(error =>
-        ZStream.fail(serializationError("decode a stream element", error))
-      ) ++
-        (if (rest.isEmpty) ZStream.empty else ZStream.fromZIO(decodeOther(rest.head)) ++ decodeChunk(rest.drop(1)))
+    replies
+      .mapChunksZIO(chunk => ZIO.attempt(chunk.map(toExit)).mapError(serializationError("decode a stream element", _)))
+      .flattenExitOption
+  }
+
+  private def replyExit(reply: BinaryReply, codec: ReplyCodec, entityType: String, entityId: String): Exit[Any, Any] =
+    reply match {
+      case BinaryReply.Success(body)                                       => decode(codec.value, body, "a reply")
+      case BinaryReply.Failure(body)                                       =>
+        decode(codec.error, body, "a failure").flatMapExit(Exit.fail)
+      case BinaryReply.Defect(className, msg)                              => Exit.fail(entityDefect(className, msg))
+      case BinaryReply.SerializationError(msg)                             => Exit.fail(SerializationError(msg))
+      case BinaryReply.Interrupted                                         => Exit.fail(EntityInterrupted(entityType, entityId))
+      case BinaryReply.MailboxFull                                         => Exit.fail(MailboxFull(entityType, entityId))
+      case BinaryReply.Discarded                                           => Exit.fail(MessageDiscarded(entityType, entityId))
+      case BinaryReply.EntityNotManagedByThisPod                           =>
+        Exit.fail(Sharding.Retry(EntityNotManagedByThisPod(entityId)))
+      case other @ (BinaryReply.Element(_) | BinaryReply.StreamFailure(_)) =>
+        Exit.die(new RuntimeException(s"Unexpected stream reply $other to a unary message to $entityType $entityId"))
     }
-
-    replies.chunks.flatMap(decodeChunk)
-  }
-
-  /**
-   * Maps a whole chunk at once. Like `mapZIO`, if `f` throws, the elements before are emitted, followed by `onError`.
-   */
-  def mapChunk[E, A, B](chunk: Chunk[A])(f: A => B)(onError: Throwable => ZStream[Any, E, B]): ZStream[Any, E, B] = {
-    val builder = ChunkBuilder.make[B](chunk.size)
-    try {
-      chunk.foreach(a => builder += f(a))
-      ZStream.fromChunk(builder.result())
-    } catch { case NonFatal(throwable) => ZStream.fromChunk(builder.result()) ++ onError(throwable) }
-  }
 
   // `action` is what failed, e.g. "encode a reply"
   def serializationError(action: String, throwable: Throwable): SerializationError =
@@ -119,8 +105,9 @@ private[shard] object Replies {
   private def entityDefect(throwable: Throwable): EntityDefect =
     entityDefect(throwable.getClass.getName, String.valueOf(throwable.getMessage))
 
-  private def decode(codec: Codec, body: Array[Byte], what: String): IO[SerializationError, Any] =
-    ZIO.attempt(codec.decode(body)).mapError(serializationError(s"decode $what", _))
+  private def decode(codec: Codec, body: Array[Byte], what: String): Exit[SerializationError, Any] =
+    try Exit.succeed(codec.decode(body))
+    catch { case NonFatal(throwable) => Exit.fail(serializationError(s"decode $what", throwable)) }
 
   private def defect(throwable: Throwable): BinaryReply =
     BinaryReply.Defect(throwable.getClass.getName, String.valueOf(throwable.getMessage))

@@ -235,11 +235,11 @@ class Sharding private (
           // an input that fails to decode ends the inputs, then fails the replies
           def replies(reply: StreamReply, codec: ReplyCodec): ZStream[Any, Any, Any] =
             ZStream.unwrap(Promise.make[Any, Nothing].map { inputFailure =>
-              val decodedInput = input.orDie.chunks.flatMap(
-                Replies.mapChunk(_)(msg => codec.streamInput.decode(msg.body))(error =>
+              val decodedInput = input.orDie
+                .mapChunksZIO(chunk => ZIO.attempt(chunk.map(msg => codec.streamInput.decode(msg.body))))
+                .catchAll(error =>
                   ZStream.execute(inputFailure.fail(Replies.serializationError("decode a stream input", error)))
                 )
-              )
               reply.run(decodedInput).interruptWhen(inputFailure) ++
                 ZStream.execute(ZIO.whenZIODiscard(inputFailure.isDone)(inputFailure.await))
             })
@@ -378,11 +378,17 @@ class Sharding private (
           case None                        => ZStream.succeed(request)
           case Some((input, inputFailure)) =>
             // an input that fails to encode ends the inputs, like an input failure
-            ZStream.succeed(request) ++ input.chunks.flatMap(
-              Replies.mapChunk(_)(value =>
-                BinaryMessage(entityId, entityType.name, codec.streamInput.encode(value), expectsReply = true)
-              )(error => ZStream.execute(inputFailure.fail(Replies.serializationError("encode a stream input", error))))
-            )
+            ZStream.succeed(request) ++ input
+              .mapChunksZIO(chunk =>
+                ZIO.attempt(
+                  chunk.map(value =>
+                    BinaryMessage(entityId, entityType.name, codec.streamInput.encode(value), expectsReply = true)
+                  )
+                )
+              )
+              .catchAll(error =>
+                ZStream.execute(inputFailure.fail(Replies.serializationError("encode a stream input", error)))
+              )
         }
         Replies.decodeStream(
           pods
@@ -409,16 +415,15 @@ class Sharding private (
         val failIfInputFailed = ZIO.whenZIODiscard(inputFailure.isDone)(inputFailure.await)
         val requests          = messages
           .catchAllCause(cause => ZStream.execute(inputFailure.failCause(cause)))
-          .chunks
-          .flatMap(
-            Replies.mapChunk(_)(msg =>
-              BinaryMessage(entityId, entityType.name, entityType.codec.encodeMessage(msg), expectsReply = false)
-            )(
+          .mapChunksZIO(chunk =>
+            ZIO
+              .attempt(
+                chunk.map(msg =>
+                  BinaryMessage(entityId, entityType.name, entityType.codec.encodeMessage(msg), expectsReply = false)
+                )
+              )
               // failing the stream cancels the call, then the sender fails with the serialization error
-              error =>
-                ZStream.execute(inputFailure.fail(Replies.serializationError("encode a message", error))) ++
-                  ZStream.fail(error)
-            )
+              .tapError(error => inputFailure.fail(Replies.serializationError("encode a message", error)))
           )
         pods
           .sendStream(pod, requests)

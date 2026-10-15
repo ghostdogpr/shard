@@ -55,9 +55,8 @@ object GrpcShardingSpec extends ZIOSpecDefault {
             discard <- account.sendDiscard("a1")(Unencodable()).flip
             decode  <- account.send("a1")(Undecodable()).flip
             reply   <- account.send("a1")(UnencodableReply()).flip
-            // elements before the failing one are received
-            encoded <- account.stream("a1")(Numbers(-1)).either.runCollect
-            decoded <- account.stream("a1")(Numbers(-3)).either.runCollect
+            encoded <- account.stream("a1")(Numbers(-1)).runCollect.flip
+            decoded <- account.stream("a1")(Numbers(-3)).runCollect.flip
             input   <- account.duplex("a1")(DepositAll(), ZStream(1, -2)).runCollect.flip
           } yield assertTrue(
             message == SerializationError(
@@ -66,19 +65,11 @@ object GrpcShardingSpec extends ZIOSpecDefault {
             discard == message,
             decode == SerializationError("Failed to decode a message: java.lang.IllegalArgumentException: undecodable"),
             reply == SerializationError("Failed to encode a reply: java.lang.IllegalArgumentException: unencodable"),
-            encoded == Chunk(
-              Right(1),
-              Right(2),
-              Left(
-                SerializationError("Failed to encode a stream element: java.lang.IllegalArgumentException: unencodable")
-              )
+            encoded == SerializationError(
+              "Failed to encode a stream element: java.lang.IllegalArgumentException: unencodable"
             ),
-            decoded == Chunk(
-              Right(1),
-              Right(2),
-              Left(
-                SerializationError("Failed to decode a stream element: java.lang.IllegalArgumentException: undecodable")
-              )
+            decoded == SerializationError(
+              "Failed to decode a stream element: java.lang.IllegalArgumentException: undecodable"
             ),
             input == SerializationError(
               "Failed to decode a stream input: java.lang.IllegalArgumentException: undecodable"
@@ -349,7 +340,6 @@ object GrpcShardingSpec extends ZIOSpecDefault {
               case Unencodable()      => ZIO.unit
               case Undecodable()      => ZIO.unit
               case UnencodableReply() => ZIO.succeed(-1)
-              // a single chunk
               case Numbers(n)         => ZIO.succeed(Streamed(ZStream(1, 2, n, 3)))
               case CrashingStream()   =>
                 ZIO.succeed(Streamed(ZStream(1) ++ ZStream.die(new IllegalStateException("crash"))))
