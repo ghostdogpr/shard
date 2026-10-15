@@ -17,6 +17,7 @@ import sttp.client4.UriContext
 import zio.{ Config => _, _ }
 import zio.Clock.ClockLive
 import zio.interop.catz._
+import zio.test.Assertion._
 import zio.test.TestAspect.{ sequential, withLiveClock }
 import zio.test._
 
@@ -85,12 +86,10 @@ object EndToEndSpec extends ZIOSpecDefault {
             members <- guild.send("guild1")(Join("user5"))
             failure <- guild.send("guild1")(Join("user6")).flip
             res     <- guild.stream("guild1")(Stream()).runCollect
-          } yield assertTrue(
-            members.size == 5,
-            failure == GuildFull(5),
-            timeout == SendTimeout(Guild.name, "guild1"),
-            res.size == 5
-          )
+          } yield assert(members)(hasSize(equalTo(5))) &&
+            assertTrue(failure == GuildFull(5)) &&
+            assertTrue(timeout == SendTimeout(Guild.name, "guild1")) &&
+            assert(res)(hasSize(equalTo(5)))
         }
       }
     ).provideShared(

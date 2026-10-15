@@ -11,9 +11,6 @@ import zio.{ Config => _, _ }
 
 import java.util.concurrent.TimeUnit
 
-/**
- * The gRPC service exposed by each pod.
- */
 abstract class GrpcShardingService(sharding: Sharding) {
   def assignShards(request: AssignShardsRequest): ZIO[Any, StatusException, AssignShardsResponse] =
     sharding.assign(request.shards.toSet).as(AssignShardsResponse())

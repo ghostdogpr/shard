@@ -78,7 +78,7 @@ Besides the error type declared by the message, calls can fail with a `ClusterEr
 - `InvalidShardId`: the shard ID computed for an entity is invalid.
 - `EntityInterrupted`: the entity was stopped before the message was fully processed (e.g. it exceeded `entityTerminationTimeout`). The message may have been partially processed.
 - `MessageDiscarded`: the entity was not running and `loadEntity` rejected the message.
-- `EntityDefect`: the entity died while processing the message (or failed to start), with the defect's class and message.
+- `EntityDefect`: the entity died while processing the message (or failed to start).
 - `SerializationError`: a message, reply, stream element or stream input failed to be encoded or decoded.
 - `TransportError`: an unexpected failure of the transport between pods.
 

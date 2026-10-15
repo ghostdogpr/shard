@@ -15,8 +15,8 @@ import scala.util.control.NonFatal
 private[shard] object Replies {
 
   // an interruption becomes the given error, a defect becomes EntityDefect
-  def toResult(exit: Exit[Any, Any], interruptedError: => ClusterError): IO[Any, Any] =
-    exit.foldExit(cause => ZIO.fail(toError(cause, interruptedError)), ZIO.succeed(_))
+  def toResult(exit: Exit[Any, Any], interruptedError: => ClusterError): Exit[Any, Any] =
+    exit.foldExit(cause => Exit.fail(toError(cause, interruptedError)), Exit.succeed)
 
   def toError(cause: Cause[Any], interruptedError: => ClusterError): Any =
     cause.failureOrCause match {
@@ -53,9 +53,6 @@ private[shard] object Replies {
         })
       )
 
-  def decodeReply(reply: BinaryReply, codec: ReplyCodec, entityType: String, entityId: String): IO[Any, Any] =
-    ZIO.suspendSucceed(replyExit(reply, codec, entityType, entityId))
-
   def decodeStream(
     replies: ZStream[Any, Any, BinaryReply],
     codec: ReplyCodec,
@@ -71,7 +68,7 @@ private[shard] object Replies {
         case BinaryReply.Interrupted         => Exit.fail(Some(StreamCancelled))
         case BinaryReply.Success(_)          =>
           Exit.die(new RuntimeException(s"Unexpected unary reply to a stream message to $entityType $entityId"))
-        case other                           => replyExit(other, codec, entityType, entityId).mapErrorExit(Some(_))
+        case other                           => decodeReply(other, codec, entityType, entityId).mapErrorExit(Some(_))
       }
 
     replies
@@ -79,12 +76,12 @@ private[shard] object Replies {
       .flattenExitOption
   }
 
-  private def replyExit(reply: BinaryReply, codec: ReplyCodec, entityType: String, entityId: String): Exit[Any, Any] =
+  def decodeReply(reply: BinaryReply, codec: ReplyCodec, entityType: String, entityId: String): Exit[Any, Any] =
     reply match {
       case BinaryReply.Success(body)                                       => decode(codec.value, body, "a reply")
       case BinaryReply.Failure(body)                                       =>
         decode(codec.error, body, "a failure").flatMapExit(Exit.fail)
-      case BinaryReply.Defect(className, msg)                              => Exit.fail(entityDefect(className, msg))
+      case BinaryReply.Defect(msg)                                         => Exit.fail(EntityDefect(msg))
       case BinaryReply.SerializationError(msg)                             => Exit.fail(SerializationError(msg))
       case BinaryReply.Interrupted                                         => Exit.fail(EntityInterrupted(entityType, entityId))
       case BinaryReply.MailboxFull                                         => Exit.fail(MailboxFull(entityType, entityId))
@@ -99,18 +96,15 @@ private[shard] object Replies {
   def serializationError(action: String, throwable: Throwable): SerializationError =
     SerializationError(s"Failed to $action: $throwable")
 
-  private def entityDefect(className: String, message: String): EntityDefect =
-    EntityDefect(s"Entity died with $className: $message")
-
   private def entityDefect(throwable: Throwable): EntityDefect =
-    entityDefect(throwable.getClass.getName, String.valueOf(throwable.getMessage))
+    EntityDefect(s"Entity died with ${throwable.getClass.getName}: ${throwable.getMessage}")
 
   private def decode(codec: Codec, body: Array[Byte], what: String): Exit[SerializationError, Any] =
     try Exit.succeed(codec.decode(body))
     catch { case NonFatal(throwable) => Exit.fail(serializationError(s"decode $what", throwable)) }
 
   private def defect(throwable: Throwable): BinaryReply =
-    BinaryReply.Defect(throwable.getClass.getName, String.valueOf(throwable.getMessage))
+    BinaryReply.Defect(entityDefect(throwable).message)
 
   private def attempt(action: String)(reply: => BinaryReply): BinaryReply =
     try reply

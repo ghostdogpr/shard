@@ -4,14 +4,7 @@ import shard.interfaces.MessageCodec
 
 /**
  * An abstract type to extend for each type of entity or topic.
- * Each variant of `Msg[E, A]` declares its error type `E` and reply type `A`:
- * {{{
- *   enum GuildMessage[+E, +A] {
- *     case Join(userId: String)  extends GuildMessage[GuildFull, Set[String]]
- *     case Leave(userId: String) extends GuildMessage[Nothing, Unit]
- *   }
- *   object Guild extends EntityType[GuildMessage]("guild")
- * }}}
+ * Each variant of `Msg[E, A]` declares its error type `E` and reply type `A`.
  *
  * The `MessageCodec[Msg]` carried via the implicit parameter owns serialisation for this
  * recipient type. Users provide a codec by importing one of the backend `given`s in scope

@@ -4,8 +4,8 @@ import shard.errors.ClusterError
 import zio.{ Exit, UIO }
 
 /**
- * An interface to broadcast messages to the instances of a topic on all pods
- * @tparam Msg the type of message that can be broadcast to this topic type
+ * An interface to communicate with a remote broadcast receiver
+ * @tparam Msg the type of message that can be sent to this broadcast receiver
  */
 trait Broadcaster[Msg[+_, +_]] {
 

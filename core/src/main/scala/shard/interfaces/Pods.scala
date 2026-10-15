@@ -28,14 +28,14 @@ trait Pods {
   def ping(pod: PodAddress): Task[Unit]
 
   /**
-   * Send a message to a pod and receive its reply
+   * Send a message to a pod
    */
   def sendMessage(pod: PodAddress, message: BinaryMessage): Task[BinaryReply]
 
   /**
-   * Send a stream of messages to a pod and receive a single reply once they are all enqueued, or the first rejection
+   * Send a stream of messages to a pod
    */
-  def sendStream(pod: PodAddress, messages: ZStream[Any, Throwable, BinaryMessage]): Task[BinaryReply]
+  def sendStream(pod: PodAddress, messages: ZStream[Any, Nothing, BinaryMessage]): Task[BinaryReply]
 
   /**
    * Send a stream of messages to a pod and receive a stream of replies.
@@ -43,7 +43,7 @@ trait Pods {
    */
   def sendStreamAndReceiveStream(
     pod: PodAddress,
-    messages: ZStream[Any, Throwable, BinaryMessage]
+    messages: ZStream[Any, Nothing, BinaryMessage]
   ): ZStream[Any, Throwable, BinaryReply]
 }
 
@@ -55,17 +55,17 @@ object Pods {
    */
   val noop: ULayer[Pods] =
     ZLayer.succeed(new Pods {
-      def assignShards(pod: PodAddress, shards: Set[ShardId]): Task[Unit]                                  = ZIO.unit
-      def unassignShards(pod: PodAddress, shards: Set[ShardId]): Task[Unit]                                = ZIO.unit
-      def ping(pod: PodAddress): Task[Unit]                                                                = ZIO.unit
-      def sendMessage(pod: PodAddress, message: BinaryMessage): Task[BinaryReply]                          =
+      def assignShards(pod: PodAddress, shards: Set[ShardId]): Task[Unit]                                = ZIO.unit
+      def unassignShards(pod: PodAddress, shards: Set[ShardId]): Task[Unit]                              = ZIO.unit
+      def ping(pod: PodAddress): Task[Unit]                                                              = ZIO.unit
+      def sendMessage(pod: PodAddress, message: BinaryMessage): Task[BinaryReply]                        =
         ZIO.succeed(BinaryReply.Success(Array.emptyByteArray))
-      def sendStream(pod: PodAddress, messages: ZStream[Any, Throwable, BinaryMessage]): Task[BinaryReply] =
+      def sendStream(pod: PodAddress, messages: ZStream[Any, Nothing, BinaryMessage]): Task[BinaryReply] =
         ZIO.succeed(BinaryReply.Success(Array.emptyByteArray))
       def sendStreamAndReceiveStream(
         pod: PodAddress,
-        messages: ZStream[Any, Throwable, BinaryMessage]
-      ): ZStream[Any, Throwable, BinaryReply]                                                              =
+        messages: ZStream[Any, Nothing, BinaryMessage]
+      ): ZStream[Any, Throwable, BinaryReply]                                                            =
         ZStream.empty
     })
 
@@ -76,8 +76,7 @@ object Pods {
   case class BinaryMessage(entityId: String, entityType: String, body: Array[Byte], expectsReply: Boolean)
 
   /**
-   * A reply to a message. A stream of replies is a sequence of `Element`, ended by `StreamFailure`, `Defect`,
-   * `SerializationError` or `Interrupted` if it fails, or a single other reply if the request itself failed or was rejected.
+   * A reply to a message. A stream of replies is a sequence of `Element`, possibly ended by an error reply.
    */
   sealed trait BinaryReply
 
@@ -106,7 +105,7 @@ object Pods {
     /**
      * The message processing died with an unexpected error
      */
-    final case class Defect(className: String, message: String) extends BinaryReply
+    final case class Defect(message: String) extends BinaryReply
 
     /**
      * The message processing was interrupted before completing (e.g. the entity was stopped)

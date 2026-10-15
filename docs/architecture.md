@@ -44,7 +44,7 @@ When that happens, the Shard Manager will call the `assign` API of this pod.
 
 ### Pod Stop (`Sharding#unregister`)
 
-1. Pod prevents any new entity to be started locally. Any message received from other pods is rejected and retried by the sender.
+1. Pod prevents any new entity to be started locally. Any message received from other pods will return the `EntityNotManagedByThisPod` error and be retried.
 2. Pod stops all local entities. Messages already received are processed (up to `entityTerminationTimeout`).
 3. Once all entities are stopped, pod calls the `unregister` endpoint of the Shard Manager. This will trigger an instant rebalance, so that shards handled by this pod will be assigned to other pods.
 4. Pod stops the sharding API and is ready to stop.
@@ -56,9 +56,9 @@ When that happens, the Shard Manager will call the `assign` API of this pod.
 3. Pod1 checks in local shard assignments cache which pod is responsible for this entity. It is Pod2. If Pod1 == Pod2, the next step is skipped.
 4. Pod1 calls the `sendMessage` endpoint of Pod2's sharding API.
 5. Pod2 redirects the message to its `EntityManager`
-6. Pod2 `EntityManager` calculates the shard ID for that entity and checks that this shards ID should be handled locally. If not, Pod1 sends the message again once its shard assignments are updated.
-7. Pod2 starts the entity if it was not already started and enqueues the message in its mailbox.
-8. The entity processes the message, and its result is sent back to Pod1. If Pod1 stops waiting (e.g. because of a timeout), the processing of the message is interrupted.
+6. Pod2 `EntityManager` calculates the shard ID for that entity and checks that this shards ID should be handled locally. If not, it returns the `EntityNotManagedByThisPod` error.
+7. Pod2 starts the entity if it was not already started and forward the message to it.
+8. When a response is produced, the response is sent back to Pod1.
 
 ::: tip Unresponsive Pod
 If Pod2 is not responsive, Pod1 will call the `notifyUnhealthyPod` endpoint of the Shard Manager.

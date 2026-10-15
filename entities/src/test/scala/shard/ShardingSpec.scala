@@ -30,7 +30,10 @@ object ShardingSpec extends ZIOSpecDefault {
       )
     ) @@ sequential @@ withLiveClock
 
-  private val tests: List[Spec[Sharding, Any]] =
+  // tests relying on the in-process transport's chunking and delivery order
+  val inProcess: String = "in-process"
+
+  val tests: List[Spec[Sharding, Any]] =
     List(
       test("Send message to entities") {
         ZIO.scoped {
@@ -105,6 +108,15 @@ object ShardingSpec extends ZIOSpecDefault {
           } yield assertTrue(items == Chunk(0, 1, 0, 1, 2))
         }
       },
+      test("Response stream keeps the chunks of the entity's stream") {
+        ZIO.scoped {
+          for {
+            counter <- startCounter()
+            chunks  <- counter.stream("c1")(Chunked()).chunks.runCollect
+            restart <- counter.streamAutoRestart("c1", 0)(_ => Chunked())((c, _) => c).chunks.runCollect
+          } yield assertTrue(chunks == Chunk(Chunk(1, 2, 3), Chunk(4, 5)), restart == chunks)
+        }
+      } @@ TestAspect.tag(inProcess),
       test("Response stream interruption") {
         ZIO.scoped {
           for {
@@ -131,7 +143,7 @@ object ShardingSpec extends ZIOSpecDefault {
         }
       },
       autoRestartTest("Response stream auto restart")(
-        _.streamAutoRestart("c1", 0)(from => StreamingChangesFrom(from))((_, n) => n + 1)
+        _.streamAutoRestart("c1", 0)(from => StreamingChanges(from))((_, n) => n + 1)
       ),
       test("Entity manual termination") {
         ZIO.scoped {
@@ -144,7 +156,7 @@ object ShardingSpec extends ZIOSpecDefault {
           } yield assertTrue(c0 == 1, c1 == 0)
         }
       },
-      test("Activity postpones passivation") {
+      test("Entity termination with extension") {
         ZIO.scoped {
           for {
             counter <- startCounter(EntityOptions(maxIdleTime = Some(3.seconds)))
@@ -422,13 +434,17 @@ object ShardingSpec extends ZIOSpecDefault {
             counter <- startCounter()
             // the pod doesn't start entities anymore
             _       <- Sharding.unregister
-            fiber   <- counter.send("c1")(IncrementCounter()).fork
+            send    <- counter.send("c1")(IncrementCounter()).fork
+            stream  <- counter.stream("c1")(Chunked()).runCollect.fork
+            sent    <- counter.sendStream("c1")(ZStream(IncrementCounter())).fork
             _       <- Clock.sleep(500.millis)
-            pending <- fiber.poll
+            pending <- ZIO.foreach(List(send, stream, sent))(_.poll)
             _       <- Sharding.register
-            _       <- fiber.join
+            _       <- send.join
+            items   <- stream.join
+            _       <- sent.join
             c1      <- counter.send("c1")(GetCounter())
-          } yield assertTrue(pending.isEmpty, c1 == 1)
+          } yield assertTrue(pending.forall(_.isEmpty), items == Chunk(1, 2, 3, 4, 5), c1 == 2)
         }
       },
       test("Cluster singleton") {
@@ -450,14 +466,20 @@ object ShardingSpec extends ZIOSpecDefault {
           } yield assertTrue(c0 == 1000)
         }
       },
-      test("Send stream fails if the stream fails") {
+      test("Send stream fails if the stream fails, and dies if it dies") {
         ZIO.scoped {
           for {
             counter <- startCounter()
             error   <-
               counter.sendStream("c1")(ZStream(IncrementCounter(), IncrementCounter()) ++ ZStream.fail("oops")).flip
             c0      <- counter.send("c1")(GetCounter())
-          } yield assertTrue(error == "oops", c0 == 2)
+            died    <-
+              counter.sendStream("c1")(ZStream(IncrementCounter()) ++ ZStream.die(new RuntimeException("boom"))).exit
+          } yield assertTrue(
+            error == "oops",
+            c0 == 2,
+            died.causeOption.flatMap(_.dieOption).exists(_.getMessage == "boom")
+          )
         }
       },
       test("Duplex: send a stream and receive a stream") {
@@ -470,7 +492,8 @@ object ShardingSpec extends ZIOSpecDefault {
                          .runCollect
             _       <- Clock.sleep(1 second)
             res     <- counter.send("c1")(GetCounter())
-          } yield assertTrue(items.last == 6, res == -1)
+            empty   <- counter.duplex("c1")(Doubled(), ZStream.empty).runCollect
+          } yield assertTrue(items.last == 6, res == -1, empty.isEmpty)
         }
       },
       test("Duplex: the returned stream fails if the input stream fails, even when the replies end with the inputs") {
@@ -480,11 +503,15 @@ object ShardingSpec extends ZIOSpecDefault {
             results <- ZIO.foreach(1 to 20)(_ =>
                          counter.duplex("c1")(Doubled(), ZStream(1, 2, 3) ++ ZStream.fail("boom")).runCollect.either
                        )
-          } yield assertTrue(results.forall(_ == Left("boom")))
+            died    <- counter.duplex("c1")(Doubled(), ZStream(1) ++ ZStream.die(new Exception("boom"))).runCollect.exit
+          } yield assertTrue(
+            results.forall(_ == Left("boom")),
+            died.causeOption.flatMap(_.dieOption).exists(_.getMessage == "boom")
+          )
         }
       },
       autoRestartTest("Duplex auto restart")(
-        _.duplexAutoRestart("c1", 0)(from => DuplexChangesFrom(from), _ => ZStream.empty)((_, n) => n + 1)
+        _.duplexAutoRestart("c1", 0)(from => AddAndStreamChanges(from), _ => ZStream.empty)((_, n) => n + 1)
       ),
       test("A stream message processed while the entity is stopping is sent again") {
         ZIO.scoped {
@@ -531,7 +558,7 @@ object ShardingSpec extends ZIOSpecDefault {
             done     <- state.completed.get
           } yield assertTrue(done == 5) // 2 messages processed before the move, then the 3 messages
         }
-      },
+      } @@ TestAspect.tag(inProcess),
       test("Entity is restarted after one of its finalizers died") {
         ZIO.scoped {
           for {
@@ -637,20 +664,19 @@ object CounterActor {
   case class CounterError(message: String)
 
   enum CounterMessage[+E, +A] {
-    case GetCounter()                 extends CounterMessage[Nothing, Int]
-    case IncrementCounter()           extends CounterMessage[Nothing, Unit]
-    case DecrementCounter()           extends CounterMessage[Nothing, Unit]
-    case Fail()                       extends CounterMessage[CounterError, Unit]
-    case Die()                        extends CounterMessage[Nothing, Unit]
-    case StreamingChanges()           extends CounterMessage[Nothing, Streamed[Nothing, Int]]
+    case GetCounter()                       extends CounterMessage[Nothing, Int]
+    case IncrementCounter()                 extends CounterMessage[Nothing, Unit]
+    case DecrementCounter()                 extends CounterMessage[Nothing, Unit]
+    case Fail()                             extends CounterMessage[CounterError, Unit]
+    case Die()                              extends CounterMessage[Nothing, Unit]
+    case StreamingChanges(from: Int = 0)    extends CounterMessage[Nothing, Streamed[Nothing, Int]]
     // 1 to 1000, then dies
-    case DyingStream()                extends CounterMessage[Nothing, Streamed[Nothing, Int]]
-    case StreamingChangesFrom(n: Int) extends CounterMessage[Nothing, Streamed[Nothing, Int]]
-    case AddAndStreamChanges()        extends CounterMessage[Nothing, Duplex[Int, Nothing, Int]]
-    case DuplexChangesFrom(n: Int)    extends CounterMessage[Nothing, Duplex[Int, Nothing, Int]]
+    case DyingStream()                      extends CounterMessage[Nothing, Streamed[Nothing, Int]]
+    case Chunked()                          extends CounterMessage[Nothing, Streamed[Nothing, Int]]
+    case AddAndStreamChanges(from: Int = 0) extends CounterMessage[Nothing, Duplex[Int, Nothing, Int]]
     // replies with each input doubled, and ends when the inputs end
-    case Doubled()                    extends CounterMessage[Nothing, Duplex[Int, Nothing, Int]]
-    case TriggerTerminate()           extends CounterMessage[Nothing, Unit]
+    case Doubled()                          extends CounterMessage[Nothing, Duplex[Int, Nothing, Int]]
+    case TriggerTerminate()                 extends CounterMessage[Nothing, Unit]
   }
 
   object Counter extends EntityType[CounterMessage]("counter")
@@ -671,29 +697,26 @@ object CounterActor {
     } yield new Counter.Handler {
       def handle[E, A](message: CounterMessage[E, A]): IO[E, A] =
         message match {
-          case GetCounter()            => state.get
-          case IncrementCounter()      => state.update(_ + 1)
-          case DecrementCounter()      => state.update(_ - 1)
-          case Fail()                  => ZIO.fail(CounterError("failed"))
-          case Die()                   => ZIO.die(new Exception("boom"))
-          case StreamingChanges()      => ZIO.succeed(Streamed(state.changes.ensuring(state.set(-1))))
-          case DyingStream()           =>
+          case GetCounter()              => state.get
+          case IncrementCounter()        => state.update(_ + 1)
+          case DecrementCounter()        => state.update(_ - 1)
+          case Fail()                    => ZIO.fail(CounterError("failed"))
+          case Die()                     => ZIO.die(new Exception("boom"))
+          case StreamingChanges(from)    => ZIO.succeed(Streamed(state.changes.filter(_ >= from).ensuring(state.set(-1))))
+          case DyingStream()             =>
             ZIO.succeed(Streamed(ZStream.fromIterable(1 to 1000) ++ ZStream.die(new Exception("boom"))))
-          case StreamingChangesFrom(n) => ZIO.succeed(Streamed(state.changes.filter(_ >= n)))
-          case AddAndStreamChanges()   =>
+          case Chunked()                 => ZIO.succeed(Streamed(ZStream.fromChunks(Chunk(1, 2, 3), Chunk(4, 5))))
+          case AddAndStreamChanges(from) =>
             ZIO.succeed(
               Duplex[Int, Nothing, Int](input =>
-                state.changes.drainFork(input.mapZIO(n => state.update(_ + n))).ensuring(state.set(-1))
+                state.changes
+                  .filter(_ >= from)
+                  .drainFork(input.mapZIO(n => state.update(_ + n)))
+                  .ensuring(state.set(-1))
               )
             )
-          case DuplexChangesFrom(n)    =>
-            ZIO.succeed(
-              Duplex[Int, Nothing, Int](input =>
-                state.changes.filter(_ >= n).drainFork(input.mapZIO(i => state.update(_ + i)))
-              )
-            )
-          case Doubled()               => ZIO.succeed(Duplex[Int, Nothing, Int](_.map(_ * 2)))
-          case TriggerTerminate()      => sharding.terminateLocalEntity(Counter, entityId)
+          case Doubled()                 => ZIO.succeed(Duplex[Int, Nothing, Int](_.map(_ * 2)))
+          case TriggerTerminate()        => sharding.terminateLocalEntity(Counter, entityId)
         }
     }
 

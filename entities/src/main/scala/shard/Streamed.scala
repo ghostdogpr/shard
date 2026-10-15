@@ -12,4 +12,4 @@ final case class Streamed[+E, +A](stream: ZStream[Any, E, A])
  * The reply type of a message that receives a stream of `In` and replies with a stream of `A` that can fail with `E`.
  * Send it with `Messenger#duplex`.
  */
-final case class Duplex[In, +E, +A](run: ZStream[Any, Nothing, In] => ZStream[Any, E, A])
+final case class Duplex[-In, +E, +A](run: ZStream[Any, Nothing, In] => ZStream[Any, E, A])

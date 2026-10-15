@@ -23,10 +23,11 @@ object Client {
       .scoped[Sharding](
         for {
           ping <- Sharding.messenger(PingPongEntity)
-          _    <-
-            ZIO
-              .foreachParDiscard(1 to streams)(_ => ping.stream("ping")(StreamPing("ping", messagesPerStream)).runDrain)
-              .withParallelism(parallelism)
+          _    <- ZIO
+                    .foreachParDiscard(1 to streams) { _ =>
+                      ping.stream("ping")(StreamPing("ping", messagesPerStream)).runDrain
+                    }
+                    .withParallelism(parallelism)
         } yield ()
       )
       .provide(config, Server.sharding)

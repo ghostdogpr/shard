@@ -6,9 +6,14 @@ import shard.interfaces.MessageCodec.ReplyCodec
  * Per-message-type codec used by Shard to serialise entity / topic messages and
  * their replies on the wire.
  *
- * Each variant of `Msg[E, A]` declares its error type `E` and reply type `A`.
+ * Carried by `RecipientType[Msg]` via an implicit `MessageCodec[Msg]` parameter, so each
+ * `EntityType` / `TopicType` declaration picks up the codec from the surrounding scope.
  *
- * `EntityType` and `TopicType` declarations pick up the codec from the surrounding scope.
+ * Implementations decide how `Msg` is encoded and — for reply-bearing variants — which
+ * encoder/decoder pair to use for the reply type.
+ * For uniform backends (e.g. Kryo) the reply codec is the same regardless of which
+ * variant the message is; for variant-aware backends (e.g. Proteus) it depends on the
+ * concrete variant.
  */
 trait MessageCodec[Msg[+_, +_]] {
 
@@ -29,22 +34,22 @@ trait MessageCodec[Msg[+_, +_]] {
 }
 
 object MessageCodec {
-  type Encoder = Any => Array[Byte]
-  type Decoder = Array[Byte] => Any
+  type Encoder    = Any => Array[Byte]
+  type Decoder[A] = Array[Byte] => A
 
   /**
    * A codec that uses the same `Codec` for the messages and all their replies.
    */
   def uniform[Msg[+_, +_]](codec: Codec): MessageCodec[Msg] =
     new MessageCodec[Msg] {
-      private val replies: ReplyCodec = ReplyCodec.uniform(codec)
+      private val replies: ReplyCodec = ReplyCodec(codec, codec, codec, codec)
 
       def encodeMessage(message: Msg[Any, Any]): Array[Byte] = codec.encode(message)
       def decodeMessage(bytes: Array[Byte]): Msg[Any, Any]   = codec.decode(bytes).asInstanceOf[Msg[Any, Any]]
       def replyCodec(message: Msg[Any, Any]): ReplyCodec     = replies
     }
 
-  final case class Codec(encode: Encoder, decode: Decoder)
+  final case class Codec(encode: Encoder, decode: Decoder[Any])
 
   object Codec {
 
@@ -72,12 +77,4 @@ object MessageCodec {
    * @param streamInput codec for `In` when `A` is `Duplex[In, E2, B]`
    */
   final case class ReplyCodec(error: Codec, value: Codec, streamError: Codec, streamInput: Codec)
-
-  object ReplyCodec {
-
-    /**
-     * A reply codec that uses the same codec for everything.
-     */
-    def uniform(codec: Codec): ReplyCodec = ReplyCodec(codec, codec, codec, codec)
-  }
 }

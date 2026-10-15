@@ -100,21 +100,21 @@ class GrpcPods(
         .mapBoth(mapClientError(pod, isStream = false), _.reply)
     }
 
-  def sendStream(pod: PodAddress, messages: ZStream[Any, Throwable, BinaryMessage]): Task[BinaryReply] =
+  def sendStream(pod: PodAddress, messages: ZStream[Any, Nothing, BinaryMessage]): Task[BinaryReply] =
     getConnection(pod).flatMap { conn =>
       conn
-        .sendStream(messages.mapError(Status.INTERNAL.withCause(_).asException()))
+        .sendStream(messages)
         .mapBoth(mapClientError(pod, isStream = false), _.reply)
     }
 
   def sendStreamAndReceiveStream(
     pod: PodAddress,
-    messages: ZStream[Any, Throwable, BinaryMessage]
+    messages: ZStream[Any, Nothing, BinaryMessage]
   ): ZStream[Any, Throwable, BinaryReply] =
     ZStream
       .fromZIO(getConnection(pod))
       .flatMap(
-        _.sendStreamAndReceiveStream(messages.mapError(Status.INTERNAL.withCause(_).asException()))
+        _.sendStreamAndReceiveStream(messages)
           .mapBoth(mapClientError(pod, isStream = true), _.reply)
       )
 }

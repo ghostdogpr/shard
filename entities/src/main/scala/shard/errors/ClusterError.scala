@@ -14,8 +14,7 @@ final case class MailboxFull(entityType: String, entityId: String)
     extends ClusterError(s"Mailbox of $entityType $entityId is full")
 
 /**
- * The call did not complete within the messenger's or broadcaster's timeout. For `send` and `broadcast`, the processing
- * of the message is interrupted (unless it is `Uninterruptible`).
+ * The call did not complete within the messenger's or broadcaster's timeout.
  */
 final case class SendTimeout(entityType: String, entityId: String)
     extends ClusterError(s"Timeout sending message to $entityType $entityId")
@@ -49,7 +48,7 @@ final case class MessageDiscarded(entityType: String, entityId: String)
     extends ClusterError(s"Message to $entityType $entityId was discarded because the entity is not running")
 
 /**
- * A message, reply, stream element or stream input failed to be encoded or decoded, on the sender's or the entity's pod.
+ * A message, reply or stream element failed to be encoded or decoded.
  */
 final case class SerializationError(message: String) extends ClusterError(message)
 
@@ -59,6 +58,6 @@ final case class SerializationError(message: String) extends ClusterError(messag
 final case class TransportError(message: String) extends ClusterError(message)
 
 /**
- * The entity died while processing the message (or failed to start), and was stopped.
+ * The entity died while processing the message or streaming its reply (or failed to start).
  */
 final case class EntityDefect(message: String) extends ClusterError(message)

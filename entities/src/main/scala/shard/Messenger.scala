@@ -8,7 +8,7 @@ import scala.annotation.implicitNotFound
 import scala.util.NotGiven
 
 /**
- * An interface to communicate with the entities of a given type, possibly located on other pods.
+ * An interface to communicate with a remote entity.
  * The messenger's timeout only applies to `send` and `sendDiscard`.
  * @tparam Msg the type of message that can be sent to this entity type
  */
@@ -16,8 +16,8 @@ trait Messenger[Msg[+_, +_]] {
 
   /**
    * Send a message and wait for its reply.
-   * Fails with `SendTimeout` when the messenger's timeout is reached, and interrupts the processing of the message
-   * (unless it is `Uninterruptible`). The message may be processed more than once if its pod becomes unavailable.
+   * On `SendTimeout`, the processing of the message is interrupted unless it is `Uninterruptible`.
+   * The message may be processed more than once if its pod becomes unavailable.
    */
   def send[E, A](entityId: String)(message: Msg[E, A])(using Unary[A]): IO[E | ClusterError, A]
 
@@ -35,7 +35,7 @@ trait Messenger[Msg[+_, +_]] {
   /**
    * Send a message along with a stream of inputs, and receive a stream of replies.
    * The stream fails with `StreamCancelled` if the entity is rebalanced while streaming (see `duplexAutoRestart`).
-   * The inputs may be sent again on retry, so the input stream must be one that can be run more than once.
+   * The input stream may be run more than once on retry.
    */
   def duplex[E, In, E1, E2, A](entityId: String)(
     message: Msg[E, Duplex[In, E2, A]],
@@ -70,10 +70,6 @@ trait Messenger[Msg[+_, +_]] {
 }
 
 object Messenger {
-
-  /**
-   * The timeout applied by a messenger to the messages it sends
-   */
   sealed trait MessengerTimeout
   object MessengerTimeout {
     case object NoTimeout                  extends MessengerTimeout
@@ -84,23 +80,18 @@ object Messenger {
   private[shard] def autoRestart[Cursor, E, A](cursor: Cursor)(
     stream: Cursor => ZStream[Any, E, A]
   )(updateCursor: (Cursor, A) => Cursor): ZStream[Any, E, A] =
-    ZStream
-      .suspend(stream(cursor))
-      .either
-      .mapAccum(cursor) {
-        case (c, Right(a))  => updateCursor(c, a) -> Right(a)
-        case (c, Left(err)) => (c, Left(c -> err))
-      }
-      .flatMap {
-        case Right(a)                                => ZStream.succeed(a)
-        case Left((lastSeenCursor, StreamCancelled)) =>
-          ZStream.execute(ZIO.sleep(200.millis)) ++ autoRestart(lastSeenCursor)(stream)(updateCursor)
-        case Left((_, err))                          => ZStream.fail(err)
-      }
+    ZStream.unwrap(Ref.make(cursor).map { lastSeen =>
+      def run: ZStream[Any, E, A] =
+        ZStream
+          .unwrap(lastSeen.get.map(stream))
+          .mapChunksZIO(chunk => lastSeen.update(chunk.foldLeft(_)(updateCursor)).as(chunk))
+          .catchSome { case StreamCancelled => ZStream.execute(ZIO.sleep(200.millis)) ++ run }
+      run
+    })
 }
 
 /**
- * Evidence that a reply is a single value, and not a stream (`Nothing` and types a stream could inhabit are rejected).
+ * Evidence that a reply is a single value, not a stream.
  */
 @implicitNotFound(
   "Cannot send a message whose reply type is ${A} with `send` or `sendDiscard`. Use `stream` for Streamed replies and `duplex` for Duplex replies. A reply type that could be a stream (e.g. Any) or Nothing is not supported: use Unit for messages that reply with nothing."
@@ -110,17 +101,11 @@ sealed trait Unary[A]
 object Unary {
   private val instance: Unary[Any] = new Unary[Any] {}
 
-  /**
-   * Evidence that a `Duplex` value can inhabit `A` (only used to reject such types).
-   */
-  sealed trait DuplexInhabits[A]
-  given [In, A](using Duplex[In, Nothing, Nothing] <:< A): DuplexInhabits[A] = null
-
   given [A](using
     NotGiven[A <:< Streamed[?, ?]],
     NotGiven[A <:< Duplex[?, ?, ?]],
     NotGiven[Streamed[Nothing, Nothing] <:< A],
-    NotGiven[DuplexInhabits[A]]
+    NotGiven[Duplex[Any, Nothing, Nothing] <:< A]
   ): Unary[A] =
     instance.asInstanceOf[Unary[A]]
 }

@@ -20,12 +20,12 @@ object LocalSharding {
       def sendMessage(pod: PodAddress, message: BinaryMessage): Task[BinaryReply] =
         sharding.await.flatMap(_.sendToLocalEntity(message))
 
-      def sendStream(pod: PodAddress, messages: ZStream[Any, Throwable, BinaryMessage]): Task[BinaryReply] =
+      def sendStream(pod: PodAddress, messages: ZStream[Any, Nothing, BinaryMessage]): Task[BinaryReply] =
         sharding.await.flatMap(_.sendStreamToLocalEntity(messages))
 
       def sendStreamAndReceiveStream(
         pod: PodAddress,
-        messages: ZStream[Any, Throwable, BinaryMessage]
+        messages: ZStream[Any, Nothing, BinaryMessage]
       ): ZStream[Any, Throwable, BinaryReply] =
         ZStream.unwrap(sharding.await.map(_.sendStreamToLocalEntityAndReceiveStream(messages)))
     }

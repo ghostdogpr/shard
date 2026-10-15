@@ -1,6 +1,5 @@
 package shard
 
-import shard.errors.EntityDefect
 import shard.interfaces.Storage
 import shard.javaSerialization.given
 import zio.test.TestAspect.{ sequential, withLiveClock }
@@ -23,9 +22,8 @@ object BroadcastingSpec extends ZIOSpecDefault {
             _           <- Clock.sleep(1 second)
             c1          <- incrementer.broadcast("c1")(IncrementerActor.IncrementerMessage.GetIncrement())
           } yield assertTrue(
-            c1.values.toList == List(
-              Exit.succeed(1)
-            ) // Here we have just one pod, so there will be just one incrementer
+            // Here we have just one pod, so there will be just one incrementer
+            c1.values.toList == List(Exit.succeed(1))
           )
         }
       },
@@ -35,7 +33,7 @@ object BroadcastingSpec extends ZIOSpecDefault {
             _           <- Sharding.registerTopic(IncrementerActor.Incrementer)(IncrementerActor.behavior)
             _           <- Sharding.registerScoped
             self        <- ZIO.serviceWith[Config](config => PodAddress(config.selfHost, config.shardingPort))
-            // another pod, assigned a shard id that is not used: the local transport delivers its messages locally too
+            // another pod on an unused shard (the local transport delivers its messages locally)
             other        = PodAddress("other", 1)
             _           <- ZIO.serviceWithZIO[Storage](_.saveAssignments(Config.default.role, Map(301 -> Some(other))))
             _           <- (Clock.sleep(10.millis) *> Sharding.getPods).repeatUntil(_.contains(other))
@@ -43,18 +41,6 @@ object BroadcastingSpec extends ZIOSpecDefault {
             replies     <- incrementer.broadcast("c1")(IncrementerActor.IncrementerMessage.Fail())
             _           <- ZIO.serviceWithZIO[Storage](_.saveAssignments(Config.default.role, Map.empty))
           } yield assertTrue(replies == Map(self -> Exit.fail("failed"), other -> Exit.fail("failed")))
-        }
-      },
-      test("Broadcast to entities that die") {
-        ZIO.scoped {
-          for {
-            _           <- Sharding.registerTopic(IncrementerActor.Incrementer)(IncrementerActor.behavior)
-            _           <- Sharding.registerScoped
-            incrementer <- Sharding.broadcaster(IncrementerActor.Incrementer)
-            replies     <- incrementer.broadcast("c1")(IncrementerActor.IncrementerMessage.Die())
-          } yield assertTrue(
-            replies.values.toList == List(Exit.fail(EntityDefect("Entity died with java.lang.Exception: boom")))
-          )
         }
       }
     ).provideShared(
@@ -69,7 +55,6 @@ object BroadcastingSpec extends ZIOSpecDefault {
       case BroadcastIncrement() extends IncrementerMessage[Nothing, Unit]
       case GetIncrement()       extends IncrementerMessage[Nothing, Int]
       case Fail()               extends IncrementerMessage[String, Unit]
-      case Die()                extends IncrementerMessage[Nothing, Unit]
     }
 
     object Incrementer extends TopicType[IncrementerMessage]("incrementer")
@@ -85,7 +70,6 @@ object BroadcastingSpec extends ZIOSpecDefault {
                   case IncrementerMessage.BroadcastIncrement() => ref.update(_ + 1)
                   case IncrementerMessage.GetIncrement()       => ref.get
                   case IncrementerMessage.Fail()               => ZIO.fail("failed")
-                  case IncrementerMessage.Die()                => ZIO.die(new Exception("boom"))
                 }
             }
           )

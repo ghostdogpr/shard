@@ -11,12 +11,8 @@ import scala.deriving.Mirror
 /**
  * An inline-derived `MessageCodec[Msg]` backed by Proteus.
  *
- * Derives a codec for `Msg`, and for the error and reply types of each variant (including the elements, errors and
- * inputs of `Streamed` and `Duplex` replies).
- *
  * `Msg` must be a sealed trait or an enum whose variants extend it with fixed type arguments.
- * Error and reply types must be case classes, sealed traits, enums, `Unit`, `Nothing`, or have a `ProtobufCodec` in
- * scope (otherwise, wrap them in a case class).
+ * Error and reply types must be case classes, sealed traits, enums, `Unit`, `Nothing`, or have a `ProtobufCodec` in scope.
  */
 object ProteusMessageCodec {
 
@@ -25,7 +21,7 @@ object ProteusMessageCodec {
    */
   inline def derived[Msg[+_, +_]](using m: Mirror.SumOf[Msg[Any, Any]], deriver: ProtobufDeriver): MessageCodec[Msg] =
     build[Msg](
-      summonOrDerive[Msg[Any, Any]],
+      summonOrDeriveProtobufCodec[Msg[Any, Any]],
       m.ordinal(_),
       collectReplyCodecs[Msg, m.MirroredElemTypes].toArray
     )
@@ -81,7 +77,7 @@ object ProteusMessageCodec {
   private def fromProtobufCodec[A](codec: ProtobufCodec[A]): Codec =
     Codec(value => codec.encode(value.asInstanceOf[A]), bytes => codec.decode(bytes))
 
-  private inline def summonOrDerive[A](using deriver: ProtobufDeriver): ProtobufCodec[A] =
+  private inline def summonOrDeriveProtobufCodec[A](using deriver: ProtobufDeriver): ProtobufCodec[A] =
     summonFrom {
       case codec: ProtobufCodec[A] => codec
       case _                       => ProtobufCodec.derived[A](using deriver)

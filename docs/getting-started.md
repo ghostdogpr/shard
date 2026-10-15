@@ -124,7 +124,7 @@ enum GuildMessage[+E, +A] {
 }
 ```
 We also need to define an **Entity Type**. This is done by extending `EntityType` with the message type as well as a unique `String` identifier for this type.
-The `EntityType` constructor requires a given `MessageCodec[GuildMessage]` in scope, which decides how messages and their replies are serialized on the wire. Here we pull in the Kryo backend's universal given by importing it next to the declaration:
+The `EntityType` constructor requires a given `MessageCodec[GuildMessage]` in scope, which decides how messages are serialized on the wire. Here we pull in the Kryo backend's universal given by importing it next to the declaration:
 ```scala
 import shard.kryo.given
 
@@ -139,8 +139,8 @@ def behavior(entityId: String): ZIO[Scope, Nothing, Guild.Handler]
 It is called when an entity starts, and returns the **handler** that processes its messages, one at a time.
 The handler's `handle` method takes a message and returns its reply, and the compiler checks that each reply has the type declared by its message.
 
-We will use a `Ref[Set[String]]` to hold our state (the list of users in the guild), starting from an empty state when the entity is created.
-When we receive a `Join` request, we check if the guild is already full (here, we hardcode the max to 5) and fail with `GuildFull`, or modify the state and return the full list of guild members.
+We will use a `Ref[Set[String]]` to hold our state (the list of users in the guild).
+When we receive a `Join` request, we check if the guild is already full (here, we hardcode the max to 5) and respond with a failure or modify the state and respond with a success.
 ```scala
 def behavior(entityId: String): ZIO[Scope, Nothing, Guild.Handler] =
   Ref.make(Set.empty[String]).map { state =>
@@ -215,7 +215,7 @@ See the [Entities and Messaging](entities.md) section for these, as well as enti
 #### One more thing...
 `Sharding` also exposes 2 methods that can be interesting for some use cases:
 - `registerSingleton` lets you register some background processes that will run in only one pod at any given time. Singletons can't receive messages and they are not stopped in case of inactivity.
-- `registerTopic` lets you broadcast messages to all registered pods (use `Sharding.broadcaster` instead of `Sharding.messenger`, see [Topics](entities.md#topics)).
+- `registerTopic` lets you broadcast messages to all registered pods (use `Sharding.broadcaster` instead of `Sharding.messenger`).
 
 ### Where to go from there?
 In this simple example, we only had a single pod so there was no real benefit from using sharding.

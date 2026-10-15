@@ -79,16 +79,13 @@ trait Pods {
   def ping(pod: PodAddress): Task[Unit]
 
   def sendMessage(pod: PodAddress, message: BinaryMessage): Task[BinaryReply]
-  def sendStream(pod: PodAddress, messages: ZStream[Any, Throwable, BinaryMessage]): Task[BinaryReply]
+  def sendStream(pod: PodAddress, messages: ZStream[Any, Nothing, BinaryMessage]): Task[BinaryReply]
   def sendStreamAndReceiveStream(
     pod: PodAddress,
-    messages: ZStream[Any, Throwable, BinaryMessage]
+    messages: ZStream[Any, Nothing, BinaryMessage]
   ): ZStream[Any, Throwable, BinaryReply]
 }
 ```
-A `BinaryReply` is the result of a message (success, typed failure, defect, serialization error, interruption or rejection), or an element of a stream of replies.
-When the pod can't be reached, the transport should fail with `PodUnavailable` so that the message is retried.
-
 For testing, you can use the `Pods.noop` layer that does nothing.
 
 Shard provides an implementation of `Pods` using the gRPC protocol. To use it, add the following dependency:
@@ -110,7 +107,6 @@ trait MessageCodec[Msg[+_, +_]] {
   def replyCodec(message: Msg[Any, Any]): ReplyCodec
 }
 ```
-`replyCodec` returns the codecs for the reply and error types of a given message.
 
 `RecipientType[Msg]` (the parent of `EntityType[Msg]` and `TopicType[Msg]`) requires a given `MessageCodec[Msg]` at the declaration site.
 
@@ -166,7 +162,7 @@ object Guild extends EntityType[GuildMessage]("guild")
 ### Proteus
 
 Uses [Proteus](https://github.com/ghostdogpr/proteus) (macro-derived, protobuf-compatible wire format).
-The codec is derived per message type at compile time, along with codecs for the reply and error types of each variant.
+The codec is derived per message type at compile time.
 Message types must be a sealed trait or an enum, whose variants extend it with fixed type arguments.
 Reply and error types must be a case class, sealed trait, enum, `Unit`, `Nothing` or have a `ProtobufCodec` in scope: other types (`Int`, `Set[String]`, …) need to be wrapped in a case class.
 
