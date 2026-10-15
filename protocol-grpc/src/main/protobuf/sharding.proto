@@ -3,10 +3,9 @@ syntax = "proto3";
 service ShardingService {
     rpc AssignShards (AssignShardsRequest) returns (AssignShardsResponse) {}
     rpc UnassignShards (UnassignShardsRequest) returns (UnassignShardsResponse) {}
-    rpc Send (SendRequest) returns (SendResponse) {}
-    rpc SendStream (stream SendRequest) returns (SendResponse) {}
-    rpc SendAndReceiveStream (SendRequest) returns (stream SendResponse) {}
-    rpc SendStreamAndReceiveStream (stream SendRequest) returns (stream SendResponse) {}
+    rpc Send (BinaryMessage) returns (SendResponse) {}
+    rpc SendStream (stream BinaryMessage) returns (SendResponse) {}
+    rpc SendStreamAndReceiveStream (stream BinaryMessage) returns (stream SendResponse) {}
     rpc PingShards (PingShardsRequest) returns (PingShardsResponse) {}
 }
 
@@ -22,15 +21,58 @@ message UnassignShardsRequest {
 
 message UnassignShardsResponse {}
 
-message SendRequest {
+message BinaryMessage {
     string entity_id = 1;
     string entity_type = 2;
     bytes body = 3;
-    optional string reply_id = 4;
+    bool expects_reply = 4;
 }
 
 message SendResponse {
-    optional bytes body = 1;
+    message Success {
+        bytes body = 1;
+    }
+
+    message Failure {
+        bytes body = 1;
+    }
+
+    message Element {
+        bytes body = 1;
+    }
+
+    message StreamFailure {
+        bytes body = 1;
+    }
+
+    message Defect {
+        string message = 1;
+    }
+
+    message Interrupted {}
+
+    message MailboxFull {}
+
+    message Discarded {}
+
+    message EntityNotManagedByThisPod {}
+
+    message SerializationError {
+        string message = 1;
+    }
+
+    oneof reply {
+        Success success = 1;
+        Failure failure = 2;
+        Element element = 3;
+        StreamFailure stream_failure = 4;
+        Defect defect = 5;
+        Interrupted interrupted = 6;
+        MailboxFull mailbox_full = 7;
+        Discarded discarded = 8;
+        EntityNotManagedByThisPod entity_not_managed_by_this_pod = 9;
+        SerializationError serialization_error = 10;
+    }
 }
 
 message PingShardsRequest {}

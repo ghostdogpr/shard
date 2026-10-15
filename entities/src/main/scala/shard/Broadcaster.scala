@@ -1,22 +1,23 @@
 package shard
 
-import zio.UIO
-
-import scala.util.Try
+import shard.errors.ClusterError
+import zio.{ Exit, UIO }
 
 /**
  * An interface to communicate with a remote broadcast receiver
  * @tparam Msg the type of message that can be sent to this broadcast receiver
  */
-trait Broadcaster[-Msg] {
+trait Broadcaster[Msg[+_, +_]] {
 
   /**
    * Broadcast a message without waiting for a response (fire and forget)
    */
-  def broadcastDiscard(topic: String)(msg: Msg): UIO[Unit]
+  def broadcastDiscard[E, A](topic: String)(message: Msg[E, A])(using Unary[A]): UIO[Unit]
 
   /**
    * Broadcast a message and wait for a response from each consumer
    */
-  def broadcast[Res](topic: String)(msg: Replier[Res] => Msg): UIO[Map[PodAddress, Try[Res]]]
+  def broadcast[E, A](topic: String)(message: Msg[E, A])(using
+    Unary[A]
+  ): UIO[Map[PodAddress, Exit[E | ClusterError, A]]]
 }

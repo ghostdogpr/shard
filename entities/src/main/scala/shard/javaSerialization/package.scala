@@ -3,6 +3,7 @@ package shard
 import java.io.{ ByteArrayInputStream, ByteArrayOutputStream, ObjectInputStream, ObjectOutputStream }
 
 import shard.interfaces.MessageCodec
+import shard.interfaces.MessageCodec.Codec
 
 /**
  * Java-serialization backend given.
@@ -15,30 +16,19 @@ import shard.interfaces.MessageCodec
  * `shard.kryo` or a macro-derived backend.
  */
 package object javaSerialization {
-  given derive[Msg]: MessageCodec[Msg] = new MessageCodec[Msg] {
-    private val universalEncoder: Any => Array[Byte] = (v: Any) => writeBytes(v)
+  given derive[Msg[+_, +_]]: MessageCodec[Msg] = MessageCodec.uniform(Codec(writeBytes, readBytes))
 
-    def encodeMessage(message: Msg): Array[Byte] = writeBytes(message)
+  private def writeBytes(value: Any): Array[Byte] = {
+    val baos = new ByteArrayOutputStream
+    val oos  = new ObjectOutputStream(baos)
+    try oos.writeObject(value)
+    finally oos.close()
+    baos.toByteArray
+  }
 
-    def decodeMessage(bytes: Array[Byte]): Msg = readBytes(bytes)
-
-    def replyEncoder(decoded: Msg): Any => Array[Byte] = universalEncoder
-
-    def replyDecoder[Res](sample: Msg): Array[Byte] => Res       = bytes => readBytes[Res](bytes)
-    def streamReplyDecoder[Res](sample: Msg): Array[Byte] => Res = bytes => readBytes[Res](bytes)
-
-    private def writeBytes(value: Any): Array[Byte] = {
-      val baos = new ByteArrayOutputStream
-      val oos  = new ObjectOutputStream(baos)
-      try oos.writeObject(value)
-      finally oos.close()
-      baos.toByteArray
-    }
-
-    private def readBytes[A](bytes: Array[Byte]): A = {
-      val ois = new ObjectInputStream(new ByteArrayInputStream(bytes))
-      try ois.readObject().asInstanceOf[A]
-      finally ois.close()
-    }
+  private def readBytes(bytes: Array[Byte]): Any = {
+    val ois = new ObjectInputStream(new ByteArrayInputStream(bytes))
+    try ois.readObject()
+    finally ois.close()
   }
 }

@@ -1,107 +1,72 @@
 package shard
 
-import shard.errors.StreamCancelled
+import shard.errors.{ ClusterError, StreamCancelled }
 import zio._
 import zio.stream.ZStream
 
+import scala.annotation.implicitNotFound
+import scala.util.NotGiven
+
 /**
- * An interface to communicate with a remote entity
+ * An interface to communicate with a remote entity.
+ * The messenger's timeout only applies to `send` and `sendDiscard`.
  * @tparam Msg the type of message that can be sent to this entity type
  */
-trait Messenger[-Msg] {
+trait Messenger[Msg[+_, +_]] {
 
   /**
-   * Send a message without waiting for a response (fire and forget)
+   * Send a message and wait for its reply.
+   * On `SendTimeout`, the processing of the message is interrupted unless it is `Uninterruptible`.
+   * The message may be processed more than once if its pod becomes unavailable.
    */
-  def sendDiscard(entityId: String)(msg: Msg): Task[Unit]
+  def send[E, A](entityId: String)(message: Msg[E, A])(using Unary[A]): IO[E | ClusterError, A]
 
   /**
-   * Send a message and wait for a response of type `Res`
+   * Send a message without waiting for it to be processed: returns once it is in the entity's mailbox.
    */
-  def send[Res](entityId: String)(msg: Replier[Res] => Msg): Task[Res]
+  def sendDiscard[E, A](entityId: String)(message: Msg[E, A])(using Unary[A]): IO[ClusterError, Unit]
 
   /**
-   * Send a message and receive a stream of responses of type `Res`.
-   *
-   * Note: The returned stream will fail with a `PodUnavailable` error if the remote entity is rebalanced while
-   * streaming responses. See `sendStreamAutoRestart` for an alternative that will automatically restart the stream
-   * in case of rebalance.
+   * Send a message and receive a stream of replies.
+   * The stream fails with `StreamCancelled` if the entity is rebalanced while streaming (see `streamAutoRestart`).
    */
-  def sendAndReceiveStream[Res](entityId: String)(msg: StreamReplier[Res] => Msg): Task[ZStream[Any, Throwable, Res]]
+  def stream[E, E2, A](entityId: String)(message: Msg[E, Streamed[E2, A]]): ZStream[Any, E | E2 | ClusterError, A]
 
   /**
-   * Send a stream of messages.
+   * Send a message along with a stream of inputs, and receive a stream of replies.
+   * The stream fails with `StreamCancelled` if the entity is rebalanced while streaming (see `duplexAutoRestart`).
+   * The input stream may be run more than once on retry.
    */
-  def sendStream(entityId: String)(messages: ZStream[Any, Throwable, Msg]): Task[Unit]
+  def duplex[E, In, E1, E2, A](entityId: String)(
+    message: Msg[E, Duplex[In, E2, A]],
+    input: ZStream[Any, E1, In]
+  ): ZStream[Any, E | E1 | E2 | ClusterError, A]
 
   /**
-   * Send a stream of messages and receive a stream of responses of type `Res`.
-   *
-   * The first message carrying the `StreamReplier` is constructed via `request`; any
-   * additional messages flow through `rest`.
+   * Send a stream of messages, in order, and return once they are all in the entity's mailbox.
+   * Fails at the first rejected message (e.g. `MailboxFull`). On retry, the whole stream is sent again from the start.
    */
-  def sendStreamAndReceiveStream[Res](
-    entityId: String
-  )(request: StreamReplier[Res] => Msg, rest: ZStream[Any, Throwable, Msg]): Task[ZStream[Any, Throwable, Res]]
+  def sendStream[E1](entityId: String)(messages: ZStream[Any, E1, Msg[Nothing, Unit]]): IO[E1 | ClusterError, Unit]
 
   /**
-   * Send a message and receive a stream of responses of type `Res` while restarting the stream when the remote entity
-   * is rebalanced.
-   *
-   * To do so, we need a "cursor" so the stream of responses can be restarted where it ended before the rebalance. That
-   * is, the first message sent to the remote entity contains the given initial cursor value and we extract an updated
-   * cursor from the responses so that when the remote entity is rebalanced, a new message can be sent with the right
-   * cursor according to what we've seen in the previous stream of responses.
+   * Like `stream`, but restarts the stream when the entity is rebalanced.
+   * The message is built from a cursor, which is updated with each reply so that the stream restarts where it ended.
    */
-  def sendAndReceiveStreamAutoRestart[Cursor, Res](entityId: String, cursor: Cursor)(
-    msg: (Cursor, StreamReplier[Res]) => Msg
-  )(
-    updateCursor: (Cursor, Res) => Cursor
-  ): ZStream[Any, Throwable, Res] =
-    ZStream
-      .unwrap(sendAndReceiveStream[Res](entityId)(msg(cursor, _)))
-      .either
-      .mapAccum(cursor) {
-        case (c, Right(res)) => updateCursor(c, res) -> Right(res)
-        case (c, Left(err))  => (c, Left(c -> err))
-      }
-      .flatMap {
-        case Right(res)                              => ZStream.succeed(res)
-        case Left((lastSeenCursor, StreamCancelled)) =>
-          ZStream.execute(ZIO.sleep(200.millis)) ++
-            sendAndReceiveStreamAutoRestart(entityId, lastSeenCursor)(msg)(updateCursor)
-        case Left((_, err))                          => ZStream.fail(err)
-      }
+  def streamAutoRestart[Cursor, E, E2, A](entityId: String, cursor: Cursor)(
+    message: Cursor => Msg[E, Streamed[E2, A]]
+  )(updateCursor: (Cursor, A) => Cursor): ZStream[Any, E | E2 | ClusterError, A] =
+    Messenger.autoRestart[Cursor, E | E2 | ClusterError, A](cursor)(c => stream(entityId)(message(c)))(updateCursor)
 
   /**
-   * Send a stream of messages and receive a stream of responses of type `Res` while restarting the stream when the
-   * remote entity is rebalanced.
-   *
-   * To do so, we need a "cursor" so the stream of responses can be restarted where it ended before the rebalance. That
-   * is, the first message sent to the remote entity contains the given initial cursor value and we extract an updated
-   * cursor from the responses so that when the remote entity is rebalanced, a new message can be sent with the right
-   * cursor according to what we've seen in the previous stream of responses.
+   * Like `duplex`, but restarts the stream when the entity is rebalanced (see `streamAutoRestart`).
    */
-  def sendStreamAndReceiveStreamAutoRestart[Cursor, Res](entityId: String, cursor: Cursor)(
-    request: (Cursor, StreamReplier[Res]) => Msg,
-    rest: Cursor => ZStream[Any, Throwable, Msg]
-  )(
-    updateCursor: (Cursor, Res) => Cursor
-  ): ZStream[Any, Throwable, Res] =
-    ZStream
-      .unwrap(sendStreamAndReceiveStream[Res](entityId)(request(cursor, _), rest(cursor)))
-      .either
-      .mapAccum(cursor) {
-        case (c, Right(res)) => updateCursor(c, res) -> Right(res)
-        case (c, Left(err))  => (c, Left(c -> err))
-      }
-      .flatMap {
-        case Right(res)                              => ZStream.succeed(res)
-        case Left((lastSeenCursor, StreamCancelled)) =>
-          ZStream.execute(ZIO.sleep(200.millis)) ++
-            sendStreamAndReceiveStreamAutoRestart(entityId, lastSeenCursor)(request, rest)(updateCursor)
-        case Left((_, err))                          => ZStream.fail(err)
-      }
+  def duplexAutoRestart[Cursor, E, In, E1, E2, A](entityId: String, cursor: Cursor)(
+    message: Cursor => Msg[E, Duplex[In, E2, A]],
+    input: Cursor => ZStream[Any, E1, In]
+  )(updateCursor: (Cursor, A) => Cursor): ZStream[Any, E | E1 | E2 | ClusterError, A] =
+    Messenger.autoRestart[Cursor, E | E1 | E2 | ClusterError, A](cursor)(c => duplex(entityId)(message(c), input(c)))(
+      updateCursor
+    )
 }
 
 object Messenger {
@@ -111,4 +76,36 @@ object Messenger {
     case object InheritConfigTimeout       extends MessengerTimeout
     case class Timeout(duration: Duration) extends MessengerTimeout
   }
+
+  private[shard] def autoRestart[Cursor, E, A](cursor: Cursor)(
+    stream: Cursor => ZStream[Any, E, A]
+  )(updateCursor: (Cursor, A) => Cursor): ZStream[Any, E, A] =
+    ZStream.unwrap(Ref.make(cursor).map { lastSeen =>
+      def run: ZStream[Any, E, A] =
+        ZStream
+          .unwrap(lastSeen.get.map(stream))
+          .mapChunksZIO(chunk => lastSeen.update(chunk.foldLeft(_)(updateCursor)).as(chunk))
+          .catchSome { case StreamCancelled => ZStream.execute(ZIO.sleep(200.millis)) ++ run }
+      run
+    })
+}
+
+/**
+ * Evidence that a reply is a single value, not a stream.
+ */
+@implicitNotFound(
+  "Cannot send a message whose reply type is ${A} with `send` or `sendDiscard`. Use `stream` for Streamed replies and `duplex` for Duplex replies. A reply type that could be a stream (e.g. Any) or Nothing is not supported: use Unit for messages that reply with nothing."
+)
+sealed trait Unary[A]
+
+object Unary {
+  private val instance: Unary[Any] = new Unary[Any] {}
+
+  given [A](using
+    NotGiven[A <:< Streamed[?, ?]],
+    NotGiven[A <:< Duplex[?, ?, ?]],
+    NotGiven[Streamed[Nothing, Nothing] <:< A],
+    NotGiven[Duplex[Any, Nothing, Nothing] <:< A]
+  ): Unary[A] =
+    instance.asInstanceOf[Unary[A]]
 }

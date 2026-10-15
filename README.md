@@ -9,6 +9,7 @@ Shard exposes a **purely functional API** and depends heavily on [ZIO](https://z
 
 The [Documentation](https://ghostdogpr.github.io/shard/) explains how to use Shard, in particular:
 - how to [get started](https://ghostdogpr.github.io/shard/getting-started)
+- how to [define entities and send them messages](https://ghostdogpr.github.io/shard/entities)
 - the [architecture](https://ghostdogpr.github.io/shard/architecture) behind Shard
 - how to [configure](https://ghostdogpr.github.io/shard/config) it
 - parts you can [customize](https://ghostdogpr.github.io/shard/customization)

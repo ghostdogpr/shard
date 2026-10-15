@@ -1,45 +1,39 @@
 package example.simple
 
-import shard.{ EntityType, Replier, Sharding, StreamReplier }
+import shard.{ EntityType, Streamed }
 import shard.javaSerialization.given
 import zio.stream.ZStream
-import zio.{ Dequeue, RIO, Ref, ZIO }
-
-import scala.util.{ Failure, Success, Try }
+import zio.{ IO, Ref, UIO, ZIO }
 
 object GuildBehavior {
-  sealed trait GuildMessage
+  case class GuildFull(maxMembers: Int)
 
-  object GuildMessage {
-    case class Join(userId: String, replier: Replier[Try[Set[String]]]) extends GuildMessage
-    case class Timeout(replier: Replier[Try[Set[String]]])              extends GuildMessage
-    case class Leave(userId: String)                                    extends GuildMessage
-    case class Stream(replier: StreamReplier[String])                   extends GuildMessage
+  enum GuildMessage[+E, +A] {
+    case Join(userId: String)  extends GuildMessage[GuildFull, Set[String]]
+    case Timeout()             extends GuildMessage[Nothing, Set[String]]
+    case Leave(userId: String) extends GuildMessage[Nothing, Unit]
+    case Stream()              extends GuildMessage[Nothing, Streamed[Nothing, String]]
   }
 
   object Guild extends EntityType[GuildMessage]("guild")
 
-  def behavior(entityId: String, messages: Dequeue[GuildMessage]): RIO[Sharding, Nothing] =
-    Ref
-      .make(Set.empty[String])
-      .flatMap(state => messages.take.flatMap(handleMessage(state, _)).forever)
-
-  def handleMessage(state: Ref[Set[String]], message: GuildMessage): RIO[Sharding, Unit] =
-    message match {
-      case GuildMessage.Join(userId, replier) =>
-        state.get.flatMap(members =>
-          if (members.size >= 5)
-            replier.reply(Failure(new Exception("Guild is already full!")))
-          else
-            state.updateAndGet(_ + userId).flatMap { newMembers =>
-              replier.reply(Success(newMembers))
-            }
-        )
-      case GuildMessage.Leave(userId)         =>
-        state.update(_ - userId)
-      case GuildMessage.Timeout(_)            =>
-        ZIO.unit // simulate a timeout by not responding
-      case GuildMessage.Stream(replier) =>
-        state.get.flatMap(members => replier.replyStream(ZStream.fromIterable(members)))
+  def behavior(entityId: String): UIO[Guild.Handler] =
+    Ref.make(Set.empty[String]).map { state =>
+      new Guild.Handler {
+        def handle[E, A](message: GuildMessage[E, A]): IO[E, A] =
+          message match {
+            case GuildMessage.Join(userId)  =>
+              state.get.flatMap(members =>
+                if (members.size >= 5) ZIO.fail(GuildFull(5))
+                else state.updateAndGet(_ + userId)
+              )
+            case GuildMessage.Leave(userId) =>
+              state.update(_ - userId)
+            case GuildMessage.Timeout()     =>
+              ZIO.never // simulate a timeout by not responding
+            case GuildMessage.Stream() =>
+              state.get.map(members => Streamed(ZStream.fromIterable(members)))
+          }
+      }
     }
 }

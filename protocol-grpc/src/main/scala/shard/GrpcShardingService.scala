@@ -1,6 +1,5 @@
 package shard
 
-import shard.errors.EntityNotManagedByThisPod
 import shard.interfaces.Pods.BinaryMessage
 import shard.protocol.Sharding
 import shard.protocol.Sharding._
@@ -12,40 +11,33 @@ import zio.{ Config => _, _ }
 
 import java.util.concurrent.TimeUnit
 
-abstract class GrpcShardingService(sharding: Sharding, timeout: Duration) {
+abstract class GrpcShardingService(sharding: Sharding) {
   def assignShards(request: AssignShardsRequest): ZIO[Any, StatusException, AssignShardsResponse] =
     sharding.assign(request.shards.toSet).as(AssignShardsResponse())
 
   def unassignShards(request: UnassignShardsRequest): ZIO[Any, StatusException, UnassignShardsResponse] =
     sharding.unassign(request.shards.toSet).as(UnassignShardsResponse())
 
-  def send(request: SendRequest): ZIO[Any, StatusException, SendResponse] =
+  def send(request: BinaryMessage): ZIO[Any, StatusException, SendResponse] =
     sharding
-      .sendToLocalEntity(GrpcShardingService.toBinary(request))
+      .sendToLocalEntity(request)
       .map(SendResponse(_))
       .mapError(GrpcShardingService.mapErrorToStatus)
-      .timeoutFail(GrpcShardingService.timeoutException)(timeout)
 
   def sendStream(
-    requests: ZStream[Any, StatusException, SendRequest]
+    requests: ZStream[Any, StatusException, BinaryMessage]
   ): ZIO[Any, StatusException, SendResponse] =
     sharding
-      .sendStreamToLocalEntity(requests.map(GrpcShardingService.toBinary))
+      .sendStreamToLocalEntity(requests)
       .map(SendResponse(_))
-      .mapError(GrpcShardingService.mapErrorToStatus)
-
-  def sendAndReceiveStream(request: SendRequest): ZStream[Any, StatusException, SendResponse] =
-    sharding
-      .sendToLocalEntityAndReceiveStream(GrpcShardingService.toBinary(request))
-      .map(bytes => SendResponse(Some(bytes)))
       .mapError(GrpcShardingService.mapErrorToStatus)
 
   def sendStreamAndReceiveStream(
-    requests: ZStream[Any, StatusException, SendRequest]
+    requests: ZStream[Any, StatusException, BinaryMessage]
   ): ZStream[Any, StatusException, SendResponse] =
     sharding
-      .sendStreamToLocalEntityAndReceiveStream(requests.map(GrpcShardingService.toBinary))
-      .map(bytes => SendResponse(Some(bytes)))
+      .sendStreamToLocalEntityAndReceiveStream(requests)
+      .map(SendResponse(_))
       .mapError(GrpcShardingService.mapErrorToStatus)
 
   def pingShards(request: PingShardsRequest): ZIO[Any, StatusException, PingShardsResponse] =
@@ -54,17 +46,10 @@ abstract class GrpcShardingService(sharding: Sharding, timeout: Duration) {
 
 object GrpcShardingService {
 
-  private[shard] val timeoutException: StatusException =
-    Status.ABORTED.withDescription("Timeout while handling sharding send grpc").asException()
-
-  private[shard] def toBinary(req: SendRequest): BinaryMessage =
-    BinaryMessage(req.entityId, req.entityType, req.body, req.replyId)
-
   private[shard] val mapErrorToStatus: Throwable => StatusException = {
-    case e: StatusException           => e
-    case e: StatusRuntimeException    => e.getStatus.asException()
-    case e: EntityNotManagedByThisPod => Status.RESOURCE_EXHAUSTED.withCause(e).asException()
-    case e                            => Status.INTERNAL.withCause(e).withDescription(e.getMessage).asException()
+    case e: StatusException        => e
+    case e: StatusRuntimeException => e.getStatus.asException()
+    case e                         => Status.INTERNAL.withCause(e).withDescription(e.getMessage).asException()
   }
 
   private def buildServiceDefinition(
@@ -76,7 +61,6 @@ object GrpcShardingService {
       .rpc(Sharding.unassignShards, service.unassignShards)
       .rpc(Sharding.send, service.send)
       .rpc(Sharding.sendStream, service.sendStream)
-      .rpc(Sharding.sendAndReceiveStream, service.sendAndReceiveStream)
       .rpc(Sharding.sendStreamAndReceiveStream, service.sendStreamAndReceiveStream)
       .rpc(Sharding.pingShards, service.pingShards)
       .build(Sharding.service)
@@ -93,7 +77,7 @@ object GrpcShardingService {
         runtime          <- ZIO.runtime[Any]
         interceptor       = ShardingServerInterceptor.compose(grpcConfig.serverInterceptors)
         backend           = ZioServerBackend(interceptor, runtime, grpcConfig.streamingPrefetch)
-        service           = new GrpcShardingService(sharding, config.sendTimeout) {}
+        service           = new GrpcShardingService(sharding) {}
         serviceDefinition = buildServiceDefinition(service, backend)
         baseBuilder       = grpcConfig.executor match {
                               case Some(executor) =>

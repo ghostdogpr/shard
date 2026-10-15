@@ -12,9 +12,9 @@ import zio._
  * @param shardingPort port used for pods to communicate together
  * @param shardManagerUri url of the Shard Manager GraphQL API
  * @param serverVersion version of the current pod
- * @param entityMaxIdleTime time of inactivity (without receiving any message) after which an entity will be interrupted
- * @param entityTerminationTimeout time we give to an entity to handle the termination message before interrupting it
- * @param sendTimeout timeout when calling sendMessage
+ * @param entityMaxIdleTime time of inactivity (without processing any message) after which an entity will be stopped
+ * @param entityTerminationTimeout time we give to an entity to finish processing its messages when it is stopped
+ * @param sendTimeout default timeout when sending a message
  * @param refreshAssignmentsRetryInterval retry interval in case of failure getting shard assignments from storage
  * @param unhealthyPodReportInterval interval to report unhealthy pods to the Shard Manager (this exists to prevent calling the Shard Manager for each failed message)
  * @param simulateRemotePods disable optimizations when sending a message to an entity hosted on the local shards (this will force serialization of all messages)
