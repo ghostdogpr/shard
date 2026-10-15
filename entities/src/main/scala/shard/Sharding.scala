@@ -533,7 +533,7 @@ class Sharding private (
   ): URIO[Scope with R, Unit] =
     for {
       env        <- ZIO.environment[R]
-      makeHandler = (entityId: String) => behavior(entityId).provideSomeEnvironment[Scope](env ++ _).orDie
+      makeHandler = (entityId: String) => ZIO.suspend(behavior(entityId)).provideSomeEnvironment[Scope](env ++ _).orDie
       _          <- ZIO.acquireRelease(
                       entityStates.modifyZIO(map =>
                         if (map.contains(recipientType.name))

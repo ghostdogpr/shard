@@ -22,13 +22,13 @@ object ProteusShardingSpec extends ZIOSpecDefault {
 
   def spec: Spec[TestEnvironment with Scope, Any] =
     suite("ProteusShardingSpec")(
-      suite("local-pod shortcut")(tests*).provideShared(
+      suite("local-pod shortcut")(tests*).provideSomeShared[Scope](
         LocalSharding.live,
         ShardManagerClient.local,
         Storage.memory,
         ZLayer.succeed(Config.default)
       ),
-      suite("simulate remote pods (forces proteus serialization on every hop)")(tests*).provideShared(
+      suite("simulate remote pods (forces proteus serialization on every hop)")(tests*).provideSomeShared[Scope](
         LocalSharding.live,
         ShardManagerClient.local,
         Storage.memory,
@@ -36,79 +36,65 @@ object ProteusShardingSpec extends ZIOSpecDefault {
       )
     ) @@ sequential @@ withLiveClock
 
-  private val tests: List[Spec[Sharding, Any]] = List(
+  private val tests: List[Spec[Sharding & Scope, Any]] = List(
     test("Send fire-and-forget then ask for the count") {
-      ZIO.scoped {
-        for {
-          counter <- startCounter
-          _       <- counter.sendDiscard("c1")(Increment())
-          _       <- counter.sendDiscard("c1")(Increment())
-          _       <- counter.send("c1")(Decrement())
-          _       <- counter.send("c2")(Increment())
-          c1      <- counter.send("c1")(Get())
-          c2      <- counter.send("c2")(Get())
-        } yield assertTrue(c1.value == 1, c2.value == 1)
-      }
+      for {
+        counter <- startCounter
+        _       <- counter.sendDiscard("c1")(Increment())
+        _       <- counter.sendDiscard("c1")(Increment())
+        _       <- counter.send("c1")(Decrement())
+        _       <- counter.send("c2")(Increment())
+        c1      <- counter.send("c1")(Get())
+        c2      <- counter.send("c2")(Get())
+      } yield assertTrue(c1.value == 1, c2.value == 1)
     },
     test("Typed failure over Proteus") {
-      ZIO.scoped {
-        for {
-          counter <- startCounter
-          error   <- counter.send("c1")(Withdraw(5)).flip
-          c1      <- counter.send("c1")(Get())
-        } yield assertTrue(error == CounterError.NotEnough(0), c1.value == 0)
-      }
+      for {
+        counter <- startCounter
+        error   <- counter.send("c1")(Withdraw(5)).flip
+        c1      <- counter.send("c1")(Get())
+      } yield assertTrue(error == CounterError.NotEnough(0), c1.value == 0)
     },
     test("Defect over Proteus") {
-      ZIO.scoped {
-        for {
-          counter <- startCounter
-          error   <- counter.send("c1")(Crash()).flip
-        } yield assertTrue(error == EntityDefect("Entity died with java.lang.IllegalStateException: crash"))
-      }
+      for {
+        counter <- startCounter
+        error   <- counter.send("c1")(Crash()).flip
+      } yield assertTrue(error == EntityDefect("Entity died with java.lang.IllegalStateException: crash"))
     },
     test("Response stream over Proteus") {
-      ZIO.scoped {
-        for {
-          counter <- startCounter
-          latch   <- Promise.make[Nothing, Unit]
-          fiber   <- counter.stream("c1")(Changes()).take(4).tap(_ => latch.succeed(())).runCollect.fork
-          _       <- latch.await
-          _       <- counter.sendDiscard("c1")(Increment())
-          _       <- counter.sendDiscard("c1")(Increment())
-          _       <- counter.sendDiscard("c1")(Decrement())
-          items   <- fiber.join
-        } yield assertTrue(items.map(_.value) == Chunk(0, 1, 2, 1))
-      }
+      for {
+        counter <- startCounter
+        latch   <- Promise.make[Nothing, Unit]
+        fiber   <- counter.stream("c1")(Changes()).take(4).tap(_ => latch.succeed(())).runCollect.fork
+        _       <- latch.await
+        _       <- counter.sendDiscard("c1")(Increment())
+        _       <- counter.sendDiscard("c1")(Increment())
+        _       <- counter.sendDiscard("c1")(Decrement())
+        items   <- fiber.join
+      } yield assertTrue(items.map(_.value) == Chunk(0, 1, 2, 1))
     },
     test("Response stream failures over Proteus") {
-      ZIO.scoped {
-        for {
-          counter <- startCounter
-          before  <- counter.stream("c1")(CountDown(-1)).runCollect.flip
-          during  <- counter.stream("c1")(CountDown(2)).runCollect.either
-        } yield assertTrue(
-          before == CounterError.Negative(),
-          during == Left(CounterError.Exhausted(Count(0)))
-        )
-      }
+      for {
+        counter <- startCounter
+        before  <- counter.stream("c1")(CountDown(-1)).runCollect.flip
+        during  <- counter.stream("c1")(CountDown(2)).runCollect.either
+      } yield assertTrue(
+        before == CounterError.Negative(),
+        during == Left(CounterError.Exhausted(Count(0)))
+      )
     },
     test("Duplex over Proteus") {
-      ZIO.scoped {
-        for {
-          counter <- startCounter
-          items   <- counter.duplex("c1")(Add(), ZStream(Count(1), Count(2), Count(3))).takeUntil(_.value == 6).runCollect
-        } yield assertTrue(items.last.value == 6)
-      }
+      for {
+        counter <- startCounter
+        items   <- counter.duplex("c1")(Add(), ZStream(Count(1), Count(2), Count(3))).takeUntil(_.value == 6).runCollect
+      } yield assertTrue(items.last.value == 6)
     },
     test("Send stream over Proteus") {
-      ZIO.scoped {
-        for {
-          counter <- startCounter
-          _       <- counter.sendStream("c1")(ZStream.fromIterable(1 to 100).as(Increment()))
-          c1      <- counter.send("c1")(Get())
-        } yield assertTrue(c1.value == 100)
-      }
+      for {
+        counter <- startCounter
+        _       <- counter.sendStream("c1")(ZStream.fromIterable(1 to 100).as(Increment()))
+        c1      <- counter.send("c1")(Get())
+      } yield assertTrue(c1.value == 100)
     }
   )
 

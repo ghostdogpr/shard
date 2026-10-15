@@ -73,26 +73,24 @@ object EndToEndSpec extends ZIOSpecDefault {
   def spec: Spec[TestEnvironment with Scope, Any] =
     suite("EndToEndSpec")(
       test("Send message to entities") {
-        ZIO.scoped {
-          for {
-            _       <- Sharding.registerEntity(Guild)(GuildBehavior.behavior)
-            _       <- Sharding.registerScoped
-            guild   <- Sharding.messenger(Guild)
-            _       <- guild.send("guild1")(Join("user1"))
-            timeout <- guild.send("guild1")(Timeout()).flip
-            _       <- guild.send("guild1")(Join("user2"))
-            _       <- guild.send("guild1")(Join("user3"))
-            _       <- guild.send("guild1")(Join("user4"))
-            members <- guild.send("guild1")(Join("user5"))
-            failure <- guild.send("guild1")(Join("user6")).flip
-            res     <- guild.stream("guild1")(Stream()).runCollect
-          } yield assert(members)(hasSize(equalTo(5))) &&
-            assertTrue(failure == GuildFull(5)) &&
-            assertTrue(timeout == SendTimeout(Guild.name, "guild1")) &&
-            assert(res)(hasSize(equalTo(5)))
-        }
+        for {
+          _       <- Sharding.registerEntity(Guild)(GuildBehavior.behavior)
+          _       <- Sharding.registerScoped
+          guild   <- Sharding.messenger(Guild)
+          _       <- guild.send("guild1")(Join("user1"))
+          timeout <- guild.send("guild1")(Timeout()).flip
+          _       <- guild.send("guild1")(Join("user2"))
+          _       <- guild.send("guild1")(Join("user3"))
+          _       <- guild.send("guild1")(Join("user4"))
+          members <- guild.send("guild1")(Join("user5"))
+          failure <- guild.send("guild1")(Join("user6")).flip
+          res     <- guild.stream("guild1")(Stream()).runCollect
+        } yield assert(members)(hasSize(equalTo(5))) &&
+          assertTrue(failure == GuildFull(5)) &&
+          assertTrue(timeout == SendTimeout(Guild.name, "guild1")) &&
+          assert(res)(hasSize(equalTo(5)))
       }
-    ).provideShared(
+    ).provideSomeShared[Scope](
       Sharding.live,
       GrpcPods.live,
       ShardManagerClient.liveWithSttp,

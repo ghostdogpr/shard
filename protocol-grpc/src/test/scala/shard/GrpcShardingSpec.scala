@@ -23,83 +23,77 @@ object GrpcShardingSpec extends ZIOSpecDefault {
       overGrpc(Config.default.copy(shardingPort = 54329, sendTimeout = 1.second))(
         suite("gRPC")(
           test("Encoding and decoding failures are received as SerializationError, on either pod") {
-            ZIO.scoped {
-              for {
-                account <- register
-                message <- account.send("a1")(Unencodable()).flip
-                discard <- account.sendDiscard("a1")(Unencodable()).flip
-                sent    <- account.sendStream("a1")(ZStream(Deposit(1), Unencodable(), Deposit(1))).flip
-                decode  <- account.send("a1")(Undecodable()).flip
-                reply   <- account.send("a1")(UnencodableReply()).flip
-                encoded <- account.stream("a1")(Numbers(-1)).runCollect.flip
-                decoded <- account.stream("a1")(Numbers(-3)).runCollect.flip
-                input   <- account.duplex("a1")(DepositAll(), ZStream(1, -2)).runCollect.flip
-                encode  <- account.duplex("a1")(DepositAll(), ZStream(1, -1)).runCollect.flip
-              } yield assertTrue(
-                message == SerializationError(
-                  "Failed to encode a message: java.lang.IllegalArgumentException: unencodable"
-                ),
-                discard == message,
-                sent == message,
-                decode == SerializationError(
-                  "Failed to decode a message: java.lang.IllegalArgumentException: undecodable"
-                ),
-                reply == SerializationError(
-                  "Failed to encode a reply: java.lang.IllegalArgumentException: unencodable"
-                ),
-                encoded == SerializationError(
-                  "Failed to encode a stream element: java.lang.IllegalArgumentException: unencodable"
-                ),
-                decoded == SerializationError(
-                  "Failed to decode a stream element: java.lang.IllegalArgumentException: undecodable"
-                ),
-                input == SerializationError(
-                  "Failed to decode a stream input: java.lang.IllegalArgumentException: undecodable"
-                ),
-                encode == SerializationError(
-                  "Failed to encode a stream input: java.lang.IllegalArgumentException: unencodable"
-                )
+            for {
+              account <- register
+              message <- account.send("a1")(Unencodable()).flip
+              discard <- account.sendDiscard("a1")(Unencodable()).flip
+              sent    <- account.sendStream("a1")(ZStream(Deposit(1), Unencodable(), Deposit(1))).flip
+              decode  <- account.send("a1")(Undecodable()).flip
+              reply   <- account.send("a1")(UnencodableReply()).flip
+              encoded <- account.stream("a1")(Numbers(-1)).runCollect.flip
+              decoded <- account.stream("a1")(Numbers(-3)).runCollect.flip
+              input   <- account.duplex("a1")(DepositAll(), ZStream(1, -2)).runCollect.flip
+              encode  <- account.duplex("a1")(DepositAll(), ZStream(1, -1)).runCollect.flip
+            } yield assertTrue(
+              message == SerializationError(
+                "Failed to encode a message: java.lang.IllegalArgumentException: unencodable"
+              ),
+              discard == message,
+              sent == message,
+              decode == SerializationError(
+                "Failed to decode a message: java.lang.IllegalArgumentException: undecodable"
+              ),
+              reply == SerializationError(
+                "Failed to encode a reply: java.lang.IllegalArgumentException: unencodable"
+              ),
+              encoded == SerializationError(
+                "Failed to encode a stream element: java.lang.IllegalArgumentException: unencodable"
+              ),
+              decoded == SerializationError(
+                "Failed to decode a stream element: java.lang.IllegalArgumentException: undecodable"
+              ),
+              input == SerializationError(
+                "Failed to decode a stream input: java.lang.IllegalArgumentException: undecodable"
+              ),
+              encode == SerializationError(
+                "Failed to encode a stream input: java.lang.IllegalArgumentException: unencodable"
               )
-            }
+            )
           } @@ TestAspect.timeout(10.seconds),
           test("A messenger without timeout waits for slow messages") {
-            ZIO.scoped {
-              for {
-                _       <- register
-                account <- Sharding.messenger(Account, MessengerTimeout.NoTimeout)
-                _       <- account.send("a1")(Slow())
-                balance <- account.send("a1")(Balance())
-              } yield assertTrue(balance == 1)
-            }
+            for {
+              _       <- register
+              account <- Sharding.messenger(Account, MessengerTimeout.NoTimeout)
+              _       <- account.send("a1")(Slow())
+              balance <- account.send("a1")(Balance())
+            } yield assertTrue(balance == 1)
           },
           test("Broadcast to an unavailable pod times out") {
-            ZIO.scoped {
-              for {
-                _           <- Sharding.registerTopic(Incrementer)(IncrementerActor.behavior)
-                _           <- Sharding.registerScoped
-                unavailable  = PodAddress("localhost", 1)
-                // a shard id that is not used, so that the pod only receives broadcasts
-                _           <- ZIO.serviceWithZIO[Storage](_.saveAssignments(Config.default.role, Map(301 -> Some(unavailable))))
-                _           <- (Clock.sleep(10.millis) *> Sharding.getPods).repeatUntil(_.contains(unavailable))
-                broadcaster <- Sharding.broadcaster(Incrementer)
-                replies     <- broadcaster.broadcast("t1")(IncrementerMessage.Fail())
-                self        <- ZIO.serviceWith[Config](config => PodAddress(config.selfHost, config.shardingPort))
-                _           <- ZIO.serviceWithZIO[Storage](_.saveAssignments(Config.default.role, Map.empty))
-              } yield assertTrue(
-                replies == Map(
-                  self        -> Exit.fail("failed"),
-                  unavailable -> Exit.fail(SendTimeout(Incrementer.name, "t1"))
-                )
+            for {
+              _           <- Sharding.registerTopic(Incrementer)(IncrementerActor.behavior)
+              _           <- Sharding.registerScoped
+              unavailable  = PodAddress("localhost", 1)
+              // a shard id that is not used, so that the pod only receives broadcasts
+              _           <- ZIO.serviceWithZIO[Storage](_.saveAssignments(Config.default.role, Map(301 -> Some(unavailable))))
+              _           <- (Clock.sleep(10.millis) *> Sharding.getPods).repeatUntil(_.contains(unavailable))
+              broadcaster <- Sharding.broadcaster(Incrementer)
+              replies     <- broadcaster.broadcast("t1")(IncrementerMessage.Fail())
+              self        <- ZIO.serviceWith[Config](config => PodAddress(config.selfHost, config.shardingPort))
+              _           <- ZIO.serviceWithZIO[Storage](_.saveAssignments(Config.default.role, Map.empty))
+            } yield assertTrue(
+              replies == Map(
+                self        -> Exit.fail("failed"),
+                unavailable -> Exit.fail(SendTimeout(Incrementer.name, "t1"))
               )
-            }
+            )
           } @@ TestAspect.timeout(10.seconds)
         )
       )
     ) @@ sequential @@ withLiveClock
 
   // `simulateRemotePods` forces the gRPC transport for the local pod
-  private def overGrpc(config: Config)(spec: Spec[Sharding & Storage & Config, Any]): Spec[Any, Any] =
-    spec.provideShared(
+  private def overGrpc(config: Config)(spec: Spec[Sharding & Storage & Config & Scope, Any]): Spec[Scope, Any] =
+    spec.provideSomeShared[Scope](
       ShardManagerClient.local,
       Storage.memory,
       ZLayer.succeed(config.copy(simulateRemotePods = true)),

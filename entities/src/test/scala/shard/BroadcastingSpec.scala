@@ -13,37 +13,33 @@ object BroadcastingSpec extends ZIOSpecDefault {
   def spec: Spec[TestEnvironment with Scope, Any] =
     suite("BroadcastingSpec")(
       test("Send broadcast to entities") {
-        ZIO.scoped {
-          for {
-            _           <- Sharding.registerTopic(IncrementerActor.Incrementer)(IncrementerActor.behavior)
-            _           <- Sharding.registerScoped
-            incrementer <- Sharding.broadcaster(IncrementerActor.Incrementer)
-            _           <- incrementer.broadcastDiscard("c1")(IncrementerActor.IncrementerMessage.BroadcastIncrement())
-            _           <- Clock.sleep(1 second)
-            c1          <- incrementer.broadcast("c1")(IncrementerActor.IncrementerMessage.GetIncrement())
-          } yield assertTrue(
-            // Here we have just one pod, so there will be just one incrementer
-            c1.values.toList == List(Exit.succeed(1))
-          )
-        }
+        for {
+          _           <- Sharding.registerTopic(IncrementerActor.Incrementer)(IncrementerActor.behavior)
+          _           <- Sharding.registerScoped
+          incrementer <- Sharding.broadcaster(IncrementerActor.Incrementer)
+          _           <- incrementer.broadcastDiscard("c1")(IncrementerActor.IncrementerMessage.BroadcastIncrement())
+          _           <- Clock.sleep(1 second)
+          c1          <- incrementer.broadcast("c1")(IncrementerActor.IncrementerMessage.GetIncrement())
+        } yield assertTrue(
+          // Here we have just one pod, so there will be just one incrementer
+          c1.values.toList == List(Exit.succeed(1))
+        )
       },
       test("Broadcast to several pods, with a typed failure") {
-        ZIO.scoped {
-          for {
-            _           <- Sharding.registerTopic(IncrementerActor.Incrementer)(IncrementerActor.behavior)
-            _           <- Sharding.registerScoped
-            self        <- ZIO.serviceWith[Config](config => PodAddress(config.selfHost, config.shardingPort))
-            // another pod on an unused shard (the local transport delivers its messages locally)
-            other        = PodAddress("other", 1)
-            _           <- ZIO.serviceWithZIO[Storage](_.saveAssignments(Config.default.role, Map(301 -> Some(other))))
-            _           <- (Clock.sleep(10.millis) *> Sharding.getPods).repeatUntil(_.contains(other))
-            incrementer <- Sharding.broadcaster(IncrementerActor.Incrementer)
-            replies     <- incrementer.broadcast("c1")(IncrementerActor.IncrementerMessage.Fail())
-            _           <- ZIO.serviceWithZIO[Storage](_.saveAssignments(Config.default.role, Map.empty))
-          } yield assertTrue(replies == Map(self -> Exit.fail("failed"), other -> Exit.fail("failed")))
-        }
+        for {
+          _           <- Sharding.registerTopic(IncrementerActor.Incrementer)(IncrementerActor.behavior)
+          _           <- Sharding.registerScoped
+          self        <- ZIO.serviceWith[Config](config => PodAddress(config.selfHost, config.shardingPort))
+          // another pod on an unused shard (the local transport delivers its messages locally)
+          other        = PodAddress("other", 1)
+          _           <- ZIO.serviceWithZIO[Storage](_.saveAssignments(Config.default.role, Map(301 -> Some(other))))
+          _           <- (Clock.sleep(10.millis) *> Sharding.getPods).repeatUntil(_.contains(other))
+          incrementer <- Sharding.broadcaster(IncrementerActor.Incrementer)
+          replies     <- incrementer.broadcast("c1")(IncrementerActor.IncrementerMessage.Fail())
+          _           <- ZIO.serviceWithZIO[Storage](_.saveAssignments(Config.default.role, Map.empty))
+        } yield assertTrue(replies == Map(self -> Exit.fail("failed"), other -> Exit.fail("failed")))
       }
-    ).provideShared(
+    ).provideSomeShared[Scope](
       LocalSharding.live,
       ShardManagerClient.local,
       Storage.memory,
