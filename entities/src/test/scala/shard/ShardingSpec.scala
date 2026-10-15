@@ -61,9 +61,33 @@ object ShardingSpec extends ZIOSpecDefault {
           for {
             counter <- startCounter()
             _       <- counter.send("c1")(IncrementCounter())
-            exit    <- counter.send("c1")(Die()).exit
+            error   <- counter.send("c1")(Die()).flip
             c1      <- counter.send("c1")(GetCounter()) // counter should be restarted
-          } yield assertTrue(exit.causeOption.flatMap(_.dieOption).exists(_.getMessage.contains("boom")), c1 == 0)
+          } yield assertTrue(error == EntityDefect("Entity died with java.lang.Exception: boom"), c1 == 0)
+        }
+      },
+      test("A defect in a response stream ends it with EntityDefect, after its elements") {
+        ZIO.scoped {
+          for {
+            counter <- startCounter()
+            items   <- counter.stream("c1")(DyingStream()).either.runCollect
+          } yield assertTrue(
+            items == Chunk.fromIterable(1 to 1000).map(Right(_)) :+ Left(
+              EntityDefect("Entity died with java.lang.Exception: boom")
+            )
+          )
+        }
+      },
+      test("Messages to an entity type that is not registered fail with TransportError") {
+        ZIO.scoped {
+          for {
+            _       <- Sharding.registerScoped
+            counter <- Sharding.messenger(Counter)
+            error   <- counter.send("c1")(GetCounter()).flip
+          } yield assertTrue(error match {
+            case TransportError(message) => message.contains("Entity type counter was not registered")
+            case _                       => false
+          })
         }
       },
       test("Response stream") {
@@ -371,12 +395,9 @@ object ShardingSpec extends ZIOSpecDefault {
                        )
             _       <- Sharding.registerScoped
             counter <- Sharding.messenger(Counter)
-            bad     <- counter.send("bad")(GetCounter()).exit
+            bad     <- counter.send("bad")(GetCounter()).flip
             good    <- counter.send("good")(GetCounter())
-          } yield assertTrue(
-            bad.causeOption.flatMap(_.dieOption).exists(_.getMessage.contains("cannot start")),
-            good == 0
-          )
+          } yield assertTrue(bad == EntityDefect("Entity died with java.lang.Exception: cannot start"), good == 0)
         }
       },
       test("Entity and topic types must have unique names") {
@@ -622,6 +643,8 @@ object CounterActor {
     case Fail()                       extends CounterMessage[CounterError, Unit]
     case Die()                        extends CounterMessage[Nothing, Unit]
     case StreamingChanges()           extends CounterMessage[Nothing, Streamed[Nothing, Int]]
+    // 1 to 1000, then dies
+    case DyingStream()                extends CounterMessage[Nothing, Streamed[Nothing, Int]]
     case StreamingChangesFrom(n: Int) extends CounterMessage[Nothing, Streamed[Nothing, Int]]
     case AddAndStreamChanges()        extends CounterMessage[Nothing, Duplex[Int, Nothing, Int]]
     case DuplexChangesFrom(n: Int)    extends CounterMessage[Nothing, Duplex[Int, Nothing, Int]]
@@ -654,6 +677,8 @@ object CounterActor {
           case Fail()                  => ZIO.fail(CounterError("failed"))
           case Die()                   => ZIO.die(new Exception("boom"))
           case StreamingChanges()      => ZIO.succeed(Streamed(state.changes.ensuring(state.set(-1))))
+          case DyingStream()           =>
+            ZIO.succeed(Streamed(ZStream.fromIterable(1 to 1000) ++ ZStream.die(new Exception("boom"))))
           case StreamingChangesFrom(n) => ZIO.succeed(Streamed(state.changes.filter(_ >= n)))
           case AddAndStreamChanges()   =>
             ZIO.succeed(

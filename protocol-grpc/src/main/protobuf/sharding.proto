@@ -58,6 +58,10 @@ message SendResponse {
 
     message EntityNotManagedByThisPod {}
 
+    message SerializationError {
+        string message = 1;
+    }
+
     oneof reply {
         Success success = 1;
         Failure failure = 2;
@@ -68,6 +72,7 @@ message SendResponse {
         MailboxFull mailbox_full = 7;
         Discarded discarded = 8;
         EntityNotManagedByThisPod entity_not_managed_by_this_pod = 9;
+        SerializationError serialization_error = 10;
     }
 }
 

@@ -49,7 +49,16 @@ final case class MessageDiscarded(entityType: String, entityId: String)
     extends ClusterError(s"Message to $entityType $entityId was discarded because the entity is not running")
 
 /**
- * A defect that happened while a remote entity processed a message, received as a defect (`ZIO.die`).
+ * A message, reply, stream element or stream input failed to be encoded or decoded, on the sender's or the entity's pod.
  */
-final case class RemoteDefect(className: String, message: String)
-    extends Exception(s"Remote entity died with $className: $message")
+final case class SerializationError(message: String) extends ClusterError(message)
+
+/**
+ * An unexpected failure of the transport between pods.
+ */
+final case class TransportError(message: String) extends ClusterError(message)
+
+/**
+ * The entity died while processing the message (or failed to start), and was stopped.
+ */
+final case class EntityDefect(message: String) extends ClusterError(message)

@@ -202,6 +202,7 @@ class Sharding private (
         case _: MailboxFull               => ZIO.left(BinaryReply.MailboxFull)
         case _: MessageDiscarded          => ZIO.left(BinaryReply.Discarded)
         case _: EntityNotManagedByThisPod => ZIO.left(BinaryReply.EntityNotManagedByThisPod)
+        case error: SerializationError    => ZIO.left(BinaryReply.SerializationError(error.message))
       }
 
   // an interruption while waiting for the reply cancels the message (but not one that happens while enqueuing it)
@@ -231,11 +232,20 @@ class Sharding private (
       messages.peel(ZSink.head[BinaryMessage]).map {
         case (None, _)              => ZStream.empty
         case (Some(request), input) =>
-          def decodedInput(codec: ReplyCodec): ZStream[Any, Nothing, Any] =
-            input.mapZIO(msg => ZIO.attempt(codec.streamInput.decode(msg.body))).orDie
+          // an input that fails to decode ends the inputs, then fails the replies
+          def replies(reply: StreamReply, codec: ReplyCodec): ZStream[Any, Any, Any] =
+            ZStream.unwrap(Promise.make[Any, Nothing].map { inputFailure =>
+              val decodedInput = input.orDie.chunks.flatMap(
+                Replies.mapChunk(_)(msg => codec.streamInput.decode(msg.body))(error =>
+                  ZStream.execute(inputFailure.fail(Replies.serializationError("decode a stream input", error)))
+                )
+              )
+              reply.run(decodedInput).interruptWhen(inputFailure) ++
+                ZStream.execute(ZIO.whenZIODiscard(inputFailure.isDone)(inputFailure.await))
+            })
           ZStream.unwrap(receive(request)(ZStream.succeed(_)) {
             case (Exit.Success(reply: StreamReply), codec) =>
-              Replies.encodeStream(reply.run(decodedInput(codec)), codec)
+              Replies.encodeStream(replies(reply, codec), codec)
             case (exit, codec)                             => ZStream.succeed(Replies.encodeExit(exit, codec))
           })
       }
@@ -263,7 +273,7 @@ class Sharding private (
     error match {
       case _: EntityNotManagedByThisPod | _: PodUnavailable => handleError(error) *> ZIO.fail(Sharding.Retry(error))
       case error: ClusterError                              => ZIO.fail(error)
-      case other                                            => ZIO.die(other)
+      case other                                            => ZIO.fail(TransportError(other.toString))
     }
 
   // waits until the shard is assigned
@@ -315,6 +325,14 @@ class Sharding private (
         .flatMap(Sharding.await(_, restore))
     )
 
+  private def encode[Msg[+_, +_]](
+    recipientType: RecipientType[Msg],
+    message: Msg[Any, Any]
+  ): IO[SerializationError, (Array[Byte], ReplyCodec)] =
+    ZIO
+      .attempt((recipientType.codec.encodeMessage(message), recipientType.codec.replyCodec(message)))
+      .mapError(Replies.serializationError("encode a message", _))
+
   private def deliver[Msg[+_, +_]](
     recipientType: RecipientType[Msg],
     entityId: String,
@@ -328,14 +346,13 @@ class Sharding private (
           .flatMap(Replies.toResult(_, EntityInterrupted(recipientType.name, entityId)))
       else entityManager(recipientType).flatMap(_.enqueue(entityId, message)).catchAll(fromTransport).unit
     else
-      ZIO.attempt(recipientType.codec.encodeMessage(message)).orDie.flatMap { body =>
+      encode(recipientType, message).flatMap { case (body, codec) =>
         pods
           .sendMessage(pod, BinaryMessage(entityId, recipientType.name, body, expectsReply))
           .catchAll(fromTransport)
           .flatMap {
             case BinaryReply.Success(_) if !expectsReply => ZIO.unit
-            case reply                                   =>
-              Replies.decodeReply(reply, recipientType.codec.replyCodec(message), recipientType.name, entityId)
+            case reply                                   => Replies.decodeReply(reply, codec, recipientType.name, entityId)
           }
       }
 
@@ -344,27 +361,27 @@ class Sharding private (
     entityId: String,
     pod: PodAddress,
     message: Msg[Any, Any],
-    input: Option[ZStream[Any, Nothing, Any]]
+    input: Option[(ZStream[Any, Nothing, Any], Promise[Any, Nothing])] // the inputs and where their failure goes
   ): ZStream[Any, Any, Any] =
     if (isLocal(pod))
       ZStream.unwrap(enqueueAndAwait(entityType, entityId, message).map {
-        case Exit.Success(reply: StreamReply) => Sharding.localStream(reply.run(input.getOrElse(ZStream.empty)))
+        case Exit.Success(reply: StreamReply) => Sharding.localStream(reply.run(input.fold(ZStream.empty)(_._1)))
         case Exit.Success(other)              =>
           ZStream.dieMessage(s"Unexpected reply $other to a stream message to ${entityType.name} $entityId")
         case exit                             =>
           ZStream.fromZIO(Replies.toResult(exit, StreamCancelled))
       })
     else
-      ZStream.unwrap(ZIO.attempt(entityType.codec.encodeMessage(message)).orDie.map { body =>
+      ZStream.unwrap(encode(entityType, message).map { case (body, codec) =>
         val request  = BinaryMessage(entityId, entityType.name, body, expectsReply = true)
-        val codec    = entityType.codec.replyCodec(message)
         val messages = input match {
-          case None        => ZStream.succeed(request)
-          case Some(input) =>
-            ZStream.succeed(request) ++ input.mapZIO(value =>
-              ZIO
-                .attempt(BinaryMessage(entityId, entityType.name, codec.streamInput.encode(value), expectsReply = true))
-                .orDie
+          case None                        => ZStream.succeed(request)
+          case Some((input, inputFailure)) =>
+            // an input that fails to encode ends the inputs, like an input failure
+            ZStream.succeed(request) ++ input.chunks.flatMap(
+              Replies.mapChunk(_)(value =>
+                BinaryMessage(entityId, entityType.name, codec.streamInput.encode(value), expectsReply = true)
+              )(error => ZStream.execute(inputFailure.fail(Replies.serializationError("encode a stream input", error))))
             )
         }
         Replies.decodeStream(
@@ -392,13 +409,16 @@ class Sharding private (
         val failIfInputFailed = ZIO.whenZIODiscard(inputFailure.isDone)(inputFailure.await)
         val requests          = messages
           .catchAllCause(cause => ZStream.execute(inputFailure.failCause(cause)))
-          .mapZIO(msg =>
-            ZIO
-              .attempt(
-                BinaryMessage(entityId, entityType.name, entityType.codec.encodeMessage(msg), expectsReply = false)
-              )
-              // a failure (rather than a defect) cancels the call, then the sender dies with it
-              .tapError(inputFailure.die(_))
+          .chunks
+          .flatMap(
+            Replies.mapChunk(_)(msg =>
+              BinaryMessage(entityId, entityType.name, entityType.codec.encodeMessage(msg), expectsReply = false)
+            )(
+              // failing the stream cancels the call, then the sender fails with the serialization error
+              error =>
+                ZStream.execute(inputFailure.fail(Replies.serializationError("encode a message", error))) ++
+                  ZStream.fail(error)
+            )
           )
         pods
           .sendStream(pod, requests)
@@ -440,7 +460,9 @@ class Sharding private (
         ZStream
           .unwrap(Promise.make[Any, Nothing].map { inputFailure =>
             val safeInput = input.catchAll(error => ZStream.execute(inputFailure.fail(error)))
-            streamFromEntity(entityType, entityId)(deliverStream(entityType, entityId, _, message, Some(safeInput)))
+            streamFromEntity(entityType, entityId)(
+              deliverStream(entityType, entityId, _, message, Some((safeInput, inputFailure)))
+            )
               .interruptWhen(inputFailure) ++
               // the replies may end because the inputs failed
               ZStream.execute(ZIO.whenZIODiscard(inputFailure.isDone)(inputFailure.await))
@@ -580,11 +602,9 @@ object Sharding {
   private def await(envelope: Envelope[?], restore: ZIO.InterruptibilityRestorer): UIO[Exit[Any, Any]] =
     restore(envelope.await).onInterrupt(envelope.cancel)
 
-  // interruptions end the stream with StreamCancelled, like for a remote entity
+  // interruptions end the stream with StreamCancelled and defects with EntityDefect, like for a remote entity
   private def localStream(stream: ZStream[Any, Any, Any]): ZStream[Any, Any, Any] =
-    stream.catchAllCause(cause =>
-      if (cause.isInterruptedOnly) ZStream.fail(StreamCancelled) else ZStream.failCause(cause)
-    )
+    stream.catchAllCause(cause => ZStream.fail(Replies.toError(cause, StreamCancelled)))
 
   /**
    * A layer that sets up sharding communication between pods.

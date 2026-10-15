@@ -8,7 +8,6 @@ import zio.{ Config => _, _ }
 import zio.stream.ZStream
 
 import java.util.concurrent.TimeUnit
-import java.util.concurrent.atomic.AtomicBoolean
 
 private[shard] object EntityManager {
 
@@ -60,7 +59,6 @@ private[shard] object EntityManager {
   /**
    * @param drained completed when the entity is closing and has no pending messages or open streams
    * @param closing completed when the entity starts closing, to interrupt its streams
-   * @param poisoned set when processing a message died: the next messages are not processed
    */
   private final class RunningEntity[Msg[+_, +_]](
     val entityId: String,
@@ -70,7 +68,6 @@ private[shard] object EntityManager {
     val drained: Promise[Nothing, Unit],
     val closing: Promise[Nothing, Unit],
     val terminated: Promise[Nothing, Unit],
-    val poisoned: AtomicBoolean,
     val scope: Scope.Closeable,
     val dispatcher: Promise[Nothing, Fiber.Runtime[Nothing, Any]]
   )
@@ -81,12 +78,14 @@ private[shard] object EntityManager {
      * @param pending number of messages enqueued and not yet completed, limited by `mailboxCapacity`
      * @param streams number of open reply streams, which don't count in `pending` but keep the entity running
      * @param offering number of messages accepted but not yet in the mailbox
+     * @param poisoned set when processing a message died: the next messages are not processed
      */
     final case class State(
       pending: Int,
       streams: Int,
       offering: Int,
       closing: Boolean,
+      poisoned: Boolean,
       lastActive: EpochMillis
     ) {
       def isIdle: Boolean = pending == 0 && streams == 0
@@ -176,9 +175,12 @@ private[shard] final class EntityManager[Msg[+_, +_]] private (
     } yield envelope
 
   def enqueueBinary(msg: BinaryMessage): Task[(Envelope[Msg], ReplyCodec)] =
-    ZIO
-      .attempt(recipientType.codec.decodeMessage(msg.body))
-      .flatMap(decoded => enqueue(msg.entityId, decoded).map(_ -> recipientType.codec.replyCodec(decoded)))
+    ZIO.attempt {
+      val decoded = recipientType.codec.decodeMessage(msg.body)
+      (decoded, recipientType.codec.replyCodec(decoded))
+    }
+      .mapError(Replies.serializationError("decode a message", _))
+      .flatMap((decoded, codec) => enqueue(msg.entityId, decoded).map(_ -> codec))
 
   private def offer(entity: RunningEntity[Msg], message: Msg[Any, Any]): IO[Throwable, Envelope[Msg]] =
     // the entity is stopping, try again a little later
@@ -218,7 +220,16 @@ private[shard] final class EntityManager[Msg[+_, +_]] private (
       mailbox    <- Queue.unbounded[Envelope[Msg]]
       concurrent <- Queue.unbounded[Envelope[Msg]]
       now        <- currentTimeInMilliseconds
-      state      <- Ref.make(RunningEntity.State(pending = 0, streams = 0, offering = 0, closing = false, lastActive = now))
+      state      <- Ref.make(
+                      RunningEntity.State(
+                        pending = 0,
+                        streams = 0,
+                        offering = 0,
+                        closing = false,
+                        poisoned = false,
+                        lastActive = now
+                      )
+                    )
       drained    <- Promise.make[Nothing, Unit]
       closing    <- Promise.make[Nothing, Unit]
       terminated <- Promise.make[Nothing, Unit]
@@ -232,7 +243,6 @@ private[shard] final class EntityManager[Msg[+_, +_]] private (
                       drained,
                       closing,
                       terminated,
-                      new AtomicBoolean(false),
                       scope,
                       dispatcher
                     )
@@ -295,28 +305,30 @@ private[shard] final class EntityManager[Msg[+_, +_]] private (
     loop: Fiber.Runtime[Nothing, Any],
     restore: ZIO.InterruptibilityRestorer
   ): UIO[Unit] =
-    if (entity.poisoned.get) finish(entity, envelope, interrupted)
-    else
-      envelope.state.modify {
-        case EnvelopeState.Queued => (true, EnvelopeState.Running(loop))
-        case other                => (false, other)
-      }.flatMap {
-        case false =>
-          // the sender stopped waiting before the message was processed
-          finish(entity, envelope, interrupted)
-        case true  =>
-          restore(handle(handler, envelope.message)).exit
-            .flatMap(exit =>
-              envelope.state.modify {
-                case EnvelopeState.Running(_) => (false, EnvelopeState.Done)
-                case _                        => (true, EnvelopeState.Done) // cancelled while running
-              }.flatMap(cancelled =>
-                complete(entity, envelope, exit) *>
-                  // the sender interrupted this fiber: wait for the interruption, then a new loop takes over
-                  ZIO.when(cancelled)(ZIO.interruptible(ZIO.never)).unit
+    entity.state.get.flatMap(state =>
+      if (state.poisoned) finish(entity, envelope, interrupted)
+      else
+        envelope.state.modify {
+          case EnvelopeState.Queued => (true, EnvelopeState.Running(loop))
+          case other                => (false, other)
+        }.flatMap {
+          case false =>
+            // the sender stopped waiting before the message was processed
+            finish(entity, envelope, interrupted)
+          case true  =>
+            restore(handle(handler, envelope.message)).exit
+              .flatMap(exit =>
+                envelope.state.modify {
+                  case EnvelopeState.Running(_) => (false, EnvelopeState.Done)
+                  case _                        => (true, EnvelopeState.Done) // cancelled while running
+                }.flatMap(cancelled =>
+                  complete(entity, envelope, exit) *>
+                    // the sender interrupted this fiber: wait for the interruption, then a new loop takes over
+                    ZIO.when(cancelled)(ZIO.interruptible(ZIO.never)).unit
+                )
               )
-            )
-      }
+        }
+    )
 
   private def dispatcherLoop(
     entity: RunningEntity[Msg],
@@ -336,18 +348,20 @@ private[shard] final class EntityManager[Msg[+_, +_]] private (
     permit: Option[Queue[Unit]],
     restore: ZIO.InterruptibilityRestorer
   ): UIO[Unit] =
-    if (entity.poisoned.get) finish(entity, envelope, interrupted)
-    else
-      envelope.state.get.flatMap {
-        case EnvelopeState.Cancelled =>
-          // the sender stopped waiting before the message was processed
-          finish(entity, envelope, interrupted)
-        case _                       =>
-          permit.fold[UIO[Any]](ZIO.unit)(permits =>
-            // the entity is stopping before the message started
-            restore(permits.offer(())).onInterrupt(finish(entity, envelope, interrupted))
-          ) *> fork(entity, envelope, handle(handler, envelope.message), permit)
-      }
+    entity.state.get.flatMap(state =>
+      if (state.poisoned) finish(entity, envelope, interrupted)
+      else
+        envelope.state.get.flatMap {
+          case EnvelopeState.Cancelled =>
+            // the sender stopped waiting before the message was processed
+            finish(entity, envelope, interrupted)
+          case _                       =>
+            permit.fold[UIO[Any]](ZIO.unit)(permits =>
+              // the entity is stopping before the message started
+              restore(permits.offer(())).onInterrupt(finish(entity, envelope, interrupted))
+            ) *> fork(entity, envelope, handle(handler, envelope.message), permit)
+        }
+    )
 
   // must be called from an uninterruptible region, so that the fiber starts uninterruptible
   private def fork(
@@ -384,7 +398,7 @@ private[shard] final class EntityManager[Msg[+_, +_]] private (
       case Exit.Failure(cause) if cause.isDie     =>
         // its state may be corrupt: don't process the next messages, and stop the entity before replying so that
         // the messages sent after the reply start a new one
-        ZIO.succeed(entity.poisoned.set(true)) *>
+        entity.state.update(_.copy(poisoned = true)) *>
           ZIO.logErrorCause(
             s"${recipientType.name} ${entity.entityId} died while processing a message, stopping it",
             cause
@@ -442,10 +456,10 @@ private[shard] final class EntityManager[Msg[+_, +_]] private (
   private def shutdown(entity: RunningEntity[Msg]): UIO[Unit] =
     (for {
       _          <- entity.closing.succeed(())
-      idle       <- entity.state.get.map(_.isIdle)
-      _          <- ZIO.when(idle)(entity.drained.succeed(()))
+      state      <- entity.state.get
+      _          <- ZIO.when(state.isIdle)(entity.drained.succeed(()))
       // interruptible so that the timeout works; don't wait if a message died since the state may be corrupt
-      drained    <- if (entity.poisoned.get) ZIO.succeed(true)
+      drained    <- if (state.poisoned) ZIO.succeed(true)
                     else
                       entity.drained.await.interruptible.timeout(config.entityTerminationTimeout).map(_.isDefined)
       _          <-

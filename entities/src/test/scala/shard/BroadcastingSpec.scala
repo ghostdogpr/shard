@@ -1,5 +1,6 @@
 package shard
 
+import shard.errors.EntityDefect
 import shard.interfaces.Storage
 import shard.javaSerialization.given
 import zio.test.TestAspect.{ sequential, withLiveClock }
@@ -43,6 +44,18 @@ object BroadcastingSpec extends ZIOSpecDefault {
             _           <- ZIO.serviceWithZIO[Storage](_.saveAssignments(Config.default.role, Map.empty))
           } yield assertTrue(replies == Map(self -> Exit.fail("failed"), other -> Exit.fail("failed")))
         }
+      },
+      test("Broadcast to entities that die") {
+        ZIO.scoped {
+          for {
+            _           <- Sharding.registerTopic(IncrementerActor.Incrementer)(IncrementerActor.behavior)
+            _           <- Sharding.registerScoped
+            incrementer <- Sharding.broadcaster(IncrementerActor.Incrementer)
+            replies     <- incrementer.broadcast("c1")(IncrementerActor.IncrementerMessage.Die())
+          } yield assertTrue(
+            replies.values.toList == List(Exit.fail(EntityDefect("Entity died with java.lang.Exception: boom")))
+          )
+        }
       }
     ).provideShared(
       LocalSharding.live,
@@ -56,6 +69,7 @@ object BroadcastingSpec extends ZIOSpecDefault {
       case BroadcastIncrement() extends IncrementerMessage[Nothing, Unit]
       case GetIncrement()       extends IncrementerMessage[Nothing, Int]
       case Fail()               extends IncrementerMessage[String, Unit]
+      case Die()                extends IncrementerMessage[Nothing, Unit]
     }
 
     object Incrementer extends TopicType[IncrementerMessage]("incrementer")
@@ -71,6 +85,7 @@ object BroadcastingSpec extends ZIOSpecDefault {
                   case IncrementerMessage.BroadcastIncrement() => ref.update(_ + 1)
                   case IncrementerMessage.GetIncrement()       => ref.get
                   case IncrementerMessage.Fail()               => ZIO.fail("failed")
+                  case IncrementerMessage.Die()                => ZIO.die(new Exception("boom"))
                 }
             }
           )

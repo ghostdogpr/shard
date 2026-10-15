@@ -76,8 +76,8 @@ object Pods {
   case class BinaryMessage(entityId: String, entityType: String, body: Array[Byte], expectsReply: Boolean)
 
   /**
-   * A reply to a message. A stream of replies is a sequence of `Element`, ended by `StreamFailure`, `Defect` or
-   * `Interrupted` if it fails, or a single other reply if the request itself failed or was rejected.
+   * A reply to a message. A stream of replies is a sequence of `Element`, ended by `StreamFailure`, `Defect`,
+   * `SerializationError` or `Interrupted` if it fails, or a single other reply if the request itself failed or was rejected.
    */
   sealed trait BinaryReply
 
@@ -127,5 +127,10 @@ object Pods {
      * The pod doesn't host the entity (or the entity is stopping): the message was not processed and can be sent again
      */
     case object EntityNotManagedByThisPod extends BinaryReply
+
+    /**
+     * A message, reply or stream element failed to be encoded or decoded
+     */
+    final case class SerializationError(message: String) extends BinaryReply
   }
 }

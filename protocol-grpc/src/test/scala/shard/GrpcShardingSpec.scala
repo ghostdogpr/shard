@@ -33,15 +33,69 @@ object GrpcShardingSpec extends ZIOSpecDefault {
           } yield assertTrue(error == NotEnoughFunds(15), balance == 15)
         }
       },
-      test("Defects are received as RemoteDefect") {
+      test("Defects are received as EntityDefect") {
         ZIO.scoped {
           for {
             _       <- register()
             account <- Sharding.messenger(Account)
-            exit    <- account.send("a1")(Crash()).exit
+            error   <- account.send("a1")(Crash()).flip
+            items   <- account.stream("a1")(CrashingStream()).either.runCollect
           } yield assertTrue(
-            exit.causeOption.flatMap(_.dieOption).contains(RemoteDefect("java.lang.IllegalStateException", "crash"))
+            error == EntityDefect("Entity died with java.lang.IllegalStateException: crash"),
+            items == Chunk(Right(1), Left(EntityDefect("Entity died with java.lang.IllegalStateException: crash")))
           )
+        }
+      },
+      test("Encoding and decoding failures are received as SerializationError, on either pod") {
+        ZIO.scoped {
+          for {
+            _       <- register()
+            account <- Sharding.messenger(Account)
+            message <- account.send("a1")(Unencodable()).flip
+            discard <- account.sendDiscard("a1")(Unencodable()).flip
+            decode  <- account.send("a1")(Undecodable()).flip
+            reply   <- account.send("a1")(UnencodableReply()).flip
+            // elements before the failing one are received
+            encoded <- account.stream("a1")(Numbers(-1)).either.runCollect
+            decoded <- account.stream("a1")(Numbers(-3)).either.runCollect
+            input   <- account.duplex("a1")(DepositAll(), ZStream(1, -2)).runCollect.flip
+          } yield assertTrue(
+            message == SerializationError(
+              "Failed to encode a message: java.lang.IllegalArgumentException: unencodable"
+            ),
+            discard == message,
+            decode == SerializationError("Failed to decode a message: java.lang.IllegalArgumentException: undecodable"),
+            reply == SerializationError("Failed to encode a reply: java.lang.IllegalArgumentException: unencodable"),
+            encoded == Chunk(
+              Right(1),
+              Right(2),
+              Left(
+                SerializationError("Failed to encode a stream element: java.lang.IllegalArgumentException: unencodable")
+              )
+            ),
+            decoded == Chunk(
+              Right(1),
+              Right(2),
+              Left(
+                SerializationError("Failed to decode a stream element: java.lang.IllegalArgumentException: undecodable")
+              )
+            ),
+            input == SerializationError(
+              "Failed to decode a stream input: java.lang.IllegalArgumentException: undecodable"
+            )
+          )
+        }
+      } @@ TestAspect.timeout(10.seconds),
+      test("Unexpected transport failures are received as TransportError") {
+        ZIO.scoped {
+          for {
+            _     <- Sharding.registerScoped
+            // the entity type is not registered on the remote pod
+            error <- Sharding.messenger(Account).flatMap(_.send("a1")(Balance())).flip
+          } yield assertTrue(error match {
+            case TransportError(message) => message.contains("INTERNAL") && message.contains("not registered")
+            case _                       => false
+          })
         }
       },
       test("Response streams, empty or cancelled when the entity stops") {
@@ -147,8 +201,10 @@ object GrpcShardingSpec extends ZIOSpecDefault {
           for {
             _       <- register()
             account <- Sharding.messenger(Account)
-            exit    <- account.sendStream("a1")(ZStream(Deposit(1), Unencodable(), Deposit(1))).exit
-          } yield assertTrue(exit.causeOption.flatMap(_.dieOption).exists(_.getMessage == "unencodable"))
+            error   <- account.sendStream("a1")(ZStream(Deposit(1), Unencodable(), Deposit(1))).flip
+          } yield assertTrue(
+            error == SerializationError("Failed to encode a message: java.lang.IllegalArgumentException: unencodable")
+          )
         }
       } @@ TestAspect.timeout(10.seconds),
       test("A stream of messages dies when the stream dies") {
@@ -165,8 +221,12 @@ object GrpcShardingSpec extends ZIOSpecDefault {
           for {
             _       <- register()
             account <- Sharding.messenger(Account)
-            exit    <- account.duplex("a1")(DepositAll(), ZStream(1, -1)).runCollect.exit
-          } yield assertTrue(exit.causeOption.flatMap(_.dieOption).exists(_.getMessage == "unencodable"))
+            error   <- account.duplex("a1")(DepositAll(), ZStream(1, -1)).runCollect.flip
+          } yield assertTrue(
+            error == SerializationError(
+              "Failed to encode a stream input: java.lang.IllegalArgumentException: unencodable"
+            )
+          )
         }
       } @@ TestAspect.timeout(10.seconds),
       test("Broadcast to an unavailable pod times out") {
@@ -216,25 +276,42 @@ object GrpcShardingSpec extends ZIOSpecDefault {
       case Empty()               extends AccountMessage[Nothing, Streamed[Nothing, Int]]
       // fails to encode
       case Unencodable()         extends AccountMessage[Nothing, Unit]
+      // fails to decode
+      case Undecodable()         extends AccountMessage[Nothing, Unit]
+      // replies with -1, which fails to encode
+      case UnencodableReply()    extends AccountMessage[Nothing, Int]
+      // 1, 2, n, 3
+      case Numbers(n: Int)       extends AccountMessage[Nothing, Streamed[Nothing, Int]]
+      // 1, then dies
+      case CrashingStream()      extends AccountMessage[Nothing, Streamed[Nothing, Int]]
     }
 
-    // Kryo, except for `Unencodable` and for the input -1 of `DepositAll`, which fail to encode
+    // Kryo, except for `Unencodable`, `Undecodable`, and the values -1 (fails to encode), -2 and -3 (fail to decode)
     given MessageCodec[AccountMessage] = {
       val kryo = shard.kryo.derive[AccountMessage]
       new MessageCodec[AccountMessage] {
         private def unencodable = throw new IllegalArgumentException("unencodable")
+        private def undecodable = throw new IllegalArgumentException("undecodable")
+
+        private def failing(codec: Codec): Codec =
+          Codec(
+            value => if (value == -1) unencodable else codec.encode(value),
+            bytes => codec.decode(bytes) match { case -2 | -3 => undecodable; case value => value }
+          )
 
         def encodeMessage(message: AccountMessage[Any, Any]): Array[Byte]          =
           message match {
             case Unencodable() => unencodable
             case other         => kryo.encodeMessage(other)
           }
-        def decodeMessage(bytes: Array[Byte]): AccountMessage[Any, Any]            = kryo.decodeMessage(bytes)
+        def decodeMessage(bytes: Array[Byte]): AccountMessage[Any, Any]            =
+          kryo.decodeMessage(bytes) match {
+            case Undecodable() => undecodable
+            case other         => other
+          }
         def replyCodec(message: AccountMessage[Any, Any]): MessageCodec.ReplyCodec = {
           val codec = kryo.replyCodec(message)
-          codec.copy(streamInput =
-            Codec(input => if (input == -1) unencodable else codec.streamInput.encode(input), codec.streamInput.decode)
-          )
+          codec.copy(value = failing(codec.value), streamInput = failing(codec.streamInput))
         }
       }
     }
@@ -256,21 +333,27 @@ object GrpcShardingSpec extends ZIOSpecDefault {
         new Account.Handler {
           def handle[E, A](message: AccountMessage[E, A]): IO[E, A] =
             message match {
-              case Deposit(amount)  => balance.update(_ + amount)
-              case Withdraw(amount) =>
+              case Deposit(amount)    => balance.update(_ + amount)
+              case Withdraw(amount)   =>
                 balance.get.flatMap(current =>
                   if (current < amount) ZIO.fail(NotEnoughFunds(current)) else balance.set(current - amount)
                 )
-              case Balance()        => balance.get
-              case Slow()           => Clock.sleep(2.seconds) *> balance.update(_ + 1)
-              case Crash()          => ZIO.die(new IllegalStateException("crash"))
-              case Hang()           =>
+              case Balance()          => balance.get
+              case Slow()             => Clock.sleep(2.seconds) *> balance.update(_ + 1)
+              case Crash()            => ZIO.die(new IllegalStateException("crash"))
+              case Hang()             =>
                 ZIO.acquireReleaseWith(state.hanging.update(_ + 1))(_ => state.hanging.update(_ - 1))(_ => ZIO.never)
-              case Changes()        =>
+              case Changes()          =>
                 ZIO.succeed(Streamed(balance.changes.ensuring(state.closedStreams.update(_ + 1))))
-              case Empty()          => ZIO.succeed(Streamed(ZStream.empty))
-              case Unencodable()    => ZIO.unit
-              case DepositAll()     =>
+              case Empty()            => ZIO.succeed(Streamed(ZStream.empty))
+              case Unencodable()      => ZIO.unit
+              case Undecodable()      => ZIO.unit
+              case UnencodableReply() => ZIO.succeed(-1)
+              // a single chunk
+              case Numbers(n)         => ZIO.succeed(Streamed(ZStream(1, 2, n, 3)))
+              case CrashingStream()   =>
+                ZIO.succeed(Streamed(ZStream(1) ++ ZStream.die(new IllegalStateException("crash"))))
+              case DepositAll()       =>
                 ZIO.succeed(
                   Duplex[Int, Nothing, Int](input =>
                     balance.changes.drainFork(input.mapZIO(amount => balance.update(_ + amount)))

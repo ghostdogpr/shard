@@ -27,8 +27,8 @@ Its `handle` method takes a message and returns its reply, and pattern matching 
 Entity and topic types must all have different names.
 
 - The `Scope` given to the behavior is closed when the entity stops, after its last message was processed: use it to acquire resources or save the entity state.
-- If the behavior fails, the messages sent to the entity die with that error.
-- If processing a message dies with a defect, the entity is stopped and the next message starts a new one.
+- If the behavior fails, the messages sent to the entity fail with `EntityDefect`.
+- If processing a message dies with a defect, its sender receives `EntityDefect`, the entity is stopped and the next message starts a new one.
 - `Sharding.terminateLocalEntity` stops an entity explicitly (typically from the entity itself), after completing the messages it already received. The next message starts it again.
 
 ## Entity options
@@ -78,8 +78,9 @@ Besides the error type declared by the message, calls can fail with a `ClusterEr
 - `InvalidShardId`: the shard ID computed for an entity is invalid.
 - `EntityInterrupted`: the entity was stopped before the message was fully processed (e.g. it exceeded `entityTerminationTimeout`). The message may have been partially processed.
 - `MessageDiscarded`: the entity was not running and `loadEntity` rejected the message.
-
-A defect in a remote entity is received as a defect (`ZIO.die`) containing a `RemoteDefect`.
+- `EntityDefect`: the entity died while processing the message (or failed to start), with the defect's class and message.
+- `SerializationError`: a message, reply, stream element or stream input failed to be encoded or decoded.
+- `TransportError`: an unexpected failure of the transport between pods.
 
 ## Delivery guarantees
 

@@ -86,7 +86,7 @@ trait Pods {
   ): ZStream[Any, Throwable, BinaryReply]
 }
 ```
-A `BinaryReply` is the result of a message (success, typed failure, defect, interruption or rejection), or an element of a stream of replies.
+A `BinaryReply` is the result of a message (success, typed failure, defect, serialization error, interruption or rejection), or an element of a stream of replies.
 When the pod can't be reached, the transport should fail with `PodUnavailable` so that the message is retried.
 
 For testing, you can use the `Pods.noop` layer that does nothing.

@@ -1,6 +1,6 @@
 package shard
 
-import shard.errors.RemoteDefect
+import shard.errors.EntityDefect
 import shard.interfaces.Storage
 import shard.proteus.given
 import zio.stream.{ SubscriptionRef, ZStream }
@@ -63,11 +63,8 @@ object ProteusShardingSpec extends ZIOSpecDefault {
       ZIO.scoped {
         for {
           counter <- startCounter
-          exit    <- counter.send("c1")(Crash()).exit
-        } yield assertTrue(exit.causeOption.flatMap(_.dieOption).exists {
-          case RemoteDefect(className, message) => className == "java.lang.IllegalStateException" && message == "crash"
-          case other                            => other.getMessage == "crash"
-        })
+          error   <- counter.send("c1")(Crash()).flip
+        } yield assertTrue(error == EntityDefect("Entity died with java.lang.IllegalStateException: crash"))
       }
     },
     test("Response stream over Proteus") {
