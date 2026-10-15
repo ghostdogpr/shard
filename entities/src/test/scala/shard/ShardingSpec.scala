@@ -349,26 +349,23 @@ object ShardingSpec extends ZIOSpecDefault {
       },
       test("Entity that fails to start") {
         for {
-          _       <- Sharding.registerEntity(Counter)(entityId =>
-                       if (entityId == "bad") ZIO.fail(new Exception("cannot start")) else behavior(entityId)
-                     )
+          _       <- Sharding.registerEntity(Counter) {
+                       case "bad"    => ZIO.fail(new Exception("cannot start"))
+                       case "throws" => throw new RuntimeException("boom")
+                       case entityId => behavior(entityId)
+                     }
           _       <- Sharding.registerScoped
           counter <- Sharding.messenger(Counter)
           bad     <- counter.send("bad")(GetCounter()).flip
+          thrown  <- counter.send("throws")(GetCounter()).flip
+          again   <- counter.send("throws")(GetCounter()).flip // not stuck, the factory runs again
           good    <- counter.send("good")(GetCounter())
-        } yield assertTrue(bad == EntityDefect("Entity died with java.lang.Exception: cannot start"), good == 0)
-      },
-      test("Entity whose behavior throws synchronously") {
-        for {
-          thrown  <- ZIO.succeed(new java.util.concurrent.atomic.AtomicBoolean(false))
-          _       <- Sharding.registerEntity(Counter)(entityId =>
-                       if (thrown.compareAndSet(false, true)) throw new RuntimeException("boom") else behavior(entityId)
-                     )
-          _       <- Sharding.registerScoped
-          counter <- Sharding.messenger(Counter)
-          first   <- counter.send("c1")(GetCounter()).flip
-          second  <- counter.send("c1")(GetCounter())
-        } yield assertTrue(first == EntityDefect("Entity died with java.lang.RuntimeException: boom"), second == 0)
+        } yield assertTrue(
+          bad == EntityDefect("Entity died with java.lang.Exception: cannot start"),
+          thrown == EntityDefect("Entity died with java.lang.RuntimeException: boom"),
+          again == thrown,
+          good == 0
+        )
       },
       test("Entity and topic types must have unique names") {
         for {
