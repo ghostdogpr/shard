@@ -168,9 +168,7 @@ private[shard] final class EntityManager[Msg[+_, +_]] private (
    */
   def ask(entityId: String, message: Msg[Any, Any]): IO[Throwable, Exit[Any, Any]] =
     ZIO.uninterruptibleMask(restore =>
-      restore(enqueue(entityId, message)).flatMap(envelope =>
-        restore(envelope.result.await).onInterrupt(envelope.cancel)
-      )
+      enqueue(entityId, message).flatMap(envelope => restore(envelope.result.await).onInterrupt(envelope.cancel))
     )
 
   /**
@@ -190,7 +188,7 @@ private[shard] final class EntityManager[Msg[+_, +_]] private (
 
   private def offer(entity: RunningEntity[Msg], message: Msg[Any, Any]): IO[Throwable, Envelope[Msg]] =
     // the entity is stopping, try again a little later
-    tryOffer(entity, message).someOrElseZIO(Clock.sleep(100.millis) *> enqueue(entity.entityId, message))
+    tryOffer(entity, message).someOrElseZIO(Clock.sleep(100.millis).interruptible *> enqueue(entity.entityId, message))
 
   /**
    * Add a message to the entity's mailbox, or fail with `MailboxFull` if it is full.
@@ -355,20 +353,30 @@ private[shard] final class EntityManager[Msg[+_, +_]] private (
         // the sender stopped waiting before the message was processed
         finish(entity, envelope, interrupted)
       case _                  =>
+        val releasePermit = permit.fold[UIO[Any]](ZIO.unit)(_.take)
         permit.fold[UIO[Any]](ZIO.unit)(permits =>
           // the entity is stopping before the message started
           restore(permits.offer(())).onInterrupt(finish(entity, envelope, interrupted))
-        ) *> handle(entity, handler, envelope.message).interruptible.exit
-          .flatMap(exit => permit.fold[UIO[Any]](ZIO.unit)(_.take) *> complete(entity, envelope, exit))
-          // called from an uninterruptible region, so that the forked fiber starts uninterruptible
-          // a child of the dispatcher, so that interrupting the dispatcher interrupts it and waits for it
-          .fork
-          .flatMap(fiber =>
-            envelope.state.modify {
-              case EnvelopeState.Done => (fiber.interruptFork, EnvelopeState.Done)
-              case _                  => (ZIO.unit, EnvelopeState.Running(fiber))
-            }.flatten
-          )
+        ) *> Promise.make[Nothing, Fiber.Runtime[Nothing, Any]].flatMap { self =>
+          // the forked fiber marks the message as running before calling the handler,
+          // so that a message cancelled before that never starts
+          self.await
+            .flatMap(fiber =>
+              envelope.state.modify {
+                case EnvelopeState.Queued =>
+                  val running = handle(entity, handler, envelope.message).interruptible.exit
+                    .flatMap(exit => releasePermit *> complete(entity, envelope, exit))
+                  (running, EnvelopeState.Running(fiber))
+                // the sender stopped waiting before the message was processed
+                case other                => (releasePermit *> finish(entity, envelope, interrupted), other)
+              }.flatten
+            )
+            // called from an uninterruptible region, so that the forked fiber starts uninterruptible
+            // a child of the dispatcher, so that interrupting the dispatcher interrupts it and waits for it
+            .fork
+            .flatMap(self.succeed)
+            .unit
+        }
     }
 
   /**
@@ -385,7 +393,8 @@ private[shard] final class EntityManager[Msg[+_, +_]] private (
         finish(entity, envelope, Exit.succeed(StreamReply(_ => track(entity, stream))))
       case Exit.Success(duplex: Duplex[in, ?, ?]) =>
         val run = duplex.run.asInstanceOf[ZStream[Any, Nothing, Any] => ZStream[Any, Any, Any]]
-        finish(entity, envelope, Exit.succeed(StreamReply(input => track(entity, run(input)))))
+        // a function that throws is a defect of the stream
+        finish(entity, envelope, Exit.succeed(StreamReply(input => track(entity, ZStream.suspend(run(input))))))
       case Exit.Failure(cause) if cause.isDie     =>
         // the state may be corrupt: stop the entity before replying, so that later messages start a new one
         entity.state.update(_.copy(poisoned = true)) *>

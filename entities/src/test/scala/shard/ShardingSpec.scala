@@ -267,6 +267,26 @@ object ShardingSpec extends ZIOSpecDefault {
           ping     <- worker.send("w1")(Ping()).exit
         } yield assertTrue(ping.isSuccess)
       },
+      test("Messages cancelled while waiting for a permit never start") {
+        for {
+          state  <- startWorker(EntityOptions(concurrency = 2))
+          worker <- Sharding.messenger(Worker)
+          timed  <- Sharding.messenger(Worker, MessengerTimeout.Timeout(30.millis))
+          _      <- ZIO.foreachDiscard(1 to 100) { i =>
+                      val id = s"w$i"
+                      for {
+                        _ <- worker.sendDiscard(id)(Block())
+                        _ <- worker.sendDiscard(id)(Block())
+                        _ <- state.running.get.repeatUntil(_ == 2)
+                        _ <- timed.send(id)(CompleteNow()).exit // times out while waiting for a permit
+                        _ <- worker.send(id)(Unblock())
+                        _ <- state.running.get.repeatUntil(_ == 0)
+                      } yield ()
+                    }
+          _      <- worker.send("w100")(Ping())
+          done   <- state.completed.get
+        } yield assertTrue(done == 0)
+      },
       test("Cancelled stream messages don't prevent passivation") {
         for {
           state  <- startWorker(EntityOptions(maxIdleTime = Some(500.millis)))
@@ -451,6 +471,12 @@ object ShardingSpec extends ZIOSpecDefault {
           died.causeOption.flatMap(_.dieOption).exists(_.getMessage == "boom")
         )
       },
+      test("Duplex: a reply that throws instead of returning a stream ends it with EntityDefect") {
+        for {
+          counter <- startCounter()
+          error   <- counter.duplex("c1")(ThrowingDuplex(), ZStream(1)).runCollect.flip
+        } yield assertTrue(error == EntityDefect("Entity died with java.lang.Exception: boom"))
+      },
       autoRestartTest("Duplex auto restart")(
         _.duplexAutoRestart("c1", 0)(from => AddAndStreamChanges(from), _ => ZStream.empty)((_, n) => n + 1)
       ),
@@ -605,6 +631,8 @@ object CounterActor {
     case AddAndStreamChanges(from: Int = 0) extends CounterMessage[Nothing, Duplex[Int, Nothing, Int]]
     // replies with each input doubled, and ends when the inputs end
     case Doubled()                          extends CounterMessage[Nothing, Duplex[Int, Nothing, Int]]
+    // replies with a Duplex that throws when called
+    case ThrowingDuplex()                   extends CounterMessage[Nothing, Duplex[Int, Nothing, Int]]
     case TriggerTerminate()                 extends CounterMessage[Nothing, Unit]
   }
 
@@ -645,6 +673,7 @@ object CounterActor {
               )
             )
           case Doubled()                 => ZIO.succeed(Duplex[Int, Nothing, Int](_.map(_ * 2)))
+          case ThrowingDuplex()          => ZIO.succeed(Duplex[Int, Nothing, Int](_ => throw new Exception("boom")))
           case TriggerTerminate()        => sharding.terminateLocalEntity(Counter, entityId)
         }
     }
@@ -666,6 +695,8 @@ object WorkerActor {
     case QuickStream()         extends WorkerMessage[Nothing, Streamed[Nothing, Int]]
     // takes 10ms, then counts as completed
     case Complete()            extends WorkerMessage[Nothing, Unit]
+    // counts as completed right away
+    case CompleteNow()         extends WorkerMessage[Nothing, Unit]
   }
 
   object Worker extends EntityType[WorkerMessage]("worker")
@@ -699,6 +730,7 @@ object WorkerActor {
           case SlowStream()          => Clock.sleep(500.millis).as(Streamed(ZStream(1, 2, 3)))
           case QuickStream()         => ZIO.succeed(Streamed(ZStream(1, 2, 3)))
           case Complete()            => Clock.sleep(10.millis) *> state.completed.update(_ + 1)
+          case CompleteNow()         => state.completed.update(_ + 1)
         }
     }
 }
