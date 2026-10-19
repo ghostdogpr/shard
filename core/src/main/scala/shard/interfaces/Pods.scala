@@ -39,7 +39,7 @@ trait Pods {
 
   /**
    * Send a stream of messages to a pod and receive a stream of replies.
-   * The first message is the request, the following ones are its stream inputs, if any.
+   * The first message is the request and the next ones are its inputs.
    */
   def sendStreamAndReceiveStream(
     pod: PodAddress,

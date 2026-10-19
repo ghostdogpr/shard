@@ -26,14 +26,13 @@ object KryoMessageCodec {
     new ScalaKryoSerializer(ConfigFactory.defaultReference(), getClass.getClassLoader)
 
   /**
-   * A Kryo `MessageCodec[Msg]` backed by [[defaultSerializer]].
+   * Create a Kryo codec that uses [[defaultSerializer]].
    */
   def default[Msg[+_, +_]]: MessageCodec[Msg] = fromSerializer(defaultSerializer)
 
   /**
-   * A Kryo `MessageCodec[Msg]` backed by a fresh `ScalaKryoSerializer` built from the
-   * given Typesafe Config. See https://github.com/altoo-ag/scala-kryo-serialization for
-   * the available options.
+   * Create a Kryo codec from the given Typesafe Config.
+   * See https://github.com/altoo-ag/scala-kryo-serialization for the available options.
    */
   def fromConfig[Msg[+_, +_]](config: Config): MessageCodec[Msg] =
     fromSerializer(new ScalaKryoSerializer(config, getClass.getClassLoader))

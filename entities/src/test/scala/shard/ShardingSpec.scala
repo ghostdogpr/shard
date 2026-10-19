@@ -566,7 +566,9 @@ object ShardingSpec extends ZIOSpecDefault {
       }
     )
 
-  // the stream restarts from where it ended when the entity restarts
+  /**
+   * Test that an auto-restarting stream resumes where it ended when the entity restarts.
+   */
   private def autoRestartTest(name: String)(
     autoRestart: Messenger[CounterMessage] => ZStream[Any, Any, Int]
   ): Spec[Sharding & Scope, Any] =

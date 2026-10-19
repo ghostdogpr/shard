@@ -8,8 +8,8 @@ import zio.stream.ZStream
 object LocalSharding {
 
   /**
-   * Pods that deliver every message to the local `Sharding` in the sender's fiber.
-   * The `Sharding` is given through a promise since it depends on `Pods`.
+   * Create pods that deliver every message to the local `Sharding`.
+   * The `Sharding` is passed as a promise since it is built from these pods.
    */
   private def localPods(sharding: Promise[Nothing, Sharding]): Pods =
     new Pods {

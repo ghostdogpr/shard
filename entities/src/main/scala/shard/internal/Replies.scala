@@ -14,7 +14,10 @@ import scala.util.control.NonFatal
  */
 private[shard] object Replies {
 
-  // an interruption becomes the given error, a defect becomes EntityDefect
+  /**
+   * Convert the result of a message to the result seen by its sender.
+   * An interruption becomes `interruptedError` and a defect becomes `EntityDefect`.
+   */
   def toResult(exit: Exit[Any, Any], interruptedError: => ClusterError): Exit[Any, Any] =
     exit.foldExit(cause => Exit.fail(toError(cause, interruptedError)), Exit.succeed)
 
@@ -92,7 +95,9 @@ private[shard] object Replies {
         Exit.die(new RuntimeException(s"Unexpected stream reply $other to a unary message to $entityType $entityId"))
     }
 
-  // `action` is what failed, e.g. "encode a reply"
+  /**
+   * Create a `SerializationError` for a failed `action`, such as "encode a reply".
+   */
   def serializationError(action: String, throwable: Throwable): SerializationError =
     SerializationError(s"Failed to $action: $throwable")
 

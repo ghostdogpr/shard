@@ -18,7 +18,7 @@ import zio.IO
 trait EntityHandler[Msg[+_, +_]] {
 
   /**
-   * Processes a message and returns its reply.
+   * Process a message and return its reply.
    */
   def handle[E, A](message: Msg[E, A]): IO[E, A]
 }

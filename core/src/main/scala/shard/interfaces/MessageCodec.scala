@@ -28,7 +28,7 @@ trait MessageCodec[Msg[+_, +_]] {
   def decodeMessage(bytes: Array[Byte]): Msg[Any, Any]
 
   /**
-   * Gets the codecs for the replies and errors of a specific message.
+   * Get the codecs used to encode and decode the replies and errors of a message.
    */
   def replyCodec(message: Msg[Any, Any]): ReplyCodec
 }
@@ -38,7 +38,7 @@ object MessageCodec {
   type Decoder[A] = Array[Byte] => A
 
   /**
-   * A codec that uses the same `Codec` for the messages and all their replies.
+   * Create a codec that uses the same `Codec` for messages and all their replies.
    */
   def uniform[Msg[+_, +_]](codec: Codec): MessageCodec[Msg] =
     new MessageCodec[Msg] {

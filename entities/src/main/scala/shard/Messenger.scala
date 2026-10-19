@@ -16,26 +16,25 @@ trait Messenger[Msg[+_, +_]] {
 
   /**
    * Send a message and wait for its reply.
-   * On `SendTimeout`, the processing of the message is interrupted unless it is `Uninterruptible`.
    * The message may be processed more than once if its pod becomes unavailable.
    */
   def send[E, A](entityId: String)(message: Msg[E, A])(using Unary[A]): IO[E | ClusterError, A]
 
   /**
-   * Send a message without waiting for it to be processed: returns once it is in the entity's mailbox.
+   * Send a message without waiting for its reply.
+   * Returns once the message is in the entity's mailbox.
    */
   def sendDiscard[E, A](entityId: String)(message: Msg[E, A])(using Unary[A]): IO[ClusterError, Unit]
 
   /**
    * Send a message and receive a stream of replies.
-   * The stream fails with `StreamCancelled` if the entity is rebalanced while streaming (see `streamAutoRestart`).
+   * The stream fails with `StreamCancelled` if the entity is rebalanced (see `streamAutoRestart`).
    */
   def stream[E, E2, A](entityId: String)(message: Msg[E, Streamed[E2, A]]): ZStream[Any, E | E2 | ClusterError, A]
 
   /**
-   * Send a message along with a stream of inputs, and receive a stream of replies.
-   * The stream fails with `StreamCancelled` if the entity is rebalanced while streaming (see `duplexAutoRestart`).
-   * The input stream may be run more than once on retry.
+   * Send a message with a stream of inputs and receive a stream of replies.
+   * The stream fails with `StreamCancelled` if the entity is rebalanced (see `duplexAutoRestart`).
    */
   def duplex[E, In, E1, E2, A](entityId: String)(
     message: Msg[E, Duplex[In, E2, A]],
@@ -43,14 +42,14 @@ trait Messenger[Msg[+_, +_]] {
   ): ZStream[Any, E | E1 | E2 | ClusterError, A]
 
   /**
-   * Send a stream of messages, in order, and return once they are all in the entity's mailbox.
-   * Fails at the first rejected message (e.g. `MailboxFull`). On retry, the whole stream is sent again from the start.
+   * Send a stream of messages in order, without waiting for their replies.
+   * Returns once they are all in the entity's mailbox, or fails at the first rejected message.
    */
   def sendStream[E1](entityId: String)(messages: ZStream[Any, E1, Msg[Nothing, Unit]]): IO[E1 | ClusterError, Unit]
 
   /**
-   * Like `stream`, but restarts the stream when the entity is rebalanced.
-   * The message is built from a cursor, which is updated with each reply so that the stream restarts where it ended.
+   * Send a message and receive a stream of replies, restarting it when the entity is rebalanced.
+   * The message is built from a cursor that is updated with each reply, so the stream restarts where it ended.
    */
   def streamAutoRestart[Cursor, E, E2, A](entityId: String, cursor: Cursor)(
     message: Cursor => Msg[E, Streamed[E2, A]]
@@ -58,7 +57,8 @@ trait Messenger[Msg[+_, +_]] {
     Messenger.autoRestart[Cursor, E | E2 | ClusterError, A](cursor)(c => stream(entityId)(message(c)))(updateCursor)
 
   /**
-   * Like `duplex`, but restarts the stream when the entity is rebalanced (see `streamAutoRestart`).
+   * Send a message with a stream of inputs and receive a stream of replies, restarting it when the entity is rebalanced.
+   * The message and inputs are built from a cursor, as in `streamAutoRestart`.
    */
   def duplexAutoRestart[Cursor, E, In, E1, E2, A](entityId: String, cursor: Cursor)(
     message: Cursor => Msg[E, Duplex[In, E2, A]],

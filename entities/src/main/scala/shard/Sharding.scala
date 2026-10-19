@@ -209,11 +209,17 @@ class Sharding private (
   private[shard] def sendToLocalEntity(msg: BinaryMessage): Task[BinaryReply] =
     receive(msg)(identity)(Replies.encodeExit)
 
-  // stops at the first rejection so that messages stay in order
+  /**
+   * Deliver a stream of messages to a local entity, in order.
+   * Stops at the first rejected message and returns its reply.
+   */
   private[shard] def sendStreamToLocalEntity(messages: ZStream[Any, Throwable, BinaryMessage]): Task[BinaryReply] =
     messages.runFoldWhileZIO(Sharding.ack)(_.isInstanceOf[BinaryReply.Success])((_, msg) => sendToLocalEntity(msg))
 
-  // the first message is the request, the following ones are its inputs
+  /**
+   * Deliver a message with its stream of inputs to a local entity and return the stream of replies.
+   * The first message is the request and the next ones are its inputs.
+   */
   private[shard] def sendStreamToLocalEntityAndReceiveStream(
     messages: ZStream[Any, Throwable, BinaryMessage]
   ): ZStream[Any, Throwable, BinaryReply] =
@@ -265,7 +271,9 @@ class Sharding private (
       case other                                            => ZIO.fail(TransportError(other.toString))
     }
 
-  // waits until the shard is assigned
+  /**
+   * Get the pod that hosts an entity, waiting until its shard is assigned.
+   */
   private def podOf(entityType: EntityType[?], entityId: String): IO[InvalidShardId, PodAddress] = {
     val shardId                   = getShardId(entityType, entityId)
     def assigned: UIO[PodAddress] =
@@ -287,7 +295,10 @@ class Sharding private (
       }
     )
 
-  // once the first reply was received, the stream fails with StreamCancelled instead of retrying
+  /**
+   * Receive a stream from the pod that hosts an entity, retrying if the pod can't be reached or no longer hosts it.
+   * Once a reply was received, the stream fails with `StreamCancelled` instead of retrying.
+   */
   private def streamFromEntity(entityType: EntityType[?], entityId: String)(
     send: PodAddress => ZStream[Any, Any, Any]
   ): ZStream[Any, Any, Any] =
@@ -576,7 +587,10 @@ object Sharding {
 
   private val unitReplyCodec: ReplyCodec = ReplyCodec(Codec.nothing, Codec.unit, Codec.nothing, Codec.nothing)
 
-  // fails like a remote stream: StreamCancelled on interruption, EntityDefect on defect
+  /**
+   * Make a stream of replies from a local entity fail like a remote one.
+   * An interruption becomes `StreamCancelled` and a defect becomes `EntityDefect`.
+   */
   private def localStream(stream: ZStream[Any, Any, Any]): ZStream[Any, Any, Any] =
     stream.catchAllCause(cause => ZStream.fail(Replies.toError(cause, StreamCancelled)))
 
@@ -657,8 +671,7 @@ object Sharding {
 
   /**
    * Register a new entity type, allowing pods to send messages to entities of this type.
-   * The `behavior` creates the handler of an entity from its ID, and its `Scope` closes when the entity stops.
-   * Names of entity and topic types must be unique.
+   * The `behavior` creates an entity's handler from its ID, and its `Scope` closes when the entity stops.
    */
   def registerEntity[R, Msg[+_, +_]](entityType: EntityType[Msg], options: EntityOptions[Msg] = EntityOptions[Msg]())(
     behavior: String => ZIO[R & Scope, Throwable, EntityHandler[Msg]]
@@ -667,7 +680,7 @@ object Sharding {
 
   /**
    * Register a new topic type, allowing pods to broadcast messages to subscribers.
-   * It works like `registerEntity`, with one instance per topic name on each pod.
+   * It works like `registerEntity`, with one instance per topic on each pod.
    */
   def registerTopic[R, Msg[+_, +_]](topicType: TopicType[Msg], options: EntityOptions[Msg] = EntityOptions[Msg]())(
     behavior: String => ZIO[R & Scope, Throwable, EntityHandler[Msg]]
@@ -715,10 +728,8 @@ object Sharding {
     ZIO.serviceWithZIO[Sharding](_.getPods)
 
   /**
-   * Terminate a given entity without waiting, after the messages it already received.
-   * The next message sent to the entity starts it again.
-   * This method can only be used if the entity is hosted on the current pod (otherwise it will do nothing).
-   * Typically, you would use this method from inside the entity behavior to stop itself.
+   * Terminate a local entity after it processes the messages it already received, without waiting for it.
+   * It does nothing if the entity is not on this pod, and the next message sent to it starts it again.
    */
   def terminateLocalEntity(entityType: EntityType[?], entityId: String): URIO[Sharding, Unit] =
     ZIO.serviceWithZIO[Sharding](_.terminateLocalEntity(entityType, entityId))

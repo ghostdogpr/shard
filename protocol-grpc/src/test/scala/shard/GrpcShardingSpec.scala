@@ -91,11 +91,11 @@ object GrpcShardingSpec extends ZIOSpecDefault {
       )
     ) @@ sequential @@ withLiveClock
 
-  // `simulateRemotePods` forces the gRPC transport for the local pod
   private def overGrpc(config: Config)(spec: Spec[Sharding & Storage & Config & Scope, Any]): Spec[Scope, Any] =
     spec.provideSomeShared[Scope](
       ShardManagerClient.local,
       Storage.memory,
+      // `simulateRemotePods` forces the gRPC transport for the local pod
       ZLayer.succeed(config.copy(simulateRemotePods = true)),
       ZLayer.succeed(GrpcConfig.default),
       Sharding.live,

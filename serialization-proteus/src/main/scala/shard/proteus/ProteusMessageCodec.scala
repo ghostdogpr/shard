@@ -53,7 +53,10 @@ object ProteusMessageCodec {
       case _                            => error("Cannot derive a Proteus MessageCodec: a variant doesn't extend the message type")
     }
 
-  // prefers an in-scope ProtobufCodec[A], otherwise derives one from a Mirror
+  /**
+   * Get the codec of a reply or error type.
+   * Uses a `ProtobufCodec` in scope if there is one, otherwise derives one.
+   */
   private inline def codecOf[A](using deriver: ProtobufDeriver): Codec =
     summonFrom {
       case _: (A =:= Nothing)      => Codec.nothing
