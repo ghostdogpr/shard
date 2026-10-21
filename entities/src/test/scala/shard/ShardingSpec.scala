@@ -166,26 +166,20 @@ object ShardingSpec extends ZIOSpecDefault {
           state  <- startWorker()
           worker <- Sharding.messenger(Worker, MessengerTimeout.NoTimeout)
           fiber  <- worker.send("w1")(Block()).flip.fork
-          fiber2 <- worker.send("w3")(LongUninterruptible()).either.fork
+          fiber2 <- worker.send("w3")(LongUninterruptible()).flip.fork
           _      <- state.running.get.repeatUntil(_ == 2)
-          _      <- Sharding.terminateLocalEntity(Worker, "w1")
-          _      <- Sharding.terminateLocalEntity(Worker, "w3")
-          // 3s of termination timeout (Config.default)
-          _      <- Clock.sleep(2.seconds)
-          during <- state.running.get
-          error  <- fiber.join
-          error2 <- fiber2.join.timeout(5.seconds)
+          result <- (Sharding.terminateLocalEntity(Worker, "w1") *>
+                      Sharding.terminateLocalEntity(Worker, "w3") *>
+                      fiber.join.zip(fiber2.join)).timed
           after  <- state.running.get
           // replies are sent before the entities' finalizers run
-          fin    <- state.finalized.get.repeatUntil(_ == 2).timeout(2.seconds)
+          _      <- state.finalized.changes.takeUntil(_ == 2).runDrain
         } yield assertTrue(
-          during == 2,
-          error == EntityInterrupted(Worker.name, "w1"),
-          error2.contains(Left(EntityInterrupted(Worker.name, "w3"))),
-          after == 0,
-          fin.contains(2)
+          result._1 >= Config.default.entityTerminationTimeout,
+          result._2 == (EntityInterrupted(Worker.name, "w1"), EntityInterrupted(Worker.name, "w3")),
+          after == 0
         )
-      },
+      } @@ TestAspect.timeout(30.seconds),
       test("Entity terminated from a finalizer is still interrupted after the timeout") {
         for {
           state  <- startWorker()
@@ -705,11 +699,11 @@ object WorkerActor {
   def startWorker(options: EntityOptions[WorkerMessage] = EntityOptions()): RIO[Sharding & Scope, WorkerState] =
     WorkerState.make.tap(state => Sharding.registerEntity(Worker, options)(worker(state)) *> Sharding.registerScoped)
 
-  case class WorkerState(running: Ref[Int], finalized: Ref[Int], completed: Ref[Int])
+  case class WorkerState(running: Ref[Int], finalized: SubscriptionRef[Int], completed: Ref[Int])
 
   object WorkerState {
     val make: UIO[WorkerState] =
-      (Ref.make(0) <*> Ref.make(0) <*> Ref.make(0)).map(WorkerState(_, _, _))
+      (Ref.make(0) <*> SubscriptionRef.make(0) <*> Ref.make(0)).map(WorkerState(_, _, _))
   }
 
   def worker(state: WorkerState)(entityId: String): URIO[Scope, Worker.Handler] =
