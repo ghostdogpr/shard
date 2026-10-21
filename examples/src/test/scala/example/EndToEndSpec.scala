@@ -12,7 +12,6 @@ import dev.profunktor.redis4cats.pubsub.PubSub
 import example.simple.GuildBehavior
 import example.simple.GuildBehavior.Guild
 import example.simple.GuildBehavior.GuildMessage.{ Join, Stream, Timeout }
-import sttp.client4.UriContext
 import zio.{ Config => _, _ }
 import zio.Clock.ClockLive
 import zio.interop.catz._
@@ -24,8 +23,8 @@ import scala.util.Try
 
 object EndToEndSpec extends ZIOSpecDefault {
 
-  val shardManagerServer: ZLayer[ShardManager & ManagerConfig, Throwable, Unit] =
-    ZLayer(Server.run().forkDaemon *> ClockLive.sleep(3 seconds).unit)
+  val shardManagerServer: ZLayer[ShardManager & ManagerConfig & GrpcConfig, Throwable, Unit] =
+    ZLayer(Server.run.forkDaemon *> ClockLive.sleep(3 seconds).unit)
 
   val container: ZLayer[Any, Nothing, GenericContainer] =
     ZLayer.scoped {
@@ -62,7 +61,7 @@ object EndToEndSpec extends ZIOSpecDefault {
 
   private val config        = ZLayer.succeed(
     Config.default.copy(
-      shardManagerUri = uri"http://localhost:8087/api/graphql",
+      shardManagerPort = 8087,
       simulateRemotePods = true,
       sendTimeout = 3 seconds
     )
@@ -93,11 +92,25 @@ object EndToEndSpec extends ZIOSpecDefault {
             assertTrue(timeout.toTry.isFailure) &&
             assert(res)(hasSize(equalTo(5)))
         }
+      },
+      test("Fail the Shard Manager client layer on an invalid host") {
+        ZIO
+          .scoped(ShardManagerClient.live.build)
+          .provide(ZLayer.succeed(Config.default.copy(shardManagerHost = "bad host")), grpcConfig)
+          .exit
+          .map(assert(_)(fails(anything)))
+      },
+      test("Fail the Shard Manager server on an invalid port") {
+        Server.run
+          .provideSome[ShardManager & GrpcConfig](ZLayer.succeed(ManagerConfig.default.copy(apiPort = -1)))
+          .timeout(10 seconds)
+          .exit
+          .map(assert(_)(fails(anything)))
       }
     ).provideShared(
       Sharding.live,
       GrpcPods.live,
-      ShardManagerClient.liveWithSttp,
+      ShardManagerClient.live,
       StorageRedis.live,
       ShardManager.live,
       PodsHealth.noop,

@@ -4,7 +4,7 @@ import shard.Messenger.MessengerTimeout
 import shard.Sharding.{ EntityState, ShardingRegistrationEvent }
 import shard.errors._
 import shard.interfaces.Pods.BinaryMessage
-import shard.interfaces.{ MessageCodec, Pods, Storage }
+import shard.interfaces.{ MessageCodec, Pods, ShardManagerClient, Storage }
 import shard.internal.{ EntityManager, PendingReply, ReplyChannel, SendChannel }
 import zio.{ Config => _, _ }
 import zio.stream.ZStream

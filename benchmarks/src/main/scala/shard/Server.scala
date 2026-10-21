@@ -1,7 +1,7 @@
 package shard
 
 import shard.kryo.given
-import shard.interfaces.Storage
+import shard.interfaces.{ ShardManagerClient, Storage }
 import zio.{ Config => _, _ }
 import zio.stream.ZStream
 

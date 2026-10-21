@@ -25,7 +25,8 @@ A good rule of thumb is to set the number of shards to 10x the maximum number of
 :::
 - `selfHost`: hostname or IP address of the current pod
 - `shardingPort`: port used for pods to communicate together
-- `shardManagerUri`: url of the Shard Manager GraphQL API
+- `shardManagerHost`: hostname or IP address of the Shard Manager
+- `shardManagerPort`: port of the Shard Manager gRPC API
 - `serverVersion`: version of the current pod
 ::: tip What's the version?
 When performing a rolling update (upgrading all pods one by one without downtime), we want to avoid assigning shards to pods that will be stopped soon.
@@ -56,7 +57,7 @@ Here's the list of thing you can configure on the Shard Manager side:
 Because each role has its own pool of shards, you can pick a different number of shards for each role.
 If you only use the `default` role (or want the same number of shards everywhere), you can simply pass `_ => 300` (or any constant).
 :::
-- `apiPort`: port to expose the GraphQL API
+- `apiPort`: port to expose the gRPC API
 - `rebalanceInterval`: interval for regular rebalancing of shards
 - `rebalanceRetryInterval`: retry interval for rebalancing when some shards failed to be rebalanced
 - `pingTimeout`: time to wait for a pod to respond to a ping request

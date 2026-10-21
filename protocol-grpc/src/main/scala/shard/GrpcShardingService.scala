@@ -82,39 +82,44 @@ object GrpcShardingService {
       .build(Sharding.service)
 
   /**
+   * Start a gRPC server on the given port with the given services, stopped when the scope ends.
+   */
+  private[shard] def serve(port: Int, config: GrpcConfig)(
+    services: ZioServerBackend[Any, StatusException, GrpcContext] => List[ServerServiceDefinition]
+  ): RIO[Scope, Unit] =
+    for {
+      runtime <- ZIO.runtime[Any]
+      backend  = ZioServerBackend(
+                   ShardingServerInterceptor.compose(config.serverInterceptors),
+                   runtime,
+                   config.streamingPrefetch
+                 )
+      _       <- ZIO.acquireRelease(ZIO.attempt {
+                   val builder        = ServerBuilder.forPort(port).maxInboundMessageSize(config.maxInboundMessageSize)
+                   config.executor.foreach(builder.executor)
+                   services(backend).foreach(service => builder.addService(service))
+                   val server: Server = builder.addService(ProtoReflectionServiceV1.newInstance()).build()
+                   server.start()
+                 })(server =>
+                   ZIO.attemptBlocking {
+                     server.shutdown()
+                     server.awaitTermination(config.shutdownTimeout.toMillis, TimeUnit.MILLISECONDS)
+                     server.shutdownNow()
+                   }.ignore
+                 )
+    } yield ()
+
+  /**
    * A layer that creates a gRPC server that exposes the Pods API.
    */
   val live: ZLayer[Config & Sharding & GrpcConfig, Throwable, Unit] =
     ZLayer.scoped[Config & Sharding & GrpcConfig] {
       for {
-        config           <- ZIO.service[Config]
-        grpcConfig       <- ZIO.service[GrpcConfig]
-        sharding         <- ZIO.service[Sharding]
-        runtime          <- ZIO.runtime[Any]
-        interceptor       = ShardingServerInterceptor.compose(grpcConfig.serverInterceptors)
-        backend           = ZioServerBackend(interceptor, runtime, grpcConfig.streamingPrefetch)
-        service           = new GrpcShardingService(sharding, config.sendTimeout) {}
-        serviceDefinition = buildServiceDefinition(service, backend)
-        baseBuilder       = grpcConfig.executor match {
-                              case Some(executor) =>
-                                ServerBuilder
-                                  .forPort(config.shardingPort)
-                                  .executor(executor)
-                              case None           =>
-                                ServerBuilder.forPort(config.shardingPort)
-                            }
-        builder           = baseBuilder
-                              .maxInboundMessageSize(grpcConfig.maxInboundMessageSize)
-                              .addService(serviceDefinition)
-                              .addService(ProtoReflectionServiceV1.newInstance())
-        server: Server    = builder.build()
-        _                <- ZIO.acquireRelease(ZIO.attempt(server.start()))(server =>
-                              ZIO.attemptBlocking {
-                                server.shutdown()
-                                server.awaitTermination(grpcConfig.shutdownTimeout.toMillis, TimeUnit.MILLISECONDS)
-                                server.shutdownNow()
-                              }.ignore
-                            )
+        config     <- ZIO.service[Config]
+        grpcConfig <- ZIO.service[GrpcConfig]
+        sharding   <- ZIO.service[Sharding]
+        service     = new GrpcShardingService(sharding, config.sendTimeout) {}
+        _          <- serve(config.shardingPort, grpcConfig)(backend => List(buildServiceDefinition(service, backend)))
       } yield ()
     }
 }

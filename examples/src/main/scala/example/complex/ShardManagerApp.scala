@@ -6,8 +6,7 @@ import zio._
 
 object ShardManagerApp extends ZIOAppDefault {
   def run: Task[Nothing] =
-    Server
-      .run()
+    Server.run
       .provide(
         ZLayer.succeed(ManagerConfig.default),
         ZLayer.succeed(GrpcConfig.default),
