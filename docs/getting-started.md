@@ -82,7 +82,7 @@ We need a proper messaging protocol to communicate with pods, so we're going to 
 libraryDependencies += "com.github.ghostdogpr" %% "shard-manager"       % "@VERSION@"
 libraryDependencies += "com.github.ghostdogpr" %% "shard-protocol-grpc" % "@VERSION@"
 ```
-The Shard Manager exposes a small GraphQL API, which means we need to start a small webserver. This can be done by calling `Server.run` and providing all the required dependencies.
+The Shard Manager exposes a small gRPC API, which means we need to start a small server. This can be done by calling `Server.run` and providing all the required dependencies.
 ```scala
 import shard._
 import shard.interfaces._
@@ -190,11 +190,11 @@ def run: Task[Unit] =
   ZIO.scoped(program).provide(
     ZLayer.succeed(Config.default),
     ZLayer.succeed(GrpcConfig.default),
-    Storage.memory,                  // store data in memory
-    ShardManagerClient.liveWithSttp, // client to communicate with the Shard Manager
-    GrpcPods.live,                   // use gRPC protocol
-    GrpcShardingService.live,        // expose gRPC service
-    Sharding.live                    // sharding logic
+    Storage.memory,           // store data in memory
+    ShardManagerClient.live,  // client to communicate with the Shard Manager
+    GrpcPods.live,            // use gRPC protocol
+    GrpcShardingService.live, // expose gRPC service
+    Sharding.live             // sharding logic
   )
 ```
 

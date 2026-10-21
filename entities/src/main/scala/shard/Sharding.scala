@@ -5,7 +5,7 @@ import shard.Sharding.ShardingRegistrationEvent
 import shard.errors._
 import shard.interfaces.MessageCodec.{ Codec, ReplyCodec }
 import shard.interfaces.Pods.{ BinaryMessage, BinaryReply }
-import shard.interfaces.{ Pods, Storage }
+import shard.interfaces.{ Pods, ShardManagerClient, Storage }
 import shard.internal.{ EntityManager, Replies }
 import shard.internal.EntityManager.StreamReply
 import zio.{ Config => _, _ }

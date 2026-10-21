@@ -37,7 +37,7 @@ object GuildApp extends ZIOAppDefault {
         ZLayer.succeed(RedisConfig.default),
         redis,
         StorageRedis.live,
-        ShardManagerClient.liveWithSttp,
+        ShardManagerClient.live,
         GrpcPods.live,
         Sharding.live,
         GrpcShardingService.live

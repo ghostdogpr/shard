@@ -1,15 +1,13 @@
 val scala3 = "3.9.0"
 
 val zioVersion            = "2.1.24"
-val proteusVersion        = "0.5.0"
-val grpcNettyVersion      = "1.71.0"
+val proteusVersion        = "0.7.0"
+val grpcNettyVersion      = "1.85.1"
 val zioK8sVersion         = "3.2.0"
 val zioK8sSttpVersion     = "3.11.0"
 val zioCacheVersion       = "0.2.4"
 val zioCatsInteropVersion = "23.1.0.5"
 val zioJsonVersion        = "0.7.39"
-val sttpVersion           = "4.0.13"
-val calibanVersion        = "3.0.0"
 val redis4catsVersion     = "2.0.1"
 val redissonVersion       = "3.45.1"
 val scalaKryoVersion      = "1.4.0"
@@ -75,26 +73,13 @@ lazy val manager = project
   .in(file("manager"))
   .settings(name := "shard-manager")
   .settings(commonSettings)
-  .dependsOn(core)
-  .settings(
-    libraryDependencies ++=
-      Seq(
-        "com.github.ghostdogpr" %% "caliban-quick" % calibanVersion
-      )
-  )
+  .dependsOn(core, grpcProtocol)
 
 lazy val entities = project
   .in(file("entities"))
   .settings(name := "shard-entities")
   .settings(commonSettings)
   .dependsOn(core)
-  .settings(
-    libraryDependencies ++=
-      Seq(
-        "com.github.ghostdogpr"         %% "caliban-client" % calibanVersion,
-        "com.softwaremill.sttp.client4" %% "zio"            % sttpVersion
-      )
-  )
 
 lazy val healthK8s = project
   .in(file("health-k8s"))
@@ -149,8 +134,8 @@ lazy val serializationKryo = project
       )
   )
 
-lazy val generateProto = taskKey[Unit]("Regenerate sharding.proto from the Scala protocol definition.")
-lazy val checkProto    = taskKey[Unit]("Fail if sharding.proto is out of sync with the Scala protocol definition.")
+lazy val generateProto = taskKey[Unit]("Regenerate the .proto files from the Scala protocol definitions.")
+lazy val checkProto    = taskKey[Unit]("Fail if the .proto files are out of sync with the Scala protocol definitions.")
 
 lazy val serializationProteus = project
   .in(file("serialization-proteus"))
@@ -189,19 +174,19 @@ lazy val grpcProtocol = project
           log
         )
         .get
-      log.info(s"Regenerated $output/sharding.proto")
+      log.info(s"Regenerated .proto files in $output")
     },
     checkProto    := Def.uncached {
-      val log   = streams.value.log
-      val proto = (Compile / sourceDirectory).value / "protobuf" / "sharding.proto"
-      val _     = generateProto.value
+      val log  = streams.value.log
+      val dir  = (Compile / sourceDirectory).value / "protobuf"
+      val _    = generateProto.value
       import scala.sys.process._
-      val diff  = s"git diff --exit-code -- ${proto.getAbsolutePath}".!
+      val diff = s"git diff --exit-code -- ${dir.getAbsolutePath}".!
       if (diff != 0) {
         sys.error(
-          "sharding.proto is out of sync with the Scala protocol definition. Run `sbt grpcProtocol/generateProto` and commit the result."
+          "The .proto files are out of sync with the Scala protocol definitions. Run `sbt grpcProtocol/generateProto` and commit the result."
         )
-      } else log.info("sharding.proto is in sync.")
+      } else log.info("The .proto files are in sync.")
     }
   )
 

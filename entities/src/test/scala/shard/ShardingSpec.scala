@@ -7,6 +7,7 @@ import shard.WorkerActor.WorkerMessage._
 import shard.WorkerActor._
 import shard.errors._
 import shard.interfaces.Storage
+import shard.internal.LocalShardManagerClient
 import shard.javaSerialization.given
 import zio.stream.{ SubscriptionRef, ZStream }
 import zio.test.TestAspect.{ sequential, withLiveClock }
@@ -18,13 +19,13 @@ object ShardingSpec extends ZIOSpecDefault {
     suite("ShardingSpec")(
       suite("local-pod shortcut")(tests*).provideSomeShared[Scope](
         LocalSharding.live,
-        ShardManagerClient.local,
+        LocalShardManagerClient.live,
         Storage.memory,
         ZLayer.succeed(Config.default)
       ),
       suite("simulate remote pods (forces serialization on every hop)")(tests*).provideSomeShared[Scope](
         LocalSharding.live,
-        ShardManagerClient.local,
+        LocalShardManagerClient.live,
         Storage.memory,
         ZLayer.succeed(Config.default.copy(simulateRemotePods = true))
       )

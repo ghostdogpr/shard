@@ -44,5 +44,7 @@ object GenerateProto {
     }
     Sharding.service.renderToFile(List.empty, outputDir, "sharding")
     println(s"Wrote $outputDir/sharding.proto")
+    ShardManager.service.renderToFile(List.empty, outputDir, "shard_manager")
+    println(s"Wrote $outputDir/shard_manager.proto")
   }
 }

@@ -1,6 +1,6 @@
 package shard
 
-import shard.interfaces.{ Pods, Storage }
+import shard.interfaces.{ Pods, ShardManagerClient, Storage }
 import shard.interfaces.Pods.{ BinaryMessage, BinaryReply }
 import zio.{ Promise, RLayer, Task, ZIO, ZLayer }
 import zio.stream.ZStream
