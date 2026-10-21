@@ -4,6 +4,7 @@ import shard.CounterActor.CounterMessage._
 import shard.CounterActor._
 import shard.StubbornActor.{ Stubborn, StubbornMessage }
 import shard.interfaces.Storage
+import shard.internal.LocalShardManagerClient
 import shard.javaSerialization.given
 import zio.stream.{ SubscriptionRef, ZStream }
 import zio.test.TestAspect.{ sequential, withLiveClock }
@@ -187,7 +188,7 @@ object ShardingSpec extends ZIOSpecDefault {
       }
     ).provideShared(
       LocalSharding.live,
-      ShardManagerClient.local,
+      LocalShardManagerClient.live,
       Storage.memory,
       ZLayer.succeed(Config.default)
     ) @@ sequential @@ withLiveClock

@@ -5,7 +5,7 @@ import zio._
 /**
  * Shard Manager configuration
  * @param numberOfShards number of shards (see documentation on how to choose this), should be same on all pods
- * @param apiPort port to expose the GraphQL API
+ * @param apiPort port to expose the gRPC API
  * @param rebalanceInterval interval for regular rebalancing of shards
  * @param rebalanceRetryInterval retry interval for rebalancing when some shards failed to be rebalanced
  * @param pingTimeout time to wait for a pod to respond to a ping request

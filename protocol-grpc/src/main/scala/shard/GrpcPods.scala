@@ -4,7 +4,7 @@ import shard.errors._
 import shard.interfaces.Pods
 import shard.interfaces.Pods.BinaryMessage
 import shard.protocol.Sharding._
-import io.grpc.{ ClientInterceptors, ManagedChannel, ManagedChannelBuilder, Status, StatusException }
+import io.grpc.{ ClientInterceptors, ManagedChannelBuilder, Status, StatusException }
 import proteus.client.ZioClientBackend
 import zio._
 import zio.stream.ZStream
@@ -26,44 +26,15 @@ class GrpcPods(
           map.get(pod) match {
             case Some((client, _)) => ZIO.succeed((client, map))
             case None              =>
-              val builder =
-                config.executor match {
-                  case Some(executor) =>
-                    ManagedChannelBuilder
-                      .forAddress(pod.host, pod.port)
-                      .executor(executor)
-                      .maxInboundMessageSize(config.maxInboundMessageSize)
-                      .usePlaintext()
-                  case None           =>
-                    ManagedChannelBuilder
-                      .forAddress(pod.host, pod.port)
-                      .maxInboundMessageSize(config.maxInboundMessageSize)
-                      .usePlaintext()
-                }
-
-              val acquireChannel: RIO[Scope, ManagedChannel] =
-                ZIO.acquireRelease(ZIO.attempt(builder.build())) { channel =>
-                  ZIO.attemptBlocking {
-                    channel.shutdown()
-                    channel.awaitTermination(config.shutdownTimeout.toMillis, TimeUnit.MILLISECONDS)
-                    channel.shutdownNow(): Unit
-                  }.ignore
-                }
-
               // create a fiber that never ends and keeps the connection alive
               for {
                 _       <- ZIO.logDebug(s"Opening connection to pod $pod")
                 promise <- Promise.make[Throwable, PodClient]
                 fiber   <- ZIO
                              .scoped[Any] {
-                               acquireChannel.flatMap { rawChannel =>
-                                 val channel =
-                                   if (config.clientInterceptors.isEmpty) rawChannel
-                                   else ClientInterceptors.intercept(rawChannel, config.clientInterceptors*)
-                                 val backend = ZioClientBackend(channel, config.streamingPrefetch)
-                                 val client  = PodClient.from(backend)
-                                 promise.succeed(client) *> ZIO.never
-                               }
+                               GrpcPods
+                                 .clientBackend(pod.host, pod.port, config)
+                                 .flatMap(backend => promise.succeed(PodClient.from(backend)) *> ZIO.never)
                              }
                              .onError(promise.failCause(_))
                              .ensuring(
@@ -146,6 +117,27 @@ class GrpcPods(
 }
 
 object GrpcPods {
+
+  /**
+   * Open a gRPC client to the given host and port, closed when the scope ends.
+   */
+  private[shard] def clientBackend(host: String, port: Int, config: GrpcConfig): RIO[Scope, ZioClientBackend] =
+    ZIO.suspend {
+      val builder =
+        ManagedChannelBuilder.forAddress(host, port).maxInboundMessageSize(config.maxInboundMessageSize).usePlaintext()
+      config.executor.foreach(builder.executor)
+      ZIO
+        .acquireRelease(ZIO.attempt(builder.build())) { channel =>
+          ZIO.attemptBlocking {
+            channel.shutdown()
+            channel.awaitTermination(config.shutdownTimeout.toMillis, TimeUnit.MILLISECONDS)
+            channel.shutdownNow(): Unit
+          }.ignore
+        }
+        .map(channel =>
+          ZioClientBackend(ClientInterceptors.intercept(channel, config.clientInterceptors*), config.streamingPrefetch)
+        )
+    }
 
   /**
    * A layer that creates an instance of Pods that communicates using the gRPC protocol.

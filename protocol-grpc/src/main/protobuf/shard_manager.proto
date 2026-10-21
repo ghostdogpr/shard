@@ -1,0 +1,96 @@
+syntax = "proto3";
+
+service ShardManagerService {
+    rpc GetAssignments (GetAssignmentsRequest) returns (GetAssignmentsResponse) {}
+    rpc Register (RegisterRequest) returns (RegisterResponse) {}
+    rpc Unregister (UnregisterRequest) returns (UnregisterResponse) {}
+    rpc NotifyUnhealthyPod (NotifyUnhealthyPodRequest) returns (NotifyUnhealthyPodResponse) {}
+    rpc CheckAllPodsHealth (CheckAllPodsHealthRequest) returns (CheckAllPodsHealthResponse) {}
+    rpc GetShardingEvents (GetShardingEventsRequest) returns (stream ShardingEvent) {}
+}
+
+message GetAssignmentsRequest {
+    Role role = 1;
+}
+
+message Role {
+    string name = 1;
+}
+
+message GetAssignmentsResponse {
+    repeated Assignment assignments = 1;
+}
+
+message Assignment {
+    int32 shard_id = 1;
+    optional PodAddress pod = 2;
+}
+
+message PodAddress {
+    string host = 1;
+    int32 port = 2;
+}
+
+message RegisterRequest {
+    Pod pod = 1;
+}
+
+message Pod {
+    PodAddress address = 1;
+    string version = 2;
+    Role role = 3;
+}
+
+message RegisterResponse {}
+
+message UnregisterRequest {
+    PodAddress pod_address = 1;
+}
+
+message UnregisterResponse {}
+
+message NotifyUnhealthyPodRequest {
+    PodAddress pod_address = 1;
+}
+
+message NotifyUnhealthyPodResponse {}
+
+message CheckAllPodsHealthRequest {}
+
+message CheckAllPodsHealthResponse {}
+
+message GetShardingEventsRequest {}
+
+message ShardingEvent {
+    oneof value {
+        ShardsAssigned shards_assigned = 1;
+        ShardsUnassigned shards_unassigned = 2;
+        PodRegistered pod_registered = 3;
+        PodUnregistered pod_unregistered = 4;
+        PodHealthChecked pod_health_checked = 5;
+    }
+}
+
+message ShardsAssigned {
+    PodAddress pod_address = 1;
+    Role role = 2;
+    repeated int32 shards = 3;
+}
+
+message ShardsUnassigned {
+    PodAddress pod_address = 1;
+    Role role = 2;
+    repeated int32 shards = 3;
+}
+
+message PodRegistered {
+    Pod pod = 1;
+}
+
+message PodUnregistered {
+    Pod pod = 1;
+}
+
+message PodHealthChecked {
+    Pod pod = 1;
+}

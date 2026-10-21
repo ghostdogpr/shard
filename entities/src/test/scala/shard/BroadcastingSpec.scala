@@ -1,6 +1,7 @@
 package shard
 
 import shard.interfaces.Storage
+import shard.internal.LocalShardManagerClient
 import shard.javaSerialization.given
 import zio.test.TestAspect.{ sequential, withLiveClock }
 import zio.test._
@@ -30,7 +31,7 @@ object BroadcastingSpec extends ZIOSpecDefault {
       }
     ).provideShared(
       LocalSharding.live,
-      ShardManagerClient.local,
+      LocalShardManagerClient.live,
       Storage.memory,
       config
     ) @@ sequential @@ withLiveClock

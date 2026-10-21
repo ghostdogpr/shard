@@ -1,6 +1,7 @@
 package shard
 
 import shard.interfaces.Storage
+import shard.internal.LocalShardManagerClient
 import shard.proteus.given
 import zio.stream.{ SubscriptionRef, ZStream }
 import zio.test.TestAspect.{ sequential, withLiveClock }
@@ -23,13 +24,13 @@ object ProteusShardingSpec extends ZIOSpecDefault {
     suite("ProteusShardingSpec")(
       suite("local-pod shortcut")(tests*).provideShared(
         LocalSharding.live,
-        ShardManagerClient.local,
+        LocalShardManagerClient.live,
         Storage.memory,
         ZLayer.succeed(Config.default)
       ),
       suite("simulate remote pods (forces proteus serialization on every hop)")(tests*).provideShared(
         LocalSharding.live,
-        ShardManagerClient.local,
+        LocalShardManagerClient.live,
         Storage.memory,
         ZLayer.succeed(Config.default.copy(simulateRemotePods = true))
       )
