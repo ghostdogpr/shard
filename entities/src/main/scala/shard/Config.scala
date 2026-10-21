@@ -10,6 +10,7 @@ import zio._
  * @param shardingPort port used for pods to communicate together
  * @param shardManagerHost hostname or IP address of the Shard Manager
  * @param shardManagerPort port of the Shard Manager gRPC API
+ * @param shardManagerTimeout timeout for calls to the Shard Manager
  * @param serverVersion version of the current pod
  * @param entityMaxIdleTime time of inactivity (without receiving any message) after which an entity will be interrupted
  * @param entityTerminationTimeout time we give to an entity to handle the termination message before interrupting it
@@ -26,6 +27,7 @@ case class Config(
   shardingPort: Int,
   shardManagerHost: String,
   shardManagerPort: Int,
+  shardManagerTimeout: Duration,
   serverVersion: String,
   entityMaxIdleTime: Duration,
   entityTerminationTimeout: Duration,
@@ -44,6 +46,7 @@ object Config {
     shardingPort = 54321,
     shardManagerHost = "localhost",
     shardManagerPort = 8080,
+    shardManagerTimeout = 1 minute,
     serverVersion = "1.0.0",
     entityMaxIdleTime = 1 minute,
     entityTerminationTimeout = 3 seconds,

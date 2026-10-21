@@ -12,6 +12,7 @@ import dev.profunktor.redis4cats.pubsub.PubSub
 import example.simple.GuildBehavior
 import example.simple.GuildBehavior.Guild
 import example.simple.GuildBehavior.GuildMessage.{ Join, Stream, Timeout }
+import io.grpc.{ Status, StatusException }
 import zio.{ Config => _, _ }
 import zio.Clock.ClockLive
 import zio.interop.catz._
@@ -99,6 +100,47 @@ object EndToEndSpec extends ZIOSpecDefault {
           .provide(ZLayer.succeed(Config.default.copy(shardManagerHost = "bad host")), grpcConfig)
           .exit
           .map(assert(_)(fails(anything)))
+      },
+      test("Time out Shard Manager calls when the Shard Manager doesn't respond") {
+        val stalledGrpcConfig =
+          GrpcConfig.default.copy(serverInterceptors = Seq(ShardingServerInterceptor.beforeEach(_ => ZIO.never)))
+        ZIO.scoped {
+          for {
+            _      <- Server.run
+                        .provideSome[ShardManager](
+                          ZLayer.succeed(ManagerConfig.default.copy(apiPort = 8088)),
+                          ZLayer.succeed(stalledGrpcConfig)
+                        )
+                        .forkScoped
+            _      <- ClockLive.sleep(3 seconds)
+            client <- ShardManagerClient.live.build
+                        .map(_.get)
+                        .provideSome[Scope](
+                          ZLayer.succeed(Config.default.copy(shardManagerPort = 8088, shardManagerTimeout = 1 second)),
+                          grpcConfig
+                        )
+            exit   <- client.getAssignments(Role.default).exit.timeoutFail("call not cancelled")(10 seconds)
+          } yield assert(exit)(
+            fails(
+              isSubtype[StatusException](hasField("code", _.getStatus.getCode, equalTo(Status.Code.DEADLINE_EXCEEDED)))
+            )
+          )
+        }
+      },
+      test("Start the Shard Manager call deadline when the call runs") {
+        ZIO.scoped {
+          for {
+            client <- ShardManagerClient.live.build
+                        .map(_.get)
+                        .provideSome[Scope](
+                          ZLayer.succeed(Config.default.copy(shardManagerPort = 8087, shardManagerTimeout = 1 second)),
+                          grpcConfig
+                        )
+            call    = client.getAssignments(Role.default)
+            _      <- ClockLive.sleep(2 seconds)
+            exit   <- call.exit
+          } yield assert(exit)(succeeds(anything))
+        }
       },
       test("Fail the Shard Manager server on an invalid port") {
         Server.run

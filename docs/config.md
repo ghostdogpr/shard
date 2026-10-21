@@ -27,6 +27,7 @@ A good rule of thumb is to set the number of shards to 10x the maximum number of
 - `shardingPort`: port used for pods to communicate together
 - `shardManagerHost`: hostname or IP address of the Shard Manager
 - `shardManagerPort`: port of the Shard Manager gRPC API
+- `shardManagerTimeout`: timeout for calls to the Shard Manager
 - `serverVersion`: version of the current pod
 ::: tip What's the version?
 When performing a rolling update (upgrading all pods one by one without downtime), we want to avoid assigning shards to pods that will be stopped soon.
