@@ -23,7 +23,7 @@ import zio.test._
 
 object EndToEndSpec extends ZIOSpecDefault {
 
-  val shardManagerServer: ZLayer[ShardManager with ManagerConfig, Throwable, Unit] =
+  val shardManagerServer: ZLayer[ShardManager & ManagerConfig, Throwable, Unit] =
     ZLayer(Server.run().forkDaemon *> ClockLive.sleep(3 seconds).unit)
 
   val container: ZLayer[Any, Nothing, GenericContainer] =
@@ -70,7 +70,7 @@ object EndToEndSpec extends ZIOSpecDefault {
   private val managerConfig = ZLayer.succeed(ManagerConfig.default.copy(apiPort = 8087))
   private val redisConfig   = ZLayer.succeed(RedisConfig.default)
 
-  def spec: Spec[TestEnvironment with Scope, Any] =
+  def spec: Spec[TestEnvironment & Scope, Any] =
     suite("EndToEndSpec")(
       test("Send message to entities") {
         for {

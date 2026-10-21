@@ -259,7 +259,7 @@ object ShardManager {
   /**
    * A layer that starts the Shard Manager process
    */
-  val live: ZLayer[PodsHealth with Pods with Storage with ManagerConfig, Throwable, ShardManager] =
+  val live: ZLayer[PodsHealth & Pods & Storage & ManagerConfig, Throwable, ShardManager] =
     ZLayer.scoped {
       for {
         config              <- ZIO.service[ManagerConfig]

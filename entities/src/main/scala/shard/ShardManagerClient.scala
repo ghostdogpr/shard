@@ -24,7 +24,7 @@ object ShardManagerClient {
    * A layer that returns a client for the Shard Manager API.
    * It requires an sttp backend. If you don't want to use your own backend, simply use `liveWithSttp`.
    */
-  val live: ZLayer[Config with Backend[Task], Nothing, ShardManagerClientLive] =
+  val live: ZLayer[Config & Backend[Task], Nothing, ShardManagerClientLive] =
     ZLayer {
       for {
         sttpClient <- ZIO.service[Backend[Task]]

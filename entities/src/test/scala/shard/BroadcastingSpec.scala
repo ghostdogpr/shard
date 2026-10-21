@@ -10,7 +10,7 @@ object BroadcastingSpec extends ZIOSpecDefault {
 
   private val config = ZLayer.succeed(Config.default.copy(simulateRemotePods = true))
 
-  def spec: Spec[TestEnvironment with Scope, Any] =
+  def spec: Spec[TestEnvironment & Scope, Any] =
     suite("BroadcastingSpec")(
       test("Send broadcast to entities") {
         for {

@@ -34,11 +34,11 @@ object LocalSharding {
    * A special layer meant for testing that delivers messages locally rather than with an external transport.
    * This layer will only work in a single JVM and is not suitable for production use.
    */
-  val live: RLayer[ShardManagerClient with Storage with Config, Sharding] =
+  val live: RLayer[ShardManagerClient & Storage & Config, Sharding] =
     ZLayer.fromZIO(Promise.make[Nothing, Sharding]).flatMap { env =>
       val sharding = env.get
       ZLayer
-        .makeSome[ShardManagerClient with Storage with Config, Sharding](
+        .makeSome[ShardManagerClient & Storage & Config, Sharding](
           ZLayer.succeed(localPods(sharding)),
           Sharding.live
         )

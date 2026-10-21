@@ -32,7 +32,7 @@ object ProteusMessageCodecSpec extends ZIOSpecDefault {
   private def roundtrip(msg: Msg[Any, Any]): Msg[Any, Any] =
     codec.decodeMessage(codec.encodeMessage(msg))
 
-  def spec: Spec[TestEnvironment with Scope, Any] =
+  def spec: Spec[TestEnvironment & Scope, Any] =
     suite("ProteusMessageCodecSpec")(
       test("roundtrips messages") {
         val messages: List[Msg[Any, Any]] = List(

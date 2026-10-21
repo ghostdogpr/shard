@@ -15,7 +15,7 @@ object GrpcShardingSpec extends ZIOSpecDefault {
   import GrpcShardingSpec.AccountActor._
   import GrpcShardingSpec.AccountActor.AccountMessage._
 
-  def spec: Spec[TestEnvironment with Scope, Any] =
+  def spec: Spec[TestEnvironment & Scope, Any] =
     suite("GrpcShardingSpec")(
       overGrpc(Config.default.copy(shardingPort = 54330))(
         suite("ShardingSpec over gRPC")(ShardingSpec.tests.flatMap(_.filterNotTags(_ == ShardingSpec.inProcess))*)

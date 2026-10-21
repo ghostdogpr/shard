@@ -15,7 +15,7 @@ object KryoMessageCodecSpec extends ZIOSpecDefault {
 
   private val codec = summon[MessageCodec[Msg]]
 
-  def spec: Spec[TestEnvironment with Scope, Any] =
+  def spec: Spec[TestEnvironment & Scope, Any] =
     suite("KryoMessageCodecSpec")(
       test("roundtrips messages") {
         val messages: List[Msg[Any, Any]] = List(Msg.Plain("hello", 42), Msg.WithReply(7), Msg.WithStreamReply())

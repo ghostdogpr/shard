@@ -14,7 +14,7 @@ object GuildApp extends ZIOAppDefault {
         .map(_.flatMap(_.toIntOption).fold(Config.default)(port => Config.default.copy(shardingPort = port)))
     )
 
-  val program: ZIO[Sharding with Scope with RedisCommands[Task, String, String], Throwable, Unit] =
+  val program: ZIO[Sharding & Scope & RedisCommands[Task, String, String], Throwable, Unit] =
     for {
       _     <- Sharding.registerEntity(Guild)(behavior)
       _     <- Sharding.registerScoped

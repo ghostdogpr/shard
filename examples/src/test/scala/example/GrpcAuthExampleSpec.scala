@@ -29,7 +29,7 @@ object GrpcAuthExampleSpec extends ZIOSpecDefault {
       )
     )
 
-  def spec: Spec[TestEnvironment with Scope, Any] =
+  def spec: Spec[TestEnvironment & Scope, Any] =
     suite("GrpcAuthExampleSpec")(
       test("auth example for gRPC") {
         val podAddress = PodAddress("localhost", 54321)

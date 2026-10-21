@@ -12,7 +12,7 @@ object Server {
    */
   def run(
     httpHandler: HandlerAspect[Any, Unit] = HandlerAspect.identity
-  ): RIO[ShardManager with ManagerConfig, Nothing] =
+  ): RIO[ShardManager & ManagerConfig, Nothing] =
     for {
       config      <- ZIO.service[ManagerConfig]
       interpreter <- (GraphQLApi.api @@ printErrors).interpreter

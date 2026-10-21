@@ -14,7 +14,7 @@ import zio.test._
 import zio.{ Config => _, _ }
 
 object ShardingSpec extends ZIOSpecDefault {
-  def spec: Spec[TestEnvironment with Scope, Any] =
+  def spec: Spec[TestEnvironment & Scope, Any] =
     suite("ShardingSpec")(
       suite("local-pod shortcut")(tests*).provideSomeShared[Scope](
         LocalSharding.live,

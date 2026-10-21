@@ -128,7 +128,7 @@ private[shard] final class EntityManager[Msg[+_, +_]] private (
   val reaper: UIO[Nothing] = {
     val maxIdleTime   = options.maxIdleTime getOrElse config.entityMaxIdleTime
     val maxIdleMillis = maxIdleTime.toMillis
-    val interval      = (maxIdleTime dividedBy 10L) max 10.millis min 5.seconds
+    val interval      = maxIdleTime.dividedBy(10L).max(10.millis).min(5.seconds)
     val reap          =
       for {
         now     <- currentTimeInMilliseconds

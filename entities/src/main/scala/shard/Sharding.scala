@@ -252,10 +252,10 @@ class Sharding private (
         val notify = Clock.currentDateTime.flatMap(cdt =>
           lastUnhealthyNodeReported
             .updateAndGet(old =>
-              if (old.plusNanos(config.unhealthyPodReportInterval.toNanos) isBefore cdt) cdt
+              if (old.plusNanos(config.unhealthyPodReportInterval.toNanos).isBefore(cdt)) cdt
               else old
             )
-            .map(_ isEqual cdt)
+            .map(_.isEqual(cdt))
         )
         ZIO.whenZIODiscard(notify)(shardManager.notifyUnhealthyPod(pod).forkDaemon)
       }
@@ -525,13 +525,13 @@ class Sharding private (
 
   def registerEntity[R, Msg[+_, +_]](entityType: EntityType[Msg], options: EntityOptions[Msg] = EntityOptions[Msg]())(
     behavior: String => ZIO[R & Scope, Throwable, EntityHandler[Msg]]
-  ): URIO[Scope with R, Unit] =
+  ): URIO[Scope & R, Unit] =
     registerRecipient(entityType, options, behavior) *>
       eventsHub.publish(ShardingRegistrationEvent.EntityRegistered(entityType)).unit
 
   def registerTopic[R, Msg[+_, +_]](topicType: TopicType[Msg], options: EntityOptions[Msg] = EntityOptions[Msg]())(
     behavior: String => ZIO[R & Scope, Throwable, EntityHandler[Msg]]
-  ): URIO[Scope with R, Unit] = registerRecipient(topicType, options, behavior) *>
+  ): URIO[Scope & R, Unit] = registerRecipient(topicType, options, behavior) *>
     eventsHub.publish(ShardingRegistrationEvent.TopicRegistered(topicType)).unit
 
   def getShardingRegistrationEvents: ZStream[Any, Nothing, ShardingRegistrationEvent] =
@@ -541,7 +541,7 @@ class Sharding private (
     recipientType: RecipientType[Msg],
     options: EntityOptions[Msg],
     behavior: String => ZIO[R & Scope, Throwable, EntityHandler[Msg]]
-  ): URIO[Scope with R, Unit] =
+  ): URIO[Scope & R, Unit] =
     for {
       env        <- ZIO.environment[R]
       makeHandler = (entityId: String) => ZIO.suspend(behavior(entityId)).provideSomeEnvironment[Scope](env ++ _).orDie
@@ -597,7 +597,7 @@ object Sharding {
   /**
    * A layer that sets up sharding communication between pods.
    */
-  val live: ZLayer[Pods with ShardManagerClient with Storage with Config, Throwable, Sharding] =
+  val live: ZLayer[Pods & ShardManagerClient & Storage & Config, Throwable, Sharding] =
     ZLayer.scoped {
       for {
         config                    <- ZIO.service[Config]
@@ -653,7 +653,7 @@ object Sharding {
   /**
    * Same as `register`, but will automatically call `unregister` when the `Scope` is terminated.
    */
-  def registerScoped: RIO[Sharding with Scope, Unit] =
+  def registerScoped: RIO[Sharding & Scope, Unit] =
     Sharding.register.withFinalizer(_ => Sharding.unregister)
 
   /**
@@ -666,7 +666,7 @@ object Sharding {
    * Start a computation that is guaranteed to run only on a single pod.
    * Each pod should call `registerSingleton` but only a single pod will actually run it at any given time.
    */
-  def registerSingleton[R](name: String, run: URIO[R, Nothing]): URIO[Sharding with R, Unit] =
+  def registerSingleton[R](name: String, run: URIO[R, Nothing]): URIO[Sharding & R, Unit] =
     ZIO.serviceWithZIO[Sharding](_.registerSingleton[R](name, run))
 
   /**
@@ -675,7 +675,7 @@ object Sharding {
    */
   def registerEntity[R, Msg[+_, +_]](entityType: EntityType[Msg], options: EntityOptions[Msg] = EntityOptions[Msg]())(
     behavior: String => ZIO[R & Scope, Throwable, EntityHandler[Msg]]
-  ): URIO[Sharding with Scope with R, Unit] =
+  ): URIO[Sharding & Scope & R, Unit] =
     ZIO.serviceWithZIO[Sharding](_.registerEntity[R, Msg](entityType, options)(behavior))
 
   /**
@@ -684,7 +684,7 @@ object Sharding {
    */
   def registerTopic[R, Msg[+_, +_]](topicType: TopicType[Msg], options: EntityOptions[Msg] = EntityOptions[Msg]())(
     behavior: String => ZIO[R & Scope, Throwable, EntityHandler[Msg]]
-  ): URIO[Sharding with Scope with R, Unit] =
+  ): URIO[Sharding & Scope & R, Unit] =
     ZIO.serviceWithZIO[Sharding](_.registerTopic[R, Msg](topicType, options)(behavior))
 
   /**
