@@ -86,7 +86,7 @@ object LocalSharding {
       }
     }
 
-  val localServer: RLayer[Sharding with LocalQueue, Unit] =
+  val localServer: RLayer[Sharding & LocalQueue, Unit] =
     ZLayer.scoped {
       for {
         sharding <- ZIO.service[Sharding]
@@ -111,8 +111,8 @@ object LocalSharding {
    * A special layer meant for testing that uses a local queue rather than an external transport.
    * This layer will only work in a single JVM and is not suitable for production use.
    */
-  val live: RLayer[ShardManagerClient with Storage with Config, Sharding] =
-    ZLayer.makeSome[ShardManagerClient with Storage with Config, Sharding](
+  val live: RLayer[ShardManagerClient & Storage & Config, Sharding] =
+    ZLayer.makeSome[ShardManagerClient & Storage & Config, Sharding](
       localQueue,
       localPods,
       localServer,

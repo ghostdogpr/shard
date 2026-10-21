@@ -84,8 +84,8 @@ object GrpcShardingService {
   /**
    * A layer that creates a gRPC server that exposes the Pods API.
    */
-  val live: ZLayer[Config with Sharding with GrpcConfig, Throwable, Unit] =
-    ZLayer.scoped[Config with Sharding with GrpcConfig] {
+  val live: ZLayer[Config & Sharding & GrpcConfig, Throwable, Unit] =
+    ZLayer.scoped[Config & Sharding & GrpcConfig] {
       for {
         config           <- ZIO.service[Config]
         grpcConfig       <- ZIO.service[GrpcConfig]

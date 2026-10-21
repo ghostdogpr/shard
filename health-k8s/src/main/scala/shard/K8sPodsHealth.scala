@@ -15,7 +15,7 @@ object K8sPodsHealth {
   /**
    * A layer for PodsHealth that checks if the node exists in Kubernetes.
    */
-  val live: URLayer[Pods with K8sConfig, PodsHealth] =
+  val live: URLayer[Pods & K8sConfig, PodsHealth] =
     ZLayer {
       for {
         pods   <- ZIO.service[Pods.Service]

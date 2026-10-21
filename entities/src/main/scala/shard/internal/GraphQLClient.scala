@@ -91,7 +91,7 @@ private[shard] object GraphQLClient {
       _root_.caliban.client.SelectionBuilder.Field(
         "getAssignments",
         ListOf(Obj(innerSelection)),
-        arguments = List(Argument("role", role, "String!")(encoder0))
+        arguments = List(Argument("role", role, "String!")(using encoder0))
       )
   }
 
@@ -106,9 +106,9 @@ private[shard] object GraphQLClient {
         "register",
         OptionOf(Scalar()),
         arguments = List(
-          Argument("address", address, "PodAddressInput!")(encoder0),
-          Argument("version", version, "String!")(encoder1),
-          Argument("role", role, "RoleInput!")(encoder2)
+          Argument("address", address, "PodAddressInput!")(using encoder0),
+          Argument("version", version, "String!")(using encoder1),
+          Argument("role", role, "RoleInput!")(using encoder2)
         )
       )
     def unregister(podAddress: PodAddressInput)(implicit
@@ -117,7 +117,7 @@ private[shard] object GraphQLClient {
       _root_.caliban.client.SelectionBuilder.Field(
         "unregister",
         OptionOf(Scalar()),
-        arguments = List(Argument("podAddress", podAddress, "PodAddressInput!")(encoder0))
+        arguments = List(Argument("podAddress", podAddress, "PodAddressInput!")(using encoder0))
       )
     def notifyUnhealthyPod(podAddress: PodAddressInput)(implicit
       encoder0: ArgEncoder[PodAddressInput]
@@ -125,7 +125,7 @@ private[shard] object GraphQLClient {
       _root_.caliban.client.SelectionBuilder.Field(
         "notifyUnhealthyPod",
         Scalar(),
-        arguments = List(Argument("podAddress", podAddress, "PodAddressInput!")(encoder0))
+        arguments = List(Argument("podAddress", podAddress, "PodAddressInput!")(using encoder0))
       )
     def checkAllPodsHealth: SelectionBuilder[_root_.caliban.client.Operations.RootMutation, Unit] =
       _root_.caliban.client.SelectionBuilder.Field("checkAllPodsHealth", Scalar())

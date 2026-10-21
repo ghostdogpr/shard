@@ -107,7 +107,7 @@ object ProteusMessageCodec {
         val selectors = collectVariantSelectors[s.MirroredElemTypes]
         ReplySelector(
           select = value => selectors(s.ordinal(value)).select(value),
-          summary = selectors.foldLeft(ReplyEntrySummary.None)(_ combine _.summary)
+          summary = selectors.foldLeft(ReplyEntrySummary.None)(_ `combine` _.summary)
         )
       case p: Mirror.ProductOf[A] =>
         selectorForProduct[A, p.MirroredElemTypes]
@@ -144,7 +144,7 @@ object ProteusMessageCodec {
           }
           selected
         },
-        summary = nested.foldLeft(ReplyEntrySummary.None)(_ combine _._2.summary)
+        summary = nested.foldLeft(ReplyEntrySummary.None)(_ `combine` _._2.summary)
       )
     }
 

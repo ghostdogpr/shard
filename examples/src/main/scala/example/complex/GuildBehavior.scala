@@ -21,7 +21,7 @@ object GuildBehavior {
   def behavior(
     entityId: String,
     messages: Dequeue[GuildMessage]
-  ): RIO[Sharding with RedisCommands[Task, String, String], Nothing] =
+  ): RIO[Sharding & RedisCommands[Task, String, String], Nothing] =
     ZIO.serviceWithZIO[RedisCommands[Task, String, String]](redis =>
       ZIO.logInfo(s"Started entity $entityId") *>
         messages.take.flatMap(handleMessage(entityId, redis, _)).forever
