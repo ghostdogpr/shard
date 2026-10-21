@@ -176,13 +176,14 @@ object ShardingSpec extends ZIOSpecDefault {
           error  <- fiber.join
           error2 <- fiber2.join.timeout(5.seconds)
           after  <- state.running.get
-          fin    <- state.finalized.get
+          // replies are sent before the entities' finalizers run
+          fin    <- state.finalized.get.repeatUntil(_ == 2).timeout(2.seconds)
         } yield assertTrue(
           during == 2,
           error == EntityInterrupted(Worker.name, "w1"),
           error2.contains(Left(EntityInterrupted(Worker.name, "w3"))),
           after == 0,
-          fin == 2
+          fin.contains(2)
         )
       },
       test("Entity terminated from a finalizer is still interrupted after the timeout") {
