@@ -10,6 +10,7 @@ val zioCatsInteropVersion = "23.1.0.5"
 val zioJsonVersion        = "0.7.39"
 val redis4catsVersion     = "2.0.1"
 val redissonVersion       = "3.45.1"
+val sageVersion           = "0.4.0"
 val scalaKryoVersion      = "1.4.0"
 val testContainersVersion = "0.44.1"
 
@@ -47,6 +48,7 @@ lazy val root = project
     manager,
     entities,
     healthK8s,
+    storageSage,
     storageRedis,
     storageRedisson,
     serializationKryo,
@@ -93,6 +95,18 @@ lazy val healthK8s = project
         "dev.zio"                       %% "zio-cache"      % zioCacheVersion,
         "com.softwaremill.sttp.client3" %% "zio"            % zioK8sSttpVersion,
         "com.softwaremill.sttp.client3" %% "slf4j-backend"  % zioK8sSttpVersion
+      )
+  )
+
+lazy val storageSage = project
+  .in(file("storage-sage"))
+  .settings(name := "shard-storage-sage")
+  .settings(commonSettings)
+  .dependsOn(core)
+  .settings(
+    libraryDependencies ++=
+      Seq(
+        "com.github.ghostdogpr" %% "sage-client-zio" % sageVersion
       )
   )
 
@@ -202,7 +216,7 @@ lazy val examples = project
         "dev.zio" %% "zio-streams" % zioVersion
       )
   )
-  .dependsOn(manager, storageRedis, grpcProtocol, serializationKryo)
+  .dependsOn(manager, storageSage, grpcProtocol, serializationKryo)
 
 lazy val benchmarks = project
   .in(file("benchmarks"))
