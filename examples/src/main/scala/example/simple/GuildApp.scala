@@ -9,15 +9,15 @@ import zio.{ Config => _, _ }
 object GuildApp extends ZIOAppDefault {
   val program =
     for {
-      _     <- Sharding.registerEntity(Guild, behavior)
+      _     <- Sharding.registerEntity(Guild)(behavior)
       _     <- Sharding.registerScoped
       guild <- Sharding.messenger(Guild)
-      _     <- guild.send("guild1")(Join("user1", _)).debug
-      _     <- guild.send("guild1")(Join("user2", _)).debug
-      _     <- guild.send("guild1")(Join("user3", _)).debug
-      _     <- guild.send("guild1")(Join("user4", _)).debug
-      _     <- guild.send("guild1")(Join("user5", _)).debug
-      _     <- guild.send("guild1")(Join("user6", _)).debug
+      _     <- guild.send("guild1")(Join("user1")).either.debug
+      _     <- guild.send("guild1")(Join("user2")).either.debug
+      _     <- guild.send("guild1")(Join("user3")).either.debug
+      _     <- guild.send("guild1")(Join("user4")).either.debug
+      _     <- guild.send("guild1")(Join("user5")).either.debug
+      _     <- guild.send("guild1")(Join("user6")).either.debug
     } yield ()
 
   def run: Task[Unit] =

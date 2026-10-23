@@ -24,6 +24,7 @@ export default defineConfig({
         text: 'Documentation',
         items: [
           { text: 'Getting started', link: '/getting-started' },
+          { text: 'Entities and messaging', link: '/entities' },
           { text: 'Architecture', link: '/architecture' },
           { text: 'Configuration', link: '/config' },
           { text: 'Customization', link: '/customization' },

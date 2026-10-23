@@ -19,6 +19,6 @@ import scala.util.NotGiven
 package object proteus {
   given defaultDeriver(using NotGiven[ProtobufDeriver]): ProtobufDeriver = ProtobufDeriver
 
-  inline given derive[Msg](using m: Mirror.Of[Msg], deriver: ProtobufDeriver): MessageCodec[Msg] =
+  inline given derive[Msg[+_, +_]](using m: Mirror.SumOf[Msg[Any, Any]], deriver: ProtobufDeriver): MessageCodec[Msg] =
     ProteusMessageCodec.derived[Msg](using m, deriver)
 }

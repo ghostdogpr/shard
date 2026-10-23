@@ -45,7 +45,7 @@ When that happens, the Shard Manager will call the `assign` API of this pod.
 ### Pod Stop (`Sharding#unregister`)
 
 1. Pod prevents any new entity to be started locally. Any message received from other pods will return the `EntityNotManagedByThisPod` error and be retried.
-2. Pod stops all local entities by sending them the termination message. Messages currently in progress are processed.
+2. Pod stops all local entities. Messages already received are processed (up to `entityTerminationTimeout`).
 3. Once all entities are stopped, pod calls the `unregister` endpoint of the Shard Manager. This will trigger an instant rebalance, so that shards handled by this pod will be assigned to other pods.
 4. Pod stops the sharding API and is ready to stop.
 

@@ -37,10 +37,10 @@ Using the entity ID, the sharding system will be able to find on which server th
 Once sharding is setup, it will let you write code like the following (sending a message to guild regardless of its location):
 
 ```scala
-def joinGuild(guildId: GuildId): ZIO[Context, Throwable, GuildState] =
+def joinGuild(guildId: GuildId): ZIO[Context, GuildFull | ClusterError, GuildState] =
   for {
     userId     <- getCurrentUserFromContext
-    guildState <- guild.send(guildId)(JoinGuild(userId, _))
+    guildState <- guild.send(guildId)(JoinGuild(userId))
   } yield guildState
 ```
 
@@ -112,15 +112,15 @@ libraryDependencies += "com.github.ghostdogpr" %% "shard-protocol-grpc" % "@VERS
 ```
 
 Let's start with defining the messages our entities can receive. We will have 2: one for joining a guild and one for leaving.
-We create a `sealed trait` that will contain all the possible message types.
-Any message that can be replied needs to contain a `Replier[A]` where `A` is the response type.
+We create an `enum` (or a `sealed trait`) with two type parameters: for each message, `E` is the type of the errors it can fail with and `A` is the type of its reply.
+Use `Nothing` for `E` when a message can't fail, and `Unit` for `A` when there is nothing to reply.
 
 ```scala
-sealed trait GuildMessage
+case class GuildFull(maxMembers: Int)
 
-object GuildMessage {
-  case class Join(userId: String, replier: Replier[Try[Set[String]]]) extends GuildMessage
-  case class Leave(userId: String)                                    extends GuildMessage
+enum GuildMessage[+E, +A] {
+  case Join(userId: String)  extends GuildMessage[GuildFull, Set[String]]
+  case Leave(userId: String) extends GuildMessage[Nothing, Unit]
 }
 ```
 We also need to define an **Entity Type**. This is done by extending `EntityType` with the message type as well as a unique `String` identifier for this type.
@@ -134,40 +134,31 @@ See the [Customization](customization.md#message-codec) section for the other av
 
 The behavior itself is a function with the following signature:
 ```scala
-def behavior(entityId: String, messages: Queue[GuildMessage]): RIO[Sharding, Nothing]
+def behavior(entityId: String): ZIO[Scope, Nothing, Guild.Handler]
 ```
-It takes an `entityId` and a `Queue[GuildMessage]` and returns a `ZIO` that never ends (hence the return type `Nothing`).
-That function is just supposed to consume `messages` forever.
-
-Let's first define how to handle a single `GuildMessage`.
+It is called when an entity starts, and returns the **handler** that processes its messages, one at a time.
+The handler's `handle` method takes a message and returns its reply, and the compiler checks that each reply has the type declared by its message.
 
 We will use a `Ref[Set[String]]` to hold our state (the list of users in the guild).
 When we receive a `Join` request, we check if the guild is already full (here, we hardcode the max to 5) and respond with a failure or modify the state and respond with a success.
-We use `replier.reply` to send a response to the sender (here, sending the full list of guild members wrapped in a `Try` to express errors).
 ```scala
-def handleMessage(state: Ref[Set[String]], message: GuildMessage): RIO[Sharding, Unit] =
-  message match {
-    case GuildMessage.Join(userId, replier) =>
-      state.get.flatMap(members =>
-        if (members.size >= 5)
-          replier.reply(Failure(new Exception("Guild is already full!")))
-        else
-          state.updateAndGet(_ + userId).flatMap { newMembers =>
-            replier.reply(Success(newMembers))
-          }
-      )
-    case GuildMessage.Leave(userId)         =>
-      state.update(_ - userId)
+def behavior(entityId: String): ZIO[Scope, Nothing, Guild.Handler] =
+  Ref.make(Set.empty[String]).map { state =>
+    new Guild.Handler {
+      def handle[E, A](message: GuildMessage[E, A]): IO[E, A] =
+        message match {
+          case GuildMessage.Join(userId)  =>
+            state.get.flatMap(members =>
+              if (members.size >= 5) ZIO.fail(GuildFull(5))
+              else state.updateAndGet(_ + userId)
+            )
+          case GuildMessage.Leave(userId) =>
+            state.update(_ - userId)
+        }
+    }
   }
 ```
-
-We are now ready to create our behavior, starting from an empty state when the entity is created:
-```scala
-def behavior(entityId: String, messages: Queue[GuildMessage]): RIO[Sharding, Nothing] =
-  Ref
-    .make(Set.empty[String])
-    .flatMap(state => messages.take.flatMap(handleMessage(state, _)).forever)
-```
+The `Scope` is closed when the entity stops (either by a rebalance or because of inactivity): use it to acquire resources or to save the entity state with `ZIO.addFinalizer`.
 
 ### Run the application
 
@@ -180,17 +171,18 @@ To communicate with our entities, we need a `Messenger[GuildMessage]`, which we 
 ```scala
   val program =
     for {
-      _     <- Sharding.registerEntity(Guild, behavior)
+      _     <- Sharding.registerEntity(Guild)(behavior)
       _     <- Sharding.registerScoped
       guild <- Sharding.messenger(Guild)
-      _     <- guild.send("guild1")(Join("user1", _)).debug
-      _     <- guild.send("guild1")(Join("user2", _)).debug
-      _     <- guild.send("guild1")(Join("user3", _)).debug
-      _     <- guild.send("guild1")(Join("user4", _)).debug
-      _     <- guild.send("guild1")(Join("user5", _)).debug
-      _     <- guild.send("guild1")(Join("user6", _)).debug
+      _     <- guild.send("guild1")(Join("user1")).either.debug
+      _     <- guild.send("guild1")(Join("user2")).either.debug
+      _     <- guild.send("guild1")(Join("user3")).either.debug
+      _     <- guild.send("guild1")(Join("user4")).either.debug
+      _     <- guild.send("guild1")(Join("user5")).either.debug
+      _     <- guild.send("guild1")(Join("user6")).either.debug
     } yield ()
 ```
+`send("guild1")(Join(...))` returns an `IO[GuildFull | ClusterError, Set[String]]`, where `ClusterError` covers the errors of the cluster itself (see [Errors](entities.md#errors)).
 
 Finally, we provide all required dependencies as we did for the Shard Manager.
 ```scala
@@ -208,17 +200,17 @@ def run: Task[Unit] =
 
 We can now run our program. It will successively send 6 `Join` messages to our guild and print the result:
 ```
-Success(Set(user1))
-Success(Set(user1, user2))
-Success(Set(user1, user2, user3))
-Success(Set(user1, user2, user3, user4))
-Success(HashSet(user1, user5, user4, user2, user3))
-Failure(java.lang.Exception: Guild is already full!)
+Right(Set(user1))
+Right(Set(user1, user2))
+Right(Set(user1, user2, user3))
+Right(Set(user1, user2, user3, user4))
+Right(HashSet(user1, user5, user4, user2, user3))
+Left(GuildFull(5))
 ```
 
-#### Streaming
-In addition to `send`, you can also use `sendStream` to get a stream of replies rather than a single reply.
-That function gives you a `StreamReplier[A]` instead of a `Replier[A]`, which allows the entity to reply with a stream.
+#### Going further
+A messenger can also send a message without waiting for its reply (`sendDiscard`), send a message whose reply is a stream (`stream`), or send a stream of messages (`sendStream`).
+See the [Entities and Messaging](entities.md) section for these, as well as entity options, errors and delivery guarantees.
 
 #### One more thing...
 `Sharding` also exposes 2 methods that can be interesting for some use cases:

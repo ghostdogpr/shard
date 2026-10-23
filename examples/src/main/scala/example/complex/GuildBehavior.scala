@@ -1,52 +1,41 @@
 package example.complex
 
-import shard.{ EntityType, Replier, Sharding }
+import shard.EntityType
 import shard.kryo.given
 import dev.profunktor.redis4cats.RedisCommands
-import zio.{ Dequeue, Promise, RIO, Task, ZIO }
-
-import scala.util.{ Failure, Success, Try }
+import zio.{ IO, Scope, Task, URIO, ZIO }
 
 object GuildBehavior {
-  sealed trait GuildMessage
+  case class GuildFull(maxMembers: Int)
 
-  object GuildMessage {
-    case class Join(userId: String, replier: Replier[Try[Set[String]]]) extends GuildMessage
-    case class Leave(userId: String)                                    extends GuildMessage
-    case class Terminate(p: Promise[Nothing, Unit])                     extends GuildMessage
+  enum GuildMessage[+E, +A] {
+    case Join(userId: String)  extends GuildMessage[GuildFull, Set[String]]
+    case Leave(userId: String) extends GuildMessage[Nothing, Unit]
   }
 
   object Guild extends EntityType[GuildMessage]("guild")
 
-  def behavior(
-    entityId: String,
-    messages: Dequeue[GuildMessage]
-  ): RIO[Sharding & RedisCommands[Task, String, String], Nothing] =
-    ZIO.serviceWithZIO[RedisCommands[Task, String, String]](redis =>
-      ZIO.logInfo(s"Started entity $entityId") *>
-        messages.take.flatMap(handleMessage(entityId, redis, _)).forever
-    )
-
-  def handleMessage(
-    entityId: String,
-    redis: RedisCommands[Task, String, String],
-    message: GuildMessage
-  ): RIO[Sharding, Unit] =
-    message match {
-      case GuildMessage.Join(userId, replier) =>
-        redis
-          .lRange(entityId, 0, -1)
-          .map(_.toSet)
-          .flatMap(members =>
-            if (members.size >= 5)
-              replier.reply(Failure(new Exception("Guild is already full!")))
-            else
-              (redis.lPush(entityId, userId) *>
-                replier.reply(Success(members + userId))).unless(members.contains(userId)).unit
-          )
-      case GuildMessage.Leave(userId)         =>
-        redis.lRem(entityId, 1, userId).unit
-      case GuildMessage.Terminate(p)          =>
-        p.succeed(()) *> ZIO.interrupt
+  def behavior(entityId: String): URIO[RedisCommands[Task, String, String] & Scope, Guild.Handler] =
+    for {
+      redis <- ZIO.service[RedisCommands[Task, String, String]]
+      _     <- ZIO.logInfo(s"Started entity $entityId")
+      // runs when the entity stops, e.g. when its shard moves to another pod
+      _     <- ZIO.addFinalizer(ZIO.logInfo(s"Stopped entity $entityId"))
+    } yield new Guild.Handler {
+      def handle[E, A](message: GuildMessage[E, A]): IO[E, A] =
+        message match {
+          case GuildMessage.Join(userId)  =>
+            redis
+              .lRange(entityId, 0, -1)
+              .map(_.toSet)
+              .orDie
+              .flatMap(members =>
+                if (members.contains(userId)) ZIO.succeed(members)
+                else if (members.size >= 5) ZIO.fail(GuildFull(5))
+                else redis.lPush(entityId, userId).orDie.as(members + userId)
+              )
+          case GuildMessage.Leave(userId) =>
+            redis.lRem(entityId, 1, userId).orDie.unit
+        }
     }
 }

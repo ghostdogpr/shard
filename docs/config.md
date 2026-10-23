@@ -35,17 +35,9 @@ Ideally, we want to move each shard only once during the whole process.
 
 This `serverVersion` allows the Shard Manager to know which pods are old and which are new. It will then pick the new pods to assign shards.
 :::
-- `entityMaxIdleTime`: time of inactivity (without receiving any message) after which an entity will be stopped
-::: tip Termination Message
-`registerEntity` takes an optional parameter called `terminationMessage`. This allows defining a message that will be sent to your entities before they are stopped (either by a rebalance or because of inactivity).
-
-If no termination message is provided, the entity queues will simply be shutdown.
-But if you want to ensure entities are stopped "cleanly" after processing their last message, define a termination message and stop the behavior yourself (by calling `ZIO.interrupt`) after receiving that message.
-
-Termination messages must contain a promise which you need to complete to indicate that shutdown is complete. See the [example here](https://github.com/ghostdogpr/shard/tree/series/3.x/examples/src/main/scala/example/complex).
-:::
-- `entityTerminationTimeout`: time we give to an entity to handle the termination message before interrupting it
-- `sendTimeout`: timeout when calling `sendMessage`
+- `entityMaxIdleTime`: time of inactivity (without processing any message) after which an entity will be stopped. It can be overridden for each entity type with `EntityOptions`.
+- `entityTerminationTimeout`: time we give to an entity to finish processing its messages when it is stopped. After that, the messages still running are interrupted and their senders receive `EntityInterrupted`. Rebalances wait for this, so keep it below your pods' termination grace period.
+- `sendTimeout`: default timeout when sending a message, after which the sender receives `SendTimeout`. It can be overridden for each messenger.
 - `refreshAssignmentsRetryInterval`: retry interval in case of failure getting shard assignments from storage
 - `unhealthyPodReportInterval`: interval to report unhealthy pods to the Shard Manager (this exists to prevent calling the Shard Manager for each failed message)
 - `simulateRemotePods`: disable optimizations when sending a message to an entity hosted on the local shards (this will force serialization of all messages)

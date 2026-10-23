@@ -7,40 +7,33 @@ import zio.test._
 
 object KryoMessageCodecSpec extends ZIOSpecDefault {
 
-  sealed trait Msg
-  object Msg {
-    final case class Plain(name: String, count: Int)                extends Msg
-    final case class WithReplier(id: Int, replier: Replier[String]) extends Msg
-    final case class WithStreamReplier(replier: StreamReplier[Int]) extends Msg
+  enum Msg[+E, +A] {
+    case Plain(name: String, count: Int) extends Msg[Nothing, Unit]
+    case WithReply(id: Int)              extends Msg[String, Int]
+    case WithStreamReply()               extends Msg[Nothing, Streamed[String, Int]]
   }
 
   private val codec = summon[MessageCodec[Msg]]
 
   def spec: Spec[TestEnvironment & Scope, Any] =
     suite("KryoMessageCodecSpec")(
-      test("roundtrips a message with no Replier") {
-        val msg     = Msg.Plain("hello", 42)
-        val bytes   = codec.encodeMessage(msg)
-        val decoded = codec.decodeMessage(bytes)
-        assertTrue(decoded == msg)
+      test("roundtrips messages") {
+        val messages: List[Msg[Any, Any]] = List(Msg.Plain("hello", 42), Msg.WithReply(7), Msg.WithStreamReply())
+        assertTrue(messages.map(msg => codec.decodeMessage(codec.encodeMessage(msg))) == messages)
       },
-      test("roundtrips a message containing a Replier and produces a working receiver encoder") {
-        val msg        = Msg.WithReplier(7, Replier("rid-1"))
-        val bytes      = codec.encodeMessage(msg)
-        val decoded    = codec.decodeMessage(bytes).asInstanceOf[Msg.WithReplier]
-        val encoder    = codec.replyEncoder(decoded)
-        val replyBytes = encoder("ok")
-        val decodedStr = codec.replyDecoder[String](msg)(replyBytes)
-        assertTrue(decoded.id == 7, decoded.replier.id == "rid-1", decodedStr == "ok")
+      test("roundtrips replies and errors") {
+        val replyCodec = codec.replyCodec(Msg.WithReply(7))
+        assertTrue(
+          replyCodec.value.decode(replyCodec.value.encode(42)) == 42,
+          replyCodec.error.decode(replyCodec.error.encode("error")) == "error"
+        )
       },
-      test("roundtrips a message containing a StreamReplier and produces a working receiver encoder") {
-        val msg        = Msg.WithStreamReplier(StreamReplier("srid-1"))
-        val bytes      = codec.encodeMessage(msg)
-        val decoded    = codec.decodeMessage(bytes).asInstanceOf[Msg.WithStreamReplier]
-        val encoder    = codec.replyEncoder(decoded)
-        val replyBytes = encoder(99)
-        val decodedInt = codec.streamReplyDecoder[Int](msg)(replyBytes)
-        assertTrue(decoded.replier.id == "srid-1", decodedInt == 99)
+      test("roundtrips stream elements and errors") {
+        val replyCodec = codec.replyCodec(Msg.WithStreamReply())
+        assertTrue(
+          replyCodec.value.decode(replyCodec.value.encode(99)) == 99,
+          replyCodec.streamError.decode(replyCodec.streamError.encode("error")) == "error"
+        )
       }
     )
 }

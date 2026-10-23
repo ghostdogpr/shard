@@ -1,11 +1,12 @@
 package shard.kryo
 
 import shard.interfaces.MessageCodec
+import shard.interfaces.MessageCodec.Codec
 import com.typesafe.config.{ Config, ConfigFactory }
 import io.altoo.serialization.kryo.scala.ScalaKryoSerializer
 
 /**
- * A universal `MessageCodec[Msg]` backed by Kryo via altoo's `ScalaKryoSerializer`.
+ * Universal `MessageCodec[Msg]`s backed by Kryo via altoo's `ScalaKryoSerializer`.
  *
  * Because Kryo is reflective and uniform across types, one generic codec serves every
  * message type — there is no per-type derivation.
@@ -13,28 +14,8 @@ import io.altoo.serialization.kryo.scala.ScalaKryoSerializer
  * and define their `EntityType` / `TopicType` without further ceremony.
  *
  * To use a custom Kryo configuration, shadow the default `given` with
- * `given [Msg]: MessageCodec[Msg] = KryoMessageCodec.fromConfig[Msg](myConfig)`.
+ * `given [Msg[+_, +_]]: MessageCodec[Msg] = KryoMessageCodec.fromConfig[Msg](myConfig)`.
  */
-final class KryoMessageCodec[Msg] private[kryo] (serializer: ScalaKryoSerializer) extends MessageCodec[Msg] {
-  private val universalEncoder: Any => Array[Byte] =
-    (value: Any) => serializer.serialize(value).get
-
-  def encodeMessage(message: Msg): Array[Byte] =
-    serializer.serialize(message).get
-
-  def decodeMessage(bytes: Array[Byte]): Msg =
-    serializer.deserialize[Any](bytes).get.asInstanceOf[Msg]
-
-  def replyEncoder(decoded: Msg): Any => Array[Byte] =
-    universalEncoder
-
-  def replyDecoder[Res](sample: Msg): Array[Byte] => Res =
-    bytes => serializer.deserialize[Any](bytes).get.asInstanceOf[Res]
-
-  def streamReplyDecoder[Res](sample: Msg): Array[Byte] => Res =
-    bytes => serializer.deserialize[Any](bytes).get.asInstanceOf[Res]
-}
-
 object KryoMessageCodec {
 
   /**
@@ -45,15 +26,19 @@ object KryoMessageCodec {
     new ScalaKryoSerializer(ConfigFactory.defaultReference(), getClass.getClassLoader)
 
   /**
-   * A `KryoMessageCodec[Msg]` backed by [[defaultSerializer]].
+   * Create a Kryo codec that uses [[defaultSerializer]].
    */
-  def default[Msg]: KryoMessageCodec[Msg] = new KryoMessageCodec[Msg](defaultSerializer)
+  def default[Msg[+_, +_]]: MessageCodec[Msg] = fromSerializer(defaultSerializer)
 
   /**
-   * A `KryoMessageCodec[Msg]` backed by a fresh `ScalaKryoSerializer` built from the
-   * given Typesafe Config. See https://github.com/altoo-ag/scala-kryo-serialization for
-   * the available options.
+   * Create a Kryo codec from the given Typesafe Config.
+   * See https://github.com/altoo-ag/scala-kryo-serialization for the available options.
    */
-  def fromConfig[Msg](config: Config): KryoMessageCodec[Msg] =
-    new KryoMessageCodec[Msg](new ScalaKryoSerializer(config, getClass.getClassLoader))
+  def fromConfig[Msg[+_, +_]](config: Config): MessageCodec[Msg] =
+    fromSerializer(new ScalaKryoSerializer(config, getClass.getClassLoader))
+
+  private def fromSerializer[Msg[+_, +_]](serializer: ScalaKryoSerializer): MessageCodec[Msg] =
+    MessageCodec.uniform(
+      Codec(value => serializer.serialize(value).get, bytes => serializer.deserialize[Any](bytes).get)
+    )
 }

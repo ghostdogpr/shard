@@ -7,8 +7,6 @@ import zio.test.TestAspect.{ sequential, withLiveClock }
 import zio.test._
 import zio.{ Config => _, _ }
 
-import scala.util.Success
-
 object BroadcastingSpec extends ZIOSpecDefault {
 
   private val config = ZLayer.succeed(Config.default.copy(simulateRemotePods = true))
@@ -16,20 +14,33 @@ object BroadcastingSpec extends ZIOSpecDefault {
   def spec: Spec[TestEnvironment & Scope, Any] =
     suite("BroadcastingSpec")(
       test("Send broadcast to entities") {
-        ZIO.scoped {
-          for {
-            _           <- Sharding.registerTopic(IncrementerActor.Incrementer, IncrementerActor.behavior)
-            _           <- Sharding.registerScoped
-            incrementer <- Sharding.broadcaster(IncrementerActor.Incrementer)
-            _           <- incrementer.broadcastDiscard("c1")(IncrementerActor.IncrementerMessage.BroadcastIncrement)
-            _           <- Clock.sleep(1 second)
-            c1          <- incrementer.broadcast("c1")(IncrementerActor.IncrementerMessage.GetIncrement(_))
-          } yield assertTrue(
-            c1.values.toList == List(Success(1)) // Here we have just one pod, so there will be just one incrementer
-          )
-        }
+        for {
+          _           <- Sharding.registerTopic(IncrementerActor.Incrementer)(IncrementerActor.behavior)
+          _           <- Sharding.registerScoped
+          incrementer <- Sharding.broadcaster(IncrementerActor.Incrementer)
+          _           <- incrementer.broadcastDiscard("c1")(IncrementerActor.IncrementerMessage.BroadcastIncrement())
+          _           <- Clock.sleep(1 second)
+          c1          <- incrementer.broadcast("c1")(IncrementerActor.IncrementerMessage.GetIncrement())
+        } yield assertTrue(
+          // Here we have just one pod, so there will be just one incrementer
+          c1.values.toList == List(Exit.succeed(1))
+        )
+      },
+      test("Broadcast to several pods, with a typed failure") {
+        for {
+          _           <- Sharding.registerTopic(IncrementerActor.Incrementer)(IncrementerActor.behavior)
+          _           <- Sharding.registerScoped
+          self        <- ZIO.serviceWith[Config](config => PodAddress(config.selfHost, config.shardingPort))
+          // another pod on an unused shard (the local transport delivers its messages locally)
+          other        = PodAddress("other", 1)
+          _           <- ZIO.serviceWithZIO[Storage](_.saveAssignments(Config.default.role, Map(301 -> Some(other))))
+          _           <- (Clock.sleep(10.millis) *> Sharding.getPods).repeatUntil(_.contains(other))
+          incrementer <- Sharding.broadcaster(IncrementerActor.Incrementer)
+          replies     <- incrementer.broadcast("c1")(IncrementerActor.IncrementerMessage.Fail())
+          _           <- ZIO.serviceWithZIO[Storage](_.saveAssignments(Config.default.role, Map.empty))
+        } yield assertTrue(replies == Map(self -> Exit.fail("failed"), other -> Exit.fail("failed")))
       }
-    ).provideShared(
+    ).provideSomeShared[Scope](
       LocalSharding.live,
       LocalShardManagerClient.live,
       Storage.memory,
@@ -37,26 +48,27 @@ object BroadcastingSpec extends ZIOSpecDefault {
     ) @@ sequential @@ withLiveClock
 
   object IncrementerActor {
-    sealed trait IncrementerMessage
-
-    object IncrementerMessage {
-      case object BroadcastIncrement                 extends IncrementerMessage
-      case class GetIncrement(replier: Replier[Int]) extends IncrementerMessage
+    enum IncrementerMessage[+E, +A] {
+      case BroadcastIncrement() extends IncrementerMessage[Nothing, Unit]
+      case GetIncrement()       extends IncrementerMessage[Nothing, Int]
+      case Fail()               extends IncrementerMessage[String, Unit]
     }
 
     object Incrementer extends TopicType[IncrementerMessage]("incrementer")
 
-    def behavior(topic: String, messages: Dequeue[IncrementerMessage]): RIO[Sharding, Nothing] =
+    def behavior(topic: String): UIO[Incrementer.Handler] =
       ZIO.debug(s"Started topic $topic on this pod") *>
         Ref
           .make(0)
-          .flatMap(ref =>
-            messages.take.flatMap {
-              case IncrementerMessage.BroadcastIncrement    =>
-                ref.update(_ + 1)
-              case IncrementerMessage.GetIncrement(replier) =>
-                ref.get.flatMap(replier.reply)
-            }.forever
+          .map(ref =>
+            new Incrementer.Handler {
+              def handle[E, A](message: IncrementerMessage[E, A]): IO[E, A] =
+                message match {
+                  case IncrementerMessage.BroadcastIncrement() => ref.update(_ + 1)
+                  case IncrementerMessage.GetIncrement()       => ref.get
+                  case IncrementerMessage.Fail()               => ZIO.fail("failed")
+                }
+            }
           )
   }
 }
