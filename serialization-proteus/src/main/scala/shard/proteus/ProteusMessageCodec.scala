@@ -26,7 +26,6 @@ object ProteusMessageCodec {
    * Derive a `MessageCodec[Msg]` using Proteus.
    */
   inline def derived[Msg[_, _]](using m: MessageMirror[Msg], deriver: ProtobufDeriver): MessageCodec[Msg] = {
-    // the variants first, so that a variant without fixed type arguments fails with its own error
     val replyCodecs = collectVariantCodecs[Msg, m.MirroredElemTypes[Any, Any]].map(_.replyCodec).toArray
     build[Msg](messageCodec[Msg], message => m.ordinal(message.asInstanceOf[m.MirroredMonoType]), replyCodecs)
   }

@@ -151,7 +151,6 @@ private[shard] final class EntityManager[Msg[_, _]] private (
    * Fails with `EntityNotManagedByThisPod`, `MailboxFull` or `MessageDiscarded`.
    */
   def enqueue[E, A](entityId: String, message: Msg[E, A]): IO[Throwable, Envelope[Msg]] = {
-    // stored without its types, which the handler and the interceptor get back by matching on it
     val erased = message.asInstanceOf[Msg[Any, Any]]
     for {
       _        <- ZIO.unlessZIO(isOnLocalShards(entityId))(ZIO.fail(EntityNotManagedByThisPod(entityId)))
