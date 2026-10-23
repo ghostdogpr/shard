@@ -254,7 +254,8 @@ private[shard] final class EntityManager[Msg[+_, +_]] private (
         // if it died before running the entity, its messages fail like with a behavior that fails (after, there are none)
         logAbout(entity, LogLevel.Error, cause)(name => s"The interceptor of $name died") *> failToStart(entity, cause)
       )
-      .zipRight(entities.update(_ - entity.entityId) *> gauge.decrement)
+      // already done after closing its scope, unless the interceptor died before running the entity
+      .zipRight(remove(entity))
       .ensuring(entity.terminated.succeed(()))
       .uninterruptible
 
@@ -303,7 +304,18 @@ private[shard] final class EntityManager[Msg[+_, +_]] private (
       _          <- scope
                       .close(Exit.unit)
                       .catchAllCause(logAbout(entity, LogLevel.Error, _)(name => s"A finalizer of $name died"))
+      // right after its scope is closed, without waiting for the interceptor
+      _          <- remove(entity)
     } yield ()
+
+  /**
+   * Remove an entity from the running entities, unless it was already removed.
+   */
+  private def remove(entity: RunningEntity[Msg]): UIO[Unit] =
+    // compared by reference, since an entity with the same ID may have started since
+    entities.modify { map =>
+      if (map.get(entity.entityId).contains(entity)) (gauge.decrement, map - entity.entityId) else (ZIO.unit, map)
+    }.flatten
 
   /**
    * Log a message about an entity, annotated with its type and ID.
@@ -506,6 +518,13 @@ private[shard] final class EntityManager[Msg[+_, +_]] private (
   // reads the entities under the lock, so that no entity is being started at the same time
   private val runningEntities: UIO[Map[String, RunningEntity[Msg]]] =
     entities.modifyZIO(map => ZIO.succeed((map, map)))
+
+  /**
+   * Get the IDs of the entities running on this pod, from their start until their scope is closed.
+   */
+  def entityIds: UIO[Set[String]] =
+    // under the lock, so that an entity whose behavior was called is always included
+    runningEntities.map(_.keySet)
 
   def terminateEntitiesOnShards(shards: Set[ShardId]): UIO[Unit] =
     runningEntities.flatMap { map =>

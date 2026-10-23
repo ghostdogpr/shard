@@ -140,6 +140,13 @@ class Sharding private (
   val getPods: UIO[Set[PodAddress]] =
     shardAssignments.get.map(_.values.toSet)
 
+  val getRegisteredPods: Task[Set[Pod]] =
+    // only the storage knows the version and role of the pods, saved by the Shard Manager
+    storage.getPods.map(_.values.toSet)
+
+  def localEntities(recipientType: RecipientType[?]): UIO[Set[String]] =
+    entityStates.get.flatMap(_.get(recipientType.name).fold(ZIO.succeed(Set.empty[String]))(_.entityIds))
+
   private def updateAssignments(
     assignmentsOpt: Map[ShardId, Option[PodAddress]],
     replaceAllAssignments: Boolean
@@ -722,10 +729,23 @@ object Sharding {
     ZIO.serviceWithZIO[Sharding](_.thisPodAssignments)
 
   /**
-   * Get the list of pods currently registered to the Shard Manager
+   * Get the list of pods currently holding shards of this pod's role
    */
   def getPods: RIO[Sharding, Set[PodAddress]] =
     ZIO.serviceWithZIO[Sharding](_.getPods)
+
+  /**
+   * Get the pods registered to the Shard Manager, for every role, with their version and role.
+   */
+  def getRegisteredPods: RIO[Sharding, Set[Pod]] =
+    ZIO.serviceWithZIO[Sharding](_.getRegisteredPods)
+
+  /**
+   * Get the IDs of the entities of a given type running on this pod, or the topics for a topic type.
+   * An entity is included from its start until its `Scope` is closed.
+   */
+  def localEntities(recipientType: RecipientType[?]): URIO[Sharding, Set[String]] =
+    ZIO.serviceWithZIO[Sharding](_.localEntities(recipientType))
 
   /**
    * Terminate a local entity after it processes the messages it already received, without waiting for it.
