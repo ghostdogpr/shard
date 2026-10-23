@@ -60,8 +60,9 @@ object StorageRedisSpec extends ZIOSpecDefault {
         for {
           p      <- Promise.make[Nothing, Map[Int, Option[PodAddress]]]
           _      <- ZStream.serviceWithStream[Storage](_.assignmentsStream(role)).runForeach(p.succeed(_)).fork
-          _      <- ClockLive.sleep(1 second)
-          _      <- ZIO.serviceWithZIO[Storage](_.saveAssignments(role, expected))
+          // saved again until the stream receives it, since it only receives the assignments saved once subscribed
+          _      <- (ZIO.serviceWithZIO[Storage](_.saveAssignments(role, expected)) *> ClockLive.sleep(100.millis))
+                      .repeatUntilZIO(_ => p.isDone)
           actual <- p.await
         } yield assertTrue(expected == actual)
       }
