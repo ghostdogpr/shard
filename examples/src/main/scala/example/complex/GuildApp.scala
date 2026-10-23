@@ -1,9 +1,9 @@
 package example.complex
 
 import shard._
-import dev.profunktor.redis4cats.RedisCommands
 import example.complex.GuildBehavior.GuildMessage.Join
 import example.complex.GuildBehavior._
+import sage.backend.SageClient
 import zio.{ Config => _, _ }
 
 object GuildApp extends ZIOAppDefault {
@@ -14,7 +14,7 @@ object GuildApp extends ZIOAppDefault {
         .map(_.flatMap(_.toIntOption).fold(Config.default)(port => Config.default.copy(shardingPort = port)))
     )
 
-  val program: ZIO[Sharding & Scope & RedisCommands[Task, String, String], Throwable, Unit] =
+  val program: ZIO[Sharding & Scope & SageClient, Throwable, Unit] =
     for {
       _     <- Sharding.registerEntity(Guild)(behavior)
       _     <- Sharding.registerScoped

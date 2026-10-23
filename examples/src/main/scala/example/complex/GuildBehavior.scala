@@ -2,8 +2,8 @@ package example.complex
 
 import shard.EntityType
 import shard.kryo.given
-import dev.profunktor.redis4cats.RedisCommands
-import zio.{ IO, Scope, Task, URIO, ZIO }
+import sage.backend.SageClient
+import zio.{ IO, Scope, URIO, ZIO }
 
 object GuildBehavior {
   case class GuildFull(maxMembers: Int)
@@ -15,9 +15,9 @@ object GuildBehavior {
 
   object Guild extends EntityType[GuildMessage]("guild")
 
-  def behavior(entityId: String): URIO[RedisCommands[Task, String, String] & Scope, Guild.Handler] =
+  def behavior(entityId: String): URIO[SageClient & Scope, Guild.Handler] =
     for {
-      redis <- ZIO.service[RedisCommands[Task, String, String]]
+      redis <- ZIO.service[SageClient]
       _     <- ZIO.logInfo(s"Started entity $entityId")
       // runs when the entity stops, e.g. when its shard moves to another pod
       _     <- ZIO.addFinalizer(ZIO.logInfo(s"Stopped entity $entityId"))
@@ -26,7 +26,7 @@ object GuildBehavior {
         message match {
           case GuildMessage.Join(userId)  =>
             redis
-              .lRange(entityId, 0, -1)
+              .lRange[String](entityId, 0, -1)
               .map(_.toSet)
               .orDie
               .flatMap(members =>

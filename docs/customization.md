@@ -27,9 +27,9 @@ Assignments are stored per `Role`, since each role has its own independent set o
 
 For testing, you can use the `Storage.memory` layer that keeps data in memory.
 
-Shard provides an implementation of `Storage` using Redis with the Redis4cats library (there's also an alternative using Redisson). To use it, add the following dependency:
+Shard provides an implementation of `Storage` using Redis (or Valkey) with the [Sage](https://ghostdogpr.github.io/sage/) client. To use it, add the following dependency:
 ```scala
-libraryDependencies += "com.github.ghostdogpr" %% "shard-storage-redis" % "@VERSION@"
+libraryDependencies += "com.github.ghostdogpr" %% "shard-storage-sage" % "@VERSION@"
 ```
 You can then simply use the `StorageRedis.live` layer.
 
@@ -37,35 +37,25 @@ It requires a `RedisConfig` with the following options:
 - `assignmentsKey`: the key to store shard assignments in Redis
 - `podsKey`: the key to store registered pods in Redis
 
-It also requires a `Redis` object, which is an alias to `RedisCommands[Task, String, String] with PubSubCommands[fs2Stream, String, String]` from the [redis4cats](https://redis4cats.profunktor.dev/) library used under the hood.
-Here's an example how to build it:
+It also requires a `SageClient`. Here's an example how to build it:
 
 ```scala
-import shard.StorageRedis.Redis
-import dev.profunktor.redis4cats.Redis
-import dev.profunktor.redis4cats.connection.RedisClient
-import dev.profunktor.redis4cats.data.RedisCodec
-import dev.profunktor.redis4cats.effect.Log
-import dev.profunktor.redis4cats.pubsub.PubSub
-import zio.interop.catz._
-import zio.{ Task, ZEnvironment, ZIO, ZLayer }
+import sage.{ Endpoint, SageConfig, SageException, Topology }
+import sage.backend.SageClient
+import zio.ZLayer
 
-val redis: ZLayer[Any, Throwable, Redis] =
-  ZLayer.scopedEnvironment {
-    implicit val runtime: zio.Runtime[Any] = zio.Runtime.default
-    implicit val logger: Log[Task]         = new Log[Task] {
-      override def debug(msg: => String): Task[Unit] = ZIO.unit
-      override def error(msg: => String): Task[Unit] = ZIO.logError(msg)
-      override def info(msg: => String): Task[Unit]  = ZIO.logDebug(msg)
-    }
-
-    (for {
-      client   <- RedisClient[Task].from("redis://foobared@localhost")
-      commands <- Redis[Task].fromClient(client, RedisCodec.Utf8)
-      pubSub   <- PubSub.mkPubSubConnection[Task, String, String](client, RedisCodec.Utf8)
-    } yield ZEnvironment(commands, pubSub)).toScopedZIO
-  }
+val redis: ZLayer[Any, SageException, SageClient] =
+  SageClient.layer(SageConfig(topology = Topology.Standalone(Endpoint("localhost", 6379))))
 ```
+
+See the [Sage configuration](https://ghostdogpr.github.io/sage/configuration) for clusters, TLS and authentication.
+
+### Alternatives
+
+Two other Redis implementations are available. They store data in the same format, so you can switch between them.
+They provide the same `StorageRedis.live` layer and `RedisConfig`, but require a different client:
+- `shard-storage-redis` uses [redis4cats](https://redis4cats.profunktor.dev/) and requires a `Redis` object, an alias to `RedisCommands[Task, String, String] & PubSubCommands[Task, fs2Stream, String, String]`.
+- `shard-storage-redisson` uses [Redisson](https://redisson.org/) and requires a `RedissonClient`.
 
 ## Messaging Protocol
 
