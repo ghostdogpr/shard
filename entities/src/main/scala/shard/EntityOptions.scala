@@ -11,12 +11,14 @@ import zio.Duration
  *                        fail with `MailboxFull`
  * @param loadEntity whether a message should start the entity when it isn't running (otherwise `send` fails with
  *                   `MessageDiscarded`)
+ * @param interceptor wraps the entities of this type and the processing of their messages (see `EntityInterceptor`)
  */
 final case class EntityOptions[Msg[+_, +_]](
   maxIdleTime: Option[Duration] = None,
   concurrency: Int = 1,
   mailboxCapacity: Int = EntityOptions.DefaultMailboxCapacity,
-  loadEntity: Msg[Any, Any] => Boolean = (_: Msg[Any, Any]) => true
+  loadEntity: Msg[Any, Any] => Boolean = (_: Msg[Any, Any]) => true,
+  interceptor: EntityInterceptor = EntityInterceptor.none
 )
 
 object EntityOptions {

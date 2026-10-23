@@ -125,6 +125,8 @@ private[shard] final class EntityManager[Msg[+_, +_]] private (
 
   private val sequential = options.concurrency <= 1
 
+  private val interceptor = config.entityInterceptor ++ options.interceptor
+
   val reaper: UIO[Nothing] = {
     val maxIdleTime   = options.maxIdleTime getOrElse config.entityMaxIdleTime
     val maxIdleMillis = maxIdleTime.toMillis
@@ -241,8 +243,28 @@ private[shard] final class EntityManager[Msg[+_, +_]] private (
       _          <- run(entity).forkDaemon
     } yield entity
 
+  /**
+   * Run an entity until it stops, wrapped by the interceptor.
+   */
   private def run(entity: RunningEntity[Msg]): UIO[Unit] =
-    (for {
+    // the fibers of the entity are forked inside the interceptor, so that they inherit what it sets (e.g. log annotations)
+    ZIO
+      .suspendSucceed(interceptor.aroundEntity(recipientType.name, entity.entityId)(lifecycle(entity)))
+      .catchAllCause(cause =>
+        // if it died before running the entity, its messages fail like with a behavior that fails (after, there are none)
+        ZIO.logErrorCause(s"The interceptor of ${recipientType.name} ${entity.entityId} died", cause) *>
+          failToStart(entity, cause)
+      )
+      // already done after closing its scope, unless the interceptor died before running the entity
+      .zipRight(remove(entity))
+      .ensuring(entity.terminated.succeed(()))
+      .uninterruptible
+
+  /**
+   * Start the handler of an entity, then stop it once the entity is closing.
+   */
+  private def lifecycle(entity: RunningEntity[Msg]): UIO[Unit] =
+    for {
       scope      <- Scope.make
       // must stay interruptible to be stopped
       processing <- makeHandler(entity.entityId)
@@ -285,9 +307,18 @@ private[shard] final class EntityManager[Msg[+_, +_]] private (
                       .catchAllCause(
                         ZIO.logErrorCause(s"A finalizer of ${recipientType.name} ${entity.entityId} died", _)
                       )
-      _          <- entities.update(_ - entity.entityId)
-      _          <- gauge.decrement
-    } yield ()).ensuring(entity.terminated.succeed(())).uninterruptible
+      // right after its scope is closed, without waiting for the interceptor
+      _          <- remove(entity)
+    } yield ()
+
+  /**
+   * Remove an entity from the running entities, unless it was already removed.
+   */
+  private def remove(entity: RunningEntity[Msg]): UIO[Unit] =
+    // compared by reference, since an entity with the same ID may have started since
+    entities.modify { map =>
+      if (map.get(entity.entityId).contains(entity)) (gauge.decrement, map - entity.entityId) else (ZIO.unit, map)
+    }.flatten
 
   /**
    * Stop an entity whose handler failed to start.
@@ -384,8 +415,14 @@ private[shard] final class EntityManager[Msg[+_, +_]] private (
    * Once a message has died, the next ones are interrupted instead of processed.
    */
   private def handle(entity: RunningEntity[Msg], handler: EntityHandler[Msg], message: Msg[Any, Any]): IO[Any, Any] =
-    // a handler throwing instead of returning an effect is a defect
-    entity.state.get.flatMap(s => if (s.poisoned) interrupted else ZIO.suspendSucceed(handler.handle(message)))
+    // a handler or interceptor throwing instead of returning an effect is a defect
+    entity.state.get.flatMap(s =>
+      if (s.poisoned) interrupted
+      else
+        interceptor.aroundMessage(recipientType.name, entity.entityId, message)(
+          ZIO.suspendSucceed(handler.handle(message))
+        )
+    )
 
   private def complete(entity: RunningEntity[Msg], envelope: Envelope[Msg], exit: Exit[Any, Any]): UIO[Unit] =
     exit match {
@@ -401,7 +438,8 @@ private[shard] final class EntityManager[Msg[+_, +_]] private (
           ZIO.logErrorCause(
             s"${recipientType.name} ${entity.entityId} died while processing a message, stopping it",
             cause
-          ) *> stopInBackground(entity) *> finish(entity, envelope, exit)
+          ) *>
+          stopInBackground(entity) *> finish(entity, envelope, exit)
       case _                                      =>
         finish(entity, envelope, exit)
     }

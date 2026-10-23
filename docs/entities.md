@@ -38,10 +38,32 @@ Entity and topic types must all have different names.
 - `concurrency`: maximum number of messages processed at the same time by an entity. The default is 1: messages are processed one at a time, in order.
 - `mailboxCapacity`: maximum number of messages waiting or being processed by an entity (4096 by default, `EntityOptions.Unbounded` for no limit). Beyond that, messages fail with `MailboxFull`.
 - `loadEntity`: whether a message should start the entity when it isn't running. If not, the message is discarded: `sendDiscard` succeeds and `send` fails with `MessageDiscarded`.
+- `interceptor`: wraps the entities and their messages, see [Interceptors](#interceptors).
 
 ```scala
 Sharding.registerEntity(Guild, EntityOptions(maxIdleTime = Some(5.minutes), concurrency = 4))(behavior)
 ```
+
+## Interceptors
+
+An `EntityInterceptor` wraps every entity of a type, e.g. to add log annotations, timing or tracing:
+- `aroundEntity` wraps the whole life of an entity: its behavior, its messages and the finalizers of its scope. What it sets in fiber refs (e.g. `ZIO.logAnnotate`) applies to all of them, but not to the streams of `Streamed` and `Duplex` replies, which run outside of the entity.
+- `aroundMessage` wraps the processing of each message by the handler, with the message and its outcome. For `Streamed` and `Duplex` replies, it wraps the creation of the stream, not the stream itself.
+
+```scala
+val interceptor = new EntityInterceptor {
+  override def aroundEntity[E, A](recipientType: String, entityId: String)(effect: IO[E, A]): IO[E, A] =
+    ZIO.logAnnotate("entity", s"$recipientType/$entityId")(effect)
+
+  override def aroundMessage[E, A](recipientType: String, entityId: String, message: Any)(effect: IO[E, A]): IO[E, A] =
+    effect.timed.flatMap((duration, reply) => ZIO.logDebug(s"Processed $message in ${duration.render}").as(reply))
+}
+
+Sharding.registerEntity(Guild, EntityOptions(interceptor = interceptor))(behavior)
+```
+
+Set it in `EntityOptions` for one entity or topic type, or in `Config.entityInterceptor` for all of them (it then wraps the one of `EntityOptions`). Interceptors combine with `++`: in `a ++ b`, `a` wraps `b`.
+If `aroundMessage` fails or dies, it is like the handler failing or dying. If `aroundEntity` dies before the entity starts, it is like the behavior failing.
 
 ## Sending messages
 

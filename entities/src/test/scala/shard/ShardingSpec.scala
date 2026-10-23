@@ -29,6 +29,12 @@ object ShardingSpec extends ZIOSpecDefault {
         Storage.memory,
         ZLayer.succeed(Config.default.copy(simulateRemotePods = true))
       ),
+      suite("interceptor in Config")(defaultInterceptor).provideSomeShared[Scope](
+        LocalSharding.live,
+        LocalShardManagerClient.live,
+        Storage.memory,
+        ZLayer.succeed(Config.default.copy(entityInterceptor = logging("default")))
+      ),
       suite("registered pods")(
         test("Registered pods are read from the storage") {
           val pod1 = Pod(PodAddress("host1", 1), "1.0", Role.default)
@@ -587,6 +593,77 @@ object ShardingSpec extends ZIOSpecDefault {
           ping.isSuccess
         )
       },
+      test("An interceptor's log annotations apply to the start, the messages and the finalizers of an entity") {
+        val interceptor = new EntityInterceptor {
+          override def aroundEntity[E, A](recipientType: String, entityId: String)(effect: IO[E, A]): IO[E, A] =
+            ZIO.logAnnotate("entity", s"$recipientType/$entityId")(effect)
+        }
+        for {
+          state  <- WorkerState.make
+          _      <- Sharding.registerEntity(Worker, EntityOptions(interceptor = interceptor))(entityId =>
+                      ZIO.log("start") *> worker(state)(entityId) <* ZIO.addFinalizer(ZIO.log("finalizer"))
+                    )
+          _      <- Sharding.registerScoped
+          worker <- Sharding.messenger(Worker)
+          _      <- worker.send("w1")(Log())
+          _      <- Sharding.terminateLocalEntity(Worker, "w1")
+          // the worker's own finalizer runs after the one that logs
+          _      <- state.finalized.changes.takeUntil(_ == 1).runDrain
+          logs   <- ZTestLogger.logOutput
+        } yield assertTrue(
+          logs.collect { case log if log.annotations.get("entity").contains("worker/w1") => log.message() } ==
+            Chunk("start", "message", "finalizer")
+        )
+      } @@ TestAspect.tag(inProcess),
+      test("An interceptor wraps each message and gets its outcome") {
+        for {
+          outcomes   <- Ref.make(Chunk.empty[(Any, Exit[Any, Any])])
+          interceptor = new EntityInterceptor {
+                          override def aroundMessage[E, A](recipientType: String, entityId: String, message: Any)(
+                            effect: IO[E, A]
+                          ): IO[E, A] =
+                            effect.onExit(exit => outcomes.update(_ :+ (message -> exit)))
+                        }
+          counter    <- startCounter(EntityOptions(interceptor = interceptor))
+          _          <- counter.send("c1")(IncrementCounter())
+          _          <- counter.send("c1")(Fail()).flip
+          _          <- counter.send("c1")(GetCounter())
+          items      <- counter.stream("c1")(Chunked()).runCollect
+          recorded   <- outcomes.get
+        } yield assertTrue(
+          recorded.take(3) == Chunk(
+            IncrementCounter() -> Exit.unit,
+            Fail()             -> Exit.fail(CounterError("failed")),
+            GetCounter()       -> Exit.succeed(1)
+          ),
+          // the creation of the stream, not the stream itself
+          recorded.drop(3).map((message, exit) => message -> exit.exists(_.isInstanceOf[Streamed[?, ?]])) ==
+            Chunk(Chunked() -> true),
+          items == Chunk(1, 2, 3, 4, 5)
+        )
+      },
+      test("Interceptors that die are treated like handlers that die") {
+        val interceptor = new EntityInterceptor {
+          override def aroundEntity[E, A](recipientType: String, entityId: String)(effect: IO[E, A]): IO[E, A] =
+            if (entityId == "bad") ZIO.dieMessage("bad entity") else effect
+
+          override def aroundMessage[E, A](recipientType: String, entityId: String, message: Any)(
+            effect: IO[E, A]
+          ): IO[E, A] =
+            if (message == DecrementCounter()) ZIO.dieMessage("bad message") else effect
+        }
+        for {
+          counter <- startCounter(EntityOptions(interceptor = interceptor))
+          bad     <- counter.send("bad")(GetCounter()).flip
+          _       <- counter.send("c1")(IncrementCounter())
+          died    <- counter.send("c1")(DecrementCounter()).flip
+          c1      <- counter.send("c1")(GetCounter()) // counter should be restarted
+        } yield assertTrue(
+          bad == EntityDefect("Entity died with java.lang.RuntimeException: bad entity"),
+          died == EntityDefect("Entity died with java.lang.RuntimeException: bad message"),
+          c1 == 0
+        )
+      },
       test("Running entities are listed from their start until their scope is closed") {
         for {
           state   <- WorkerState.make
@@ -646,6 +723,29 @@ object ShardingSpec extends ZIOSpecDefault {
         )
       }
     )
+
+  /**
+   * An interceptor that logs before and after each message.
+   */
+  private def logging(name: String): EntityInterceptor =
+    new EntityInterceptor {
+      override def aroundMessage[E, A](recipientType: String, entityId: String, message: Any)(
+        effect: IO[E, A]
+      ): IO[E, A] =
+        ZIO.log(s"$name before") *> effect <* ZIO.log(s"$name after")
+    }
+
+  private val defaultInterceptor: Spec[Sharding & Scope, Any] =
+    test("The interceptor of Config wraps the one of EntityOptions") {
+      for {
+        counter <- startCounter(EntityOptions(interceptor = logging("type")))
+        _       <- counter.send("c1")(IncrementCounter())
+        logs    <- ZTestLogger.logOutput
+      } yield assertTrue(
+        logs.map(_.message()).filter(m => m.endsWith(" before") || m.endsWith(" after")) ==
+          Chunk("default before", "type before", "type after", "default after")
+      )
+    }
 
   /**
    * Test that an auto-restarting stream resumes where it ended when the entity restarts.
@@ -764,6 +864,8 @@ object WorkerActor {
     case Gated()               extends WorkerMessage[Nothing, Unit] with Uninterruptible
     // number of the entity, counting from 1 each time it starts
     case Instance()            extends WorkerMessage[Nothing, Int]
+    // logs "message"
+    case Log()                 extends WorkerMessage[Nothing, Unit]
   }
 
   object Worker extends EntityType[WorkerMessage]("worker")
@@ -813,6 +915,7 @@ object WorkerActor {
           case CompleteNow()         => state.completed.update(_ + 1)
           case Gated()               => running(state.gate.await) *> state.completed.update(_ + 1)
           case Instance()            => ZIO.succeed(instance)
+          case Log()                 => ZIO.log("message")
         }
     }
 }
