@@ -1,6 +1,6 @@
 package shard.proteus
 
-import _root_.proteus.{ ProtobufCodec, ProtobufDeriver }
+import _root_.proteus.{ Dependency, ProtobufCodec, ProtobufDeriver }
 import shard.{ Duplex, Streamed }
 import shard.interfaces.MessageCodec
 import shard.interfaces.MessageCodec.{ Codec, ReplyCodec }
@@ -25,6 +25,18 @@ object ProteusMessageCodec {
       m.ordinal(_),
       collectReplyCodecs[Msg, m.MirroredElemTypes].toArray
     )
+
+  /**
+   * Create a Proteus `Dependency` containing the message type and the error, reply and stream types of its variants.
+   * Render it to get a .proto file describing the message contract.
+   */
+  inline def dependency[Msg[+_, +_]](name: String, packageName: String)(using
+    m: Mirror.SumOf[Msg[Any, Any]],
+    deriver: ProtobufDeriver
+  ): Dependency =
+    collectProtobufCodecs[Msg, m.MirroredElemTypes].foldLeft(
+      Dependency(name, packageName).add(using summonOrDeriveProtobufCodec[Msg[Any, Any]])
+    )((dependency, codec) => dependency.add(using codec))
 
   private def build[Msg[+_, +_]](
     msgCodec: ProtobufCodec[Msg[Any, Any]],
@@ -53,22 +65,48 @@ object ProteusMessageCodec {
       case _                            => error("Cannot derive a Proteus MessageCodec: a variant doesn't extend the message type")
     }
 
+  private inline def collectProtobufCodecs[Msg[+_, +_], Variants <: Tuple](using
+    deriver: ProtobufDeriver
+  ): List[ProtobufCodec[?]] =
+    inline erasedValue[Variants] match {
+      case _: EmptyTuple     => Nil
+      case _: (head *: tail) => protobufCodecsOf[Msg, head] ++ collectProtobufCodecs[Msg, tail]
+    }
+
+  private inline def protobufCodecsOf[Msg[+_, +_], Variant](using deriver: ProtobufDeriver): List[ProtobufCodec[?]] =
+    inline erasedValue[Variant] match {
+      case _: Msg[e, Streamed[e2, a]]   => List(protobufCodecOf[e], protobufCodecOf[a], protobufCodecOf[e2]).flatten
+      case _: Msg[e, Duplex[in, e2, a]] =>
+        List(protobufCodecOf[e], protobufCodecOf[a], protobufCodecOf[e2], protobufCodecOf[in]).flatten
+      case _: Msg[e, a]                 => List(protobufCodecOf[e], protobufCodecOf[a]).flatten
+      case _                            => error("Cannot derive a Proteus MessageCodec: a variant doesn't extend the message type")
+    }
+
   /**
    * Get the codec of a reply or error type.
-   * Uses a `ProtobufCodec` in scope if there is one, otherwise derives one.
    */
   private inline def codecOf[A](using deriver: ProtobufDeriver): Codec =
     summonFrom {
-      case _: (A =:= Nothing)      => Codec.nothing
-      case _: (A =:= Unit)         => Codec.unit
+      case _: (A =:= Unit) => Codec.unit
+      case _               => protobufCodecOf[A].fold(Codec.nothing)(fromProtobufCodec)
+    }
+
+  /**
+   * Get the `ProtobufCodec` of a reply or error type, or `None` for `Unit` and `Nothing`.
+   * Uses a `ProtobufCodec` in scope if there is one, otherwise derives one.
+   */
+  private inline def protobufCodecOf[A](using deriver: ProtobufDeriver): Option[ProtobufCodec[A]] =
+    summonFrom {
+      case _: (A =:= Nothing)      => None
+      case _: (A =:= Unit)         => None
       case _: (A =:= Any)          =>
         error(
           "Cannot derive a Proteus MessageCodec: a variant has no fixed error or reply type. " +
             "Each variant must extend the message type with fixed type arguments (e.g. `extends Msg[MyError, MyReply]`): " +
             "variants can't have type parameters, and intermediate sealed traits must fix both type arguments."
         )
-      case codec: ProtobufCodec[A] => fromProtobufCodec(codec)
-      case _: Mirror.Of[A]         => fromProtobufCodec(ProtobufCodec.derived[A](using deriver))
+      case codec: ProtobufCodec[A] => Some(codec)
+      case _: Mirror.Of[A]         => Some(ProtobufCodec.derived[A](using deriver))
       case _                       =>
         error(
           "Cannot derive a Proteus MessageCodec: a reply or error type has no Mirror or in-scope ProtobufCodec. " +

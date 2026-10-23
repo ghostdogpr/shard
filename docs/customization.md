@@ -178,6 +178,16 @@ object Guild extends EntityType[GuildMessage]("guild")
 
 The Proteus given will pick up any in-scope `ProtobufCodec[T]` you've declared (e.g. via `derives proteus.ProtobufCodec` on your types) before falling back to deriving one — useful if you want to register custom field codecs.
 
+To get a .proto file describing a message type, use `ProteusMessageCodec.dependency`. It includes the message and all its reply, error and stream types.
+
+```scala
+import shard.proteus.ProteusMessageCodec
+
+val proto: String = ProteusMessageCodec.dependency[GuildMessage]("guild", "com.example.guild").render(Nil)
+```
+
+Call it where the same `ProtobufCodec` instances as your `EntityType` are in scope, so that the .proto matches the wire format.
+
 Proteus also offers protobuf's forward/backward compatibility rules, which makes it a good choice when you need to do rolling updates that change the message format.
 
 ::: tip Server updates and message versioning
