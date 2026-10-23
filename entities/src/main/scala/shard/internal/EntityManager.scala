@@ -476,6 +476,13 @@ private[shard] final class EntityManager[Msg[+_, +_]] private (
   private val runningEntities: UIO[Map[String, RunningEntity[Msg]]] =
     entities.modifyZIO(map => ZIO.succeed((map, map)))
 
+  /**
+   * Get the IDs of the entities running on this pod, from their start until their scope is closed.
+   */
+  def entityIds: UIO[Set[String]] =
+    // under the lock, so that an entity whose behavior was called is always included
+    runningEntities.map(_.keySet)
+
   def terminateEntitiesOnShards(shards: Set[ShardId]): UIO[Unit] =
     runningEntities.flatMap { map =>
       stopAll(map.collect {
