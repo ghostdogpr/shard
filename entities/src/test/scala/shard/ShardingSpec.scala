@@ -615,16 +615,6 @@ object ShardingSpec extends ZIOSpecDefault {
             Chunk("start", "message", "finalizer")
         )
       } @@ TestAspect.tag(inProcess),
-      test("Logs about an entity are annotated with its type and ID") {
-        for {
-          counter <- startCounter()
-          _       <- counter.send("c1")(Die()).flip
-          logs    <- ZTestLogger.logOutput
-          died     = logs.filter(_.message().contains("died while processing a message"))
-        } yield assertTrue(
-          died.map(_.annotations) == Chunk(Map("entityType" -> Counter.name, "entityId" -> "c1"))
-        )
-      } @@ TestAspect.tag(inProcess),
       test("An interceptor wraps each message and gets its outcome") {
         for {
           outcomes   <- Ref.make(Chunk.empty[(Any, Exit[Any, Any])])

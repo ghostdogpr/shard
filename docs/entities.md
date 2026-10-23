@@ -65,8 +65,6 @@ Sharding.registerEntity(Guild, EntityOptions(interceptor = interceptor))(behavio
 Set it in `EntityOptions` for one entity or topic type, or in `Config.entityInterceptor` for all of them (it then wraps the one of `EntityOptions`). Interceptors combine with `++`: in `a ++ b`, `a` wraps `b`.
 If `aroundMessage` fails or dies, it is like the handler failing or dying. If `aroundEntity` dies before the entity starts, it is like the behavior failing.
 
-The logs of shard about an entity are annotated with `entityType` and `entityId`.
-
 ## Sending messages
 
 A `Messenger` offers several ways to send messages, each taking the ID of the target entity:
