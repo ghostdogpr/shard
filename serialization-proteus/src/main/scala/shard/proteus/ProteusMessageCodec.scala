@@ -1,6 +1,6 @@
 package shard.proteus
 
-import _root_.proteus.{ ProtobufCodec, ProtobufDeriver }
+import _root_.proteus.{ Dependency, ProtobufCodec, ProtobufDeriver }
 import shard.{ Duplex, Streamed }
 import shard.interfaces.MessageCodec
 import shard.interfaces.MessageCodec.{ Codec, ReplyCodec }
@@ -23,8 +23,22 @@ object ProteusMessageCodec {
     build[Msg](
       summonOrDeriveProtobufCodec[Msg[Any, Any]],
       m.ordinal(_),
-      collectReplyCodecs[Msg, m.MirroredElemTypes].toArray
+      collectVariantCodecs[Msg, m.MirroredElemTypes].map(_.replyCodec).toArray
     )
+
+  /**
+   * Create a Proteus `Dependency` containing the message type and the error, reply and stream types of its variants.
+   * Render it to get a .proto file describing the message contract.
+   */
+  inline def dependency[Msg[+_, +_]](name: String, packageName: String)(using
+    m: Mirror.SumOf[Msg[Any, Any]],
+    deriver: ProtobufDeriver
+  ): Dependency =
+    collectVariantCodecs[Msg, m.MirroredElemTypes]
+      .flatMap(_.protobufCodecs)
+      .foldLeft(
+        Dependency(name, packageName).add(using summonOrDeriveProtobufCodec[Msg[Any, Any]])
+      )((dependency, codec) => dependency.add(using codec))
 
   private def build[Msg[+_, +_]](
     msgCodec: ProtobufCodec[Msg[Any, Any]],
@@ -37,41 +51,77 @@ object ProteusMessageCodec {
       def replyCodec(message: Msg[Any, Any]): ReplyCodec     = replyCodecs(ordinal(message))
     }
 
-  private inline def collectReplyCodecs[Msg[+_, +_], Variants <: Tuple](using
+  // The codecs of an error, reply or stream type: `codec` for the reply codec, `protobufCodec` for the dependency.
+  private final case class TypeCodec(codec: Codec, protobufCodec: Option[ProtobufCodec[?]])
+
+  private object TypeCodec {
+    val nothing: TypeCodec = TypeCodec(Codec.nothing, None)
+  }
+
+  // The codecs of a variant's error, reply, stream error and stream input types.
+  private final case class VariantCodecs(
+    error: TypeCodec,
+    value: TypeCodec,
+    streamError: TypeCodec,
+    streamInput: TypeCodec
+  ) {
+    def replyCodec: ReplyCodec =
+      ReplyCodec(error.codec, value.codec, streamError.codec, streamInput.codec)
+
+    def protobufCodecs: List[ProtobufCodec[?]] =
+      List(error, value, streamError, streamInput).flatMap(_.protobufCodec)
+  }
+
+  private inline def collectVariantCodecs[Msg[+_, +_], Variants <: Tuple](using
     deriver: ProtobufDeriver
-  ): List[ReplyCodec] =
+  ): List[VariantCodecs] =
     inline erasedValue[Variants] match {
       case _: EmptyTuple     => Nil
-      case _: (head *: tail) => replyCodecOf[Msg, head] :: collectReplyCodecs[Msg, tail]
+      case _: (head *: tail) => variantCodecsOf[Msg, head] :: collectVariantCodecs[Msg, tail]
     }
 
-  private inline def replyCodecOf[Msg[+_, +_], Variant](using deriver: ProtobufDeriver): ReplyCodec =
+  private inline def variantCodecsOf[Msg[+_, +_], Variant](using deriver: ProtobufDeriver): VariantCodecs =
     inline erasedValue[Variant] match {
-      case _: Msg[e, Streamed[e2, a]]   => ReplyCodec(codecOf[e], codecOf[a], codecOf[e2], Codec.nothing)
-      case _: Msg[e, Duplex[in, e2, a]] => ReplyCodec(codecOf[e], codecOf[a], codecOf[e2], codecOf[in])
-      case _: Msg[e, a]                 => ReplyCodec(codecOf[e], codecOf[a], Codec.nothing, Codec.nothing)
-      case _                            => error("Cannot derive a Proteus MessageCodec: a variant doesn't extend the message type")
+      case _: Msg[e, Streamed[e2, a]]   =>
+        VariantCodecs(typeCodecOf[e], typeCodecOf[a], typeCodecOf[e2], TypeCodec.nothing)
+      case _: Msg[e, Duplex[in, e2, a]] =>
+        VariantCodecs(typeCodecOf[e], typeCodecOf[a], typeCodecOf[e2], typeCodecOf[in])
+      case _: Msg[e, a]                 =>
+        VariantCodecs(typeCodecOf[e], typeCodecOf[a], TypeCodec.nothing, TypeCodec.nothing)
+      case _                            =>
+        error("Cannot derive Proteus codecs for the message type: a variant doesn't extend the message type")
     }
 
   /**
-   * Get the codec of a reply or error type.
+   * Get the codecs of a reply or error type.
+   */
+  private inline def typeCodecOf[A](using deriver: ProtobufDeriver): TypeCodec =
+    summonFrom {
+      case _: (A =:= Unit) => TypeCodec(Codec.unit, None)
+      case _               =>
+        val protobufCodec = protobufCodecOf[A]
+        TypeCodec(protobufCodec.fold(Codec.nothing)(fromProtobufCodec), protobufCodec)
+    }
+
+  /**
+   * Get the `ProtobufCodec` of a reply or error type, or `None` for `Unit` and `Nothing`.
    * Uses a `ProtobufCodec` in scope if there is one, otherwise derives one.
    */
-  private inline def codecOf[A](using deriver: ProtobufDeriver): Codec =
+  private inline def protobufCodecOf[A](using deriver: ProtobufDeriver): Option[ProtobufCodec[A]] =
     summonFrom {
-      case _: (A =:= Nothing)      => Codec.nothing
-      case _: (A =:= Unit)         => Codec.unit
+      case _: (A =:= Nothing)      => None
+      case _: (A =:= Unit)         => None
       case _: (A =:= Any)          =>
         error(
-          "Cannot derive a Proteus MessageCodec: a variant has no fixed error or reply type. " +
+          "Cannot derive Proteus codecs for the message type: a variant has no fixed error or reply type. " +
             "Each variant must extend the message type with fixed type arguments (e.g. `extends Msg[MyError, MyReply]`): " +
             "variants can't have type parameters, and intermediate sealed traits must fix both type arguments."
         )
-      case codec: ProtobufCodec[A] => fromProtobufCodec(codec)
-      case _: Mirror.Of[A]         => fromProtobufCodec(ProtobufCodec.derived[A](using deriver))
+      case codec: ProtobufCodec[A] => Some(codec)
+      case _: Mirror.Of[A]         => Some(ProtobufCodec.derived[A](using deriver))
       case _                       =>
         error(
-          "Cannot derive a Proteus MessageCodec: a reply or error type has no Mirror or in-scope ProtobufCodec. " +
+          "Cannot derive Proteus codecs for the message type: a reply or error type has no Mirror or in-scope ProtobufCodec. " +
             "Proteus requires a case class, sealed trait, or enum at the root — " +
             "wrap primitive types (Int, String, etc.) in a case class."
         )

@@ -1,6 +1,8 @@
 package shard
 
+import _root_.proteus.ProtobufCodec
 import shard.interfaces.MessageCodec
+import shard.proteus.ProteusMessageCodec
 import shard.proteus.given
 import zio.Scope
 import zio.test._
@@ -11,6 +13,11 @@ object ProteusMessageCodecSpec extends ZIOSpecDefault {
   final case class StreamReply(value: Int)
   final case class Input(delta: Int)
   final case class Page[A](items: List[A])
+  final case class Track(id: String)
+  final case class TrackItem(trackId: String)
+
+  private given ProtobufCodec[Track] =
+    ProtobufCodec.derived[TrackItem].transform(item => Track(item.trackId), track => TrackItem(track.id))
 
   sealed trait Error
   object Error {
@@ -25,9 +32,12 @@ object ProteusMessageCodecSpec extends ZIOSpecDefault {
     case WithDuplex()                    extends Msg[Nothing, Duplex[Input, Nothing, StreamReply]]
     case Generic(replies: List[Reply])   extends Msg[Nothing, Page[Reply]]
     case Singleton                       extends Msg[Nothing, Reply]
+    case GetTrack(id: String)            extends Msg[Nothing, Track]
   }
 
   private val codec = summon[MessageCodec[Msg]]
+
+  private lazy val rendered = ProteusMessageCodec.dependency[Msg]("msg", "shard.test").render(Nil)
 
   private def roundtrip(msg: Msg[Any, Any]): Msg[Any, Any] =
     codec.decodeMessage(codec.encodeMessage(msg))
@@ -88,6 +98,19 @@ object ProteusMessageCodecSpec extends ZIOSpecDefault {
           generic.value.decode(generic.value.encode(replies)) == replies,
           single.value.decode(single.value.encode(Reply("s", true))) == Reply("s", true)
         )
+      },
+      test("renders the message with its reply, error, stream element, stream error and input types once") {
+        val messages = List("Msg", "Reply", "Error", "NotFound", "Invalid", "StreamReply", "Input", "PageReply")
+        assertTrue(
+          messages.forall(name => rendered.contains(s"message $name {")),
+          rendered.indexOf("message Error {") == rendered.lastIndexOf("message Error {")
+        )
+      },
+      test("renders nothing for Unit and Nothing") {
+        assertTrue(!rendered.contains("Unit"), !rendered.contains("Nothing"))
+      },
+      test("renders a transformed reply codec as the underlying message") {
+        assertTrue(rendered.contains("message TrackItem {"), !rendered.contains("message Track {"))
       },
       test("rejects primitive reply types at compile time") {
         for {
