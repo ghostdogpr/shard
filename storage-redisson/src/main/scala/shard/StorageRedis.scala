@@ -3,7 +3,8 @@ package shard
 import scala.jdk.CollectionConverters._
 
 import shard.interfaces.Storage
-import org.redisson.api.RedissonClient
+import org.redisson.api.BatchOptions.ExecutionMode
+import org.redisson.api.{ BatchOptions, RedissonClient }
 import org.redisson.api.listener.MessageListener
 import org.redisson.client.codec.StringCodec
 import zio.json._
@@ -74,8 +75,14 @@ object StorageRedis {
                 )
                 .toMap
             )
-        def savePods(pods: Map[PodAddress, Pod]): Task[Unit]                                         =
-          ZIO.fromCompletionStage(podsMap.putAllAsync(pods.map { case (k, v) => k.toString -> v.toJson }.asJava)).unit
+        def savePods(pods: Map[PodAddress, Pod]): Task[Unit]                                         = {
+          // replaces the whole map, so that the pods left out (unregistered) are removed
+          val batch = redisClient.createBatch(BatchOptions.defaults().executionMode(ExecutionMode.IN_MEMORY_ATOMIC))
+          val map   = batch.getMap[String, String](config.podsKey)
+          map.deleteAsync()
+          if (pods.nonEmpty) map.putAllAsync(pods.map { case (k, v) => k.toString -> v.toJson }.asJava)
+          ZIO.fromCompletionStage(batch.executeAsync()).unit
+        }
       }
     }
 }
