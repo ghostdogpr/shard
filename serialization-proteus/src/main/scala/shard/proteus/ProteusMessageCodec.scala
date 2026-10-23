@@ -17,38 +17,56 @@ import scala.deriving.Mirror
 object ProteusMessageCodec {
 
   /**
+   * The mirror of a message type, whose `MirroredMonoType` is `Msg[?, ?]`.
+   */
+  type MessageMirror[Msg[_, _]] =
+    Mirror.Sum { type MirroredType[E, A] = Msg[E, A]; type MirroredElemTypes[E, A] <: Tuple }
+
+  /**
    * Derive a `MessageCodec[Msg]` using Proteus.
    */
-  inline def derived[Msg[+_, +_]](using m: Mirror.SumOf[Msg[Any, Any]], deriver: ProtobufDeriver): MessageCodec[Msg] =
-    build[Msg](
-      summonOrDeriveProtobufCodec[Msg[Any, Any]],
-      m.ordinal(_),
-      collectVariantCodecs[Msg, m.MirroredElemTypes].map(_.replyCodec).toArray
-    )
+  inline def derived[Msg[_, _]](using m: MessageMirror[Msg], deriver: ProtobufDeriver): MessageCodec[Msg] = {
+    // the variants first, so that a variant without fixed type arguments fails with its own error
+    val replyCodecs = collectVariantCodecs[Msg, m.MirroredElemTypes[Any, Any]].map(_.replyCodec).toArray
+    build[Msg](messageCodec[Msg], message => m.ordinal(message.asInstanceOf[m.MirroredMonoType]), replyCodecs)
+  }
 
   /**
    * Create a Proteus `Dependency` containing the message type and the error, reply and stream types of its variants.
    * Render it to get a .proto file describing the message contract.
    */
-  inline def dependency[Msg[+_, +_]](name: String, packageName: String)(using
-    m: Mirror.SumOf[Msg[Any, Any]],
+  inline def dependency[Msg[_, _]](name: String, packageName: String)(using
+    m: MessageMirror[Msg],
     deriver: ProtobufDeriver
   ): Dependency =
-    collectVariantCodecs[Msg, m.MirroredElemTypes]
+    collectVariantCodecs[Msg, m.MirroredElemTypes[Any, Any]]
       .flatMap(_.protobufCodecs)
       .foldLeft(
-        Dependency(name, packageName).add(using summonOrDeriveProtobufCodec[Msg[Any, Any]])
+        Dependency(name, packageName).add(using messageCodec[Msg])
       )((dependency, codec) => dependency.add(using codec))
 
-  private def build[Msg[+_, +_]](
+  private def build[Msg[_, _]](
     msgCodec: ProtobufCodec[Msg[Any, Any]],
     ordinal: Msg[Any, Any] => Int,
     replyCodecs: Array[ReplyCodec]
   ): MessageCodec[Msg] =
     new MessageCodec[Msg] {
-      def encodeMessage(message: Msg[Any, Any]): Array[Byte] = msgCodec.encode(message)
-      def decodeMessage(bytes: Array[Byte]): Msg[Any, Any]   = msgCodec.decode(bytes)
-      def replyCodec(message: Msg[Any, Any]): ReplyCodec     = replyCodecs(ordinal(message))
+      def encodeMessage[E, A](message: Msg[E, A]): Array[Byte] = msgCodec.encode(message.asInstanceOf[Msg[Any, Any]])
+      def decodeMessage(bytes: Array[Byte]): Msg[Any, Any]     = msgCodec.decode(bytes)
+      def replyCodec[E, A](message: Msg[E, A]): ReplyCodec     =
+        replyCodecs(ordinal(message.asInstanceOf[Msg[Any, Any]]))
+    }
+
+  /**
+   * Get the `ProtobufCodec` of `Msg[?, ?]`, typed as `Msg[Any, Any]`.
+   */
+  private inline def messageCodec[Msg[_, _]](using
+    m: MessageMirror[Msg],
+    deriver: ProtobufDeriver
+  ): ProtobufCodec[Msg[Any, Any]] =
+    // `Msg[?, ?]` can't be written for an abstract `Msg`: `t` binds it once `Msg` is known
+    inline erasedValue[Option[m.MirroredMonoType]] match {
+      case _: Option[t] => summonOrDeriveProtobufCodec[t].asInstanceOf[ProtobufCodec[Msg[Any, Any]]]
     }
 
   // The codecs of an error, reply or stream type: `codec` for the reply codec, `protobufCodec` for the dependency.
@@ -72,7 +90,7 @@ object ProteusMessageCodec {
       List(error, value, streamError, streamInput).flatMap(_.protobufCodec)
   }
 
-  private inline def collectVariantCodecs[Msg[+_, +_], Variants <: Tuple](using
+  private inline def collectVariantCodecs[Msg[_, _], Variants <: Tuple](using
     deriver: ProtobufDeriver
   ): List[VariantCodecs] =
     inline erasedValue[Variants] match {
@@ -80,7 +98,7 @@ object ProteusMessageCodec {
       case _: (head *: tail) => variantCodecsOf[Msg, head] :: collectVariantCodecs[Msg, tail]
     }
 
-  private inline def variantCodecsOf[Msg[+_, +_], Variant](using deriver: ProtobufDeriver): VariantCodecs =
+  private inline def variantCodecsOf[Msg[_, _], Variant](using deriver: ProtobufDeriver): VariantCodecs =
     inline erasedValue[Variant] match {
       case _: Msg[e, Streamed[e2, a]]   =>
         VariantCodecs(typeCodecOf[e], typeCodecOf[a], typeCodecOf[e2], TypeCodec.nothing)

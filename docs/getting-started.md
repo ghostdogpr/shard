@@ -118,7 +118,7 @@ Use `Nothing` for `E` when a message can't fail, and `Unit` for `A` when there i
 ```scala
 case class GuildFull(maxMembers: Int)
 
-enum GuildMessage[+E, +A] {
+enum GuildMessage[E, A] {
   case Join(userId: String)  extends GuildMessage[GuildFull, Set[String]]
   case Leave(userId: String) extends GuildMessage[Nothing, Unit]
 }

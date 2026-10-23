@@ -48,7 +48,7 @@ object BroadcastingSpec extends ZIOSpecDefault {
     ) @@ sequential @@ withLiveClock
 
   object IncrementerActor {
-    enum IncrementerMessage[+E, +A] {
+    enum IncrementerMessage[E, A] {
       case BroadcastIncrement() extends IncrementerMessage[Nothing, Unit]
       case GetIncrement()       extends IncrementerMessage[Nothing, Int]
       case Fail()               extends IncrementerMessage[String, Unit]

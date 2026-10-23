@@ -3,8 +3,8 @@ package shard
 import zio.IO
 
 /**
- * Wraps the entities of an entity or topic type and the processing of their messages, e.g. to add log annotations,
- * timing or tracing. Set it on `EntityOptions` for one type, or on `Config` for all types.
+ * Wraps the entities of every entity or topic type and the processing of their messages, e.g. to add log annotations,
+ * timing or tracing. Set it on `Config`. It wraps the `MessageInterceptor` of each type.
  */
 trait EntityInterceptor { self =>
 

@@ -9,9 +9,9 @@ import shard.interfaces.MessageCodec
  *
  * To use a custom Kryo configuration, shadow this given with your own:
  * {{{
- *   given [Msg[+_, +_]]: MessageCodec[Msg] = KryoMessageCodec.fromConfig[Msg](myConfig)
+ *   given [Msg[_, _]]: MessageCodec[Msg] = KryoMessageCodec.fromConfig[Msg](myConfig)
  * }}}
  */
 package object kryo {
-  given derive[Msg[+_, +_]]: MessageCodec[Msg] = KryoMessageCodec.default[Msg]
+  given derive[Msg[_, _]]: MessageCodec[Msg] = KryoMessageCodec.default[Msg]
 }

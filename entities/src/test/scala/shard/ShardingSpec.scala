@@ -33,7 +33,7 @@ object ShardingSpec extends ZIOSpecDefault {
         LocalSharding.live,
         LocalShardManagerClient.live,
         Storage.memory,
-        ZLayer.succeed(Config.default.copy(entityInterceptor = logging("default")))
+        ZLayer.succeed(Config.default.copy(entityInterceptor = logging))
       ),
       suite("registered pods")(
         test("Registered pods are read from the storage") {
@@ -363,7 +363,7 @@ object ShardingSpec extends ZIOSpecDefault {
       } @@ TestAspect.timeout(30.seconds),
       test("Messages that don't load the entity are discarded") {
         for {
-          state     <- startWorker(EntityOptions(loadEntity = { case Ping() => false; case _ => true }))
+          state     <- startWorker(EntityOptions(loadEntity = [E, A] => _ match { case Ping() => false; case _ => true }))
           worker    <- Sharding.messenger(Worker)
           discarded <- worker.sendDiscard("w1")(Ping()).exit
           error     <- worker.send("w1")(Ping()).flip
@@ -377,7 +377,7 @@ object ShardingSpec extends ZIOSpecDefault {
       },
       test("A stream of messages stops at the first discarded message") {
         for {
-          state     <- startWorker(EntityOptions(loadEntity = { case Ping() => false; case _ => true }))
+          state     <- startWorker(EntityOptions(loadEntity = [E, A] => _ match { case Ping() => false; case _ => true }))
           worker    <- Sharding.messenger(Worker)
           error     <- worker.sendStream("w1")(ZStream(Ping(), SlowUninterruptible())).flip
           _         <- Clock.sleep(1.second)
@@ -594,7 +594,7 @@ object ShardingSpec extends ZIOSpecDefault {
         )
       },
       test("An interceptor's log annotations apply to the start, the messages and the finalizers of an entity") {
-        val interceptor = new EntityInterceptor {
+        val interceptor = new MessageInterceptor[WorkerMessage] {
           override def aroundEntity[E, A](recipientType: String, entityId: String)(effect: IO[E, A]): IO[E, A] =
             ZIO.logAnnotate("entity", s"$recipientType/$entityId")(effect)
         }
@@ -618,10 +618,12 @@ object ShardingSpec extends ZIOSpecDefault {
       test("An interceptor wraps each message and gets its outcome") {
         for {
           outcomes   <- Ref.make(Chunk.empty[(Any, Exit[Any, Any])])
-          interceptor = new EntityInterceptor {
-                          override def aroundMessage[E, A](recipientType: String, entityId: String, message: Any)(
-                            effect: IO[E, A]
-                          ): IO[E, A] =
+          interceptor = new MessageInterceptor[CounterMessage] {
+                          override def aroundMessage[E, A](
+                            recipientType: String,
+                            entityId: String,
+                            message: CounterMessage[E, A]
+                          )(effect: IO[E, A]): IO[E, A] =
                             effect.onExit(exit => outcomes.update(_ :+ (message -> exit)))
                         }
           counter    <- startCounter(EntityOptions(interceptor = interceptor))
@@ -643,11 +645,11 @@ object ShardingSpec extends ZIOSpecDefault {
         )
       },
       test("Interceptors that die are treated like handlers that die") {
-        val interceptor = new EntityInterceptor {
+        val interceptor = new MessageInterceptor[CounterMessage] {
           override def aroundEntity[E, A](recipientType: String, entityId: String)(effect: IO[E, A]): IO[E, A] =
             if (entityId == "bad") ZIO.dieMessage("bad entity") else effect
 
-          override def aroundMessage[E, A](recipientType: String, entityId: String, message: Any)(
+          override def aroundMessage[E, A](recipientType: String, entityId: String, message: CounterMessage[E, A])(
             effect: IO[E, A]
           ): IO[E, A] =
             if (message == DecrementCounter()) ZIO.dieMessage("bad message") else effect
@@ -663,6 +665,30 @@ object ShardingSpec extends ZIOSpecDefault {
           died == EntityDefect("Entity died with java.lang.RuntimeException: bad message"),
           c1 == 0
         )
+      },
+      test("Matching on the message in an interceptor refines its reply and error types") {
+        for {
+          counts     <- Ref.make(Chunk.empty[Int])
+          errors     <- Ref.make(Chunk.empty[String])
+          interceptor = new MessageInterceptor[CounterMessage] {
+                          override def aroundMessage[E, A](
+                            recipientType: String,
+                            entityId: String,
+                            message: CounterMessage[E, A]
+                          )(effect: IO[E, A]): IO[E, A] =
+                            message match {
+                              case GetCounter() => effect.tap(count => counts.update(_ :+ count))
+                              case Fail()       => effect.tapError(error => errors.update(_ :+ error.message))
+                              case _            => effect
+                            }
+                        }
+          counter    <- startCounter(EntityOptions(interceptor = interceptor))
+          _          <- counter.send("c1")(IncrementCounter())
+          _          <- counter.send("c1")(GetCounter())
+          _          <- counter.send("c1")(Fail()).flip
+          counts     <- counts.get
+          errors     <- errors.get
+        } yield assertTrue(counts == Chunk(1), errors == Chunk("failed"))
       },
       test("Running entities are listed from their start until their scope is closed") {
         for {
@@ -725,25 +751,37 @@ object ShardingSpec extends ZIOSpecDefault {
     )
 
   /**
-   * An interceptor that logs before and after each message.
+   * An interceptor that logs around each entity and message.
    */
-  private def logging(name: String): EntityInterceptor =
+  private val logging: EntityInterceptor =
     new EntityInterceptor {
+      override def aroundEntity[E, A](recipientType: String, entityId: String)(effect: IO[E, A]): IO[E, A] =
+        ZIO.log("default entity") *> effect
+
       override def aroundMessage[E, A](recipientType: String, entityId: String, message: Any)(
         effect: IO[E, A]
       ): IO[E, A] =
-        ZIO.log(s"$name before") *> effect <* ZIO.log(s"$name after")
+        ZIO.log("default before") *> effect <* ZIO.log("default after")
     }
 
   private val defaultInterceptor: Spec[Sharding & Scope, Any] =
     test("The interceptor of Config wraps the one of EntityOptions") {
+      val typed = new MessageInterceptor[CounterMessage] {
+        override def aroundEntity[E, A](recipientType: String, entityId: String)(effect: IO[E, A]): IO[E, A] =
+          ZIO.log("type entity") *> effect
+
+        override def aroundMessage[E, A](recipientType: String, entityId: String, message: CounterMessage[E, A])(
+          effect: IO[E, A]
+        ): IO[E, A] =
+          ZIO.log("type before") *> effect <* ZIO.log("type after")
+      }
       for {
-        counter <- startCounter(EntityOptions(interceptor = logging("type")))
+        counter <- startCounter(EntityOptions(interceptor = typed))
         _       <- counter.send("c1")(IncrementCounter())
         logs    <- ZTestLogger.logOutput
       } yield assertTrue(
-        logs.map(_.message()).filter(m => m.endsWith(" before") || m.endsWith(" after")) ==
-          Chunk("default before", "type before", "type after", "default after")
+        logs.map(_.message()).filter(m => m.startsWith("default ") || m.startsWith("type ")) ==
+          Chunk("default entity", "type entity", "default before", "type before", "type after", "default after")
       )
     }
 
@@ -773,7 +811,7 @@ object ShardingSpec extends ZIOSpecDefault {
 object CounterActor {
   case class CounterError(message: String)
 
-  enum CounterMessage[+E, +A] {
+  enum CounterMessage[E, A] {
     case GetCounter()                       extends CounterMessage[Nothing, Int]
     case IncrementCounter()                 extends CounterMessage[Nothing, Unit]
     case DecrementCounter()                 extends CounterMessage[Nothing, Unit]
@@ -844,7 +882,7 @@ object CounterActor {
 }
 
 object WorkerActor {
-  enum WorkerMessage[+E, +A] {
+  enum WorkerMessage[E, A] {
     // waits until Unblock
     case Block()               extends WorkerMessage[Nothing, Unit]
     case Unblock()             extends WorkerMessage[Nothing, Unit] with Concurrent

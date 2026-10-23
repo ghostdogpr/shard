@@ -110,7 +110,7 @@ object ProteusShardingSpec extends ZIOSpecDefault {
   }
 
   object CounterActor {
-    enum CounterMessage[+E, +A] {
+    enum CounterMessage[E, A] {
       case Get()                 extends CounterMessage[Nothing, Count]
       case Increment()           extends CounterMessage[Nothing, Unit]
       case Decrement()           extends CounterMessage[Nothing, Unit]

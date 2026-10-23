@@ -197,7 +197,7 @@ class Sharding private (
       case None        => ZIO.fail(new Exception(s"Entity type $entityType was not registered."))
     })
 
-  private def entityManager[Msg[+_, +_]](recipientType: RecipientType[Msg]): Task[EntityManager[Msg]] =
+  private def entityManager[Msg[_, _]](recipientType: RecipientType[Msg]): Task[EntityManager[Msg]] =
     entityManager(recipientType.name).map(_.asInstanceOf[EntityManager[Msg]])
 
   private def receive[A](msg: BinaryMessage)(onReply: BinaryReply => A)(
@@ -319,19 +319,19 @@ class Sharding private (
       }
     })
 
-  private def encode[Msg[+_, +_]](
+  private def encode[Msg[_, _], E, A](
     recipientType: RecipientType[Msg],
-    message: Msg[Any, Any]
+    message: Msg[E, A]
   ): IO[SerializationError, (Array[Byte], ReplyCodec)] =
     ZIO
       .attempt((recipientType.codec.encodeMessage(message), recipientType.codec.replyCodec(message)))
       .mapError(Replies.serializationError("encode a message", _))
 
-  private def deliver[Msg[+_, +_]](
+  private def deliver[Msg[_, _], E, A](
     recipientType: RecipientType[Msg],
     entityId: String,
     pod: PodAddress,
-    message: Msg[Any, Any],
+    message: Msg[E, A],
     expectsReply: Boolean
   ): IO[Any, Any] =
     if (isLocal(pod))
@@ -352,11 +352,11 @@ class Sharding private (
           }
       }
 
-  private def deliverStream[Msg[+_, +_]](
+  private def deliverStream[Msg[_, _], E, A](
     entityType: EntityType[Msg],
     entityId: String,
     pod: PodAddress,
-    message: Msg[Any, Any],
+    message: Msg[E, A],
     input: Option[(ZStream[Any, Nothing, Any], Promise[Any, Nothing])] // the inputs and where their failure goes
   ): ZStream[Any, Any, Any] =
     if (isLocal(pod))
@@ -396,11 +396,11 @@ class Sharding private (
         )
       })
 
-  private def deliverMessages[Msg[+_, +_]](
+  private def deliverMessages[Msg[_, _]](
     entityType: EntityType[Msg],
     entityId: String,
     pod: PodAddress,
-    messages: ZStream[Any, Any, Msg[Any, Any]]
+    messages: ZStream[Any, Any, Msg[Nothing, Unit]]
   ): IO[Any, Unit] =
     if (isLocal(pod))
       entityManager(entityType).catchAll(fromTransport).flatMap { manager =>
@@ -428,7 +428,7 @@ class Sharding private (
           failIfInputFailed
       }
 
-  def messenger[Msg[+_, +_]](
+  def messenger[Msg[_, _]](
     entityType: EntityType[Msg],
     sendTimeout: MessengerTimeout = MessengerTimeout.InheritConfigTimeout
   ): Messenger[Msg] =
@@ -481,7 +481,7 @@ class Sharding private (
           .asInstanceOf[IO[E1 | ClusterError, Unit]]
     }
 
-  def broadcaster[Msg[+_, +_]](
+  def broadcaster[Msg[_, _]](
     topicType: TopicType[Msg],
     sendTimeout: MessengerTimeout = MessengerTimeout.InheritConfigTimeout
   ): Broadcaster[Msg] =
@@ -501,9 +501,9 @@ class Sharding private (
         sendToAllPods(topic, message, expectsReply = true)
           .asInstanceOf[UIO[Map[PodAddress, Exit[E | ClusterError, A]]]]
 
-      private def sendToAllPods(
+      private def sendToAllPods[E, A](
         topic: String,
-        message: Msg[Any, Any],
+        message: Msg[E, A],
         expectsReply: Boolean
       ): UIO[Map[PodAddress, Exit[Any, Any]]] =
         getPods.flatMap(pods =>
@@ -530,13 +530,13 @@ class Sharding private (
   ): IO[Any, A] =
     timeout.fold(effect)(t => effect.timeoutFail(SendTimeout(recipientType.name, entityId))(t).interruptible)
 
-  def registerEntity[R, Msg[+_, +_]](entityType: EntityType[Msg], options: EntityOptions[Msg] = EntityOptions[Msg]())(
+  def registerEntity[R, Msg[_, _]](entityType: EntityType[Msg], options: EntityOptions[Msg] = EntityOptions[Msg]())(
     behavior: String => ZIO[R & Scope, Throwable, EntityHandler[Msg]]
   ): URIO[Scope & R, Unit] =
     registerRecipient(entityType, options, behavior) *>
       eventsHub.publish(ShardingRegistrationEvent.EntityRegistered(entityType)).unit
 
-  def registerTopic[R, Msg[+_, +_]](topicType: TopicType[Msg], options: EntityOptions[Msg] = EntityOptions[Msg]())(
+  def registerTopic[R, Msg[_, _]](topicType: TopicType[Msg], options: EntityOptions[Msg] = EntityOptions[Msg]())(
     behavior: String => ZIO[R & Scope, Throwable, EntityHandler[Msg]]
   ): URIO[Scope & R, Unit] = registerRecipient(topicType, options, behavior) *>
     eventsHub.publish(ShardingRegistrationEvent.TopicRegistered(topicType)).unit
@@ -544,7 +544,7 @@ class Sharding private (
   def getShardingRegistrationEvents: ZStream[Any, Nothing, ShardingRegistrationEvent] =
     ZStream.fromHub(eventsHub)
 
-  private def registerRecipient[R, Msg[+_, +_]](
+  private def registerRecipient[R, Msg[_, _]](
     recipientType: RecipientType[Msg],
     options: EntityOptions[Msg],
     behavior: String => ZIO[R & Scope, Throwable, EntityHandler[Msg]]
@@ -680,7 +680,7 @@ object Sharding {
    * Register a new entity type, allowing pods to send messages to entities of this type.
    * The `behavior` creates an entity's handler from its ID, and its `Scope` closes when the entity stops.
    */
-  def registerEntity[R, Msg[+_, +_]](entityType: EntityType[Msg], options: EntityOptions[Msg] = EntityOptions[Msg]())(
+  def registerEntity[R, Msg[_, _]](entityType: EntityType[Msg], options: EntityOptions[Msg] = EntityOptions[Msg]())(
     behavior: String => ZIO[R & Scope, Throwable, EntityHandler[Msg]]
   ): URIO[Sharding & Scope & R, Unit] =
     ZIO.serviceWithZIO[Sharding](_.registerEntity[R, Msg](entityType, options)(behavior))
@@ -689,7 +689,7 @@ object Sharding {
    * Register a new topic type, allowing pods to broadcast messages to subscribers.
    * It works like `registerEntity`, with one instance per topic on each pod.
    */
-  def registerTopic[R, Msg[+_, +_]](topicType: TopicType[Msg], options: EntityOptions[Msg] = EntityOptions[Msg]())(
+  def registerTopic[R, Msg[_, _]](topicType: TopicType[Msg], options: EntityOptions[Msg] = EntityOptions[Msg]())(
     behavior: String => ZIO[R & Scope, Throwable, EntityHandler[Msg]]
   ): URIO[Sharding & Scope & R, Unit] =
     ZIO.serviceWithZIO[Sharding](_.registerTopic[R, Msg](topicType, options)(behavior))
@@ -698,7 +698,7 @@ object Sharding {
    * Get an object that allows sending messages to a given entity type.
    * You can provide a custom send timeout to override the one globally defined.
    */
-  def messenger[Msg[+_, +_]](
+  def messenger[Msg[_, _]](
     entityType: EntityType[Msg],
     sendTimeout: MessengerTimeout = MessengerTimeout.InheritConfigTimeout
   ): URIO[Sharding, Messenger[Msg]] =
@@ -708,7 +708,7 @@ object Sharding {
    * Get an object that allows broadcasting messages to a given topic type.
    * You can provide a custom send timeout to override the one globally defined.
    */
-  def broadcaster[Msg[+_, +_]](
+  def broadcaster[Msg[_, _]](
     topicType: TopicType[Msg],
     sendTimeout: MessengerTimeout = MessengerTimeout.InheritConfigTimeout
   ): URIO[Sharding, Broadcaster[Msg]] =

@@ -9,7 +9,7 @@ Use `Nothing` for `E` when a message can't fail, and `Unit` for `A` when there i
 A message can also reply with a stream, see [Streaming](#streaming).
 
 ```scala
-enum GuildMessage[+E, +A] {
+enum GuildMessage[E, A] {
   case Join(userId: String)  extends GuildMessage[GuildFull, Set[String]]
   case Leave(userId: String) extends GuildMessage[Nothing, Unit]
   case Members()             extends GuildMessage[Nothing, Set[String]] with Concurrent
@@ -37,7 +37,7 @@ Entity and topic types must all have different names.
 - `maxIdleTime`: time without processing any message after which an entity is stopped (defaults to `Config.entityMaxIdleTime`). An entity with messages in progress or open streams is never stopped.
 - `concurrency`: maximum number of messages processed at the same time by an entity. The default is 1: messages are processed one at a time, in order.
 - `mailboxCapacity`: maximum number of messages waiting or being processed by an entity (4096 by default, `EntityOptions.Unbounded` for no limit). Beyond that, messages fail with `MailboxFull`.
-- `loadEntity`: whether a message should start the entity when it isn't running. If not, the message is discarded: `sendDiscard` succeeds and `send` fails with `MessageDiscarded`.
+- `loadEntity`: whether a message should start the entity when it isn't running (e.g. `[E, A] => message => !message.isInstanceOf[Leave]`). If not, the message is discarded: `sendDiscard` succeeds and `send` fails with `MessageDiscarded`.
 - `interceptor`: wraps the entities and their messages, see [Interceptors](#interceptors).
 
 ```scala
@@ -46,23 +46,28 @@ Sharding.registerEntity(Guild, EntityOptions(maxIdleTime = Some(5.minutes), conc
 
 ## Interceptors
 
-An `EntityInterceptor` wraps every entity of a type, e.g. to add log annotations, timing or tracing:
+A `MessageInterceptor` wraps the entities of a type and the processing of their messages, e.g. to add log annotations, timing or tracing:
 - `aroundEntity` wraps the whole life of an entity: its behavior, its messages and the finalizers of its scope. What it sets in fiber refs (e.g. `ZIO.logAnnotate`) applies to all of them, but not to the streams of `Streamed` and `Duplex` replies, which run outside of the entity.
-- `aroundMessage` wraps the processing of each message by the handler, with the message and its outcome. For `Streamed` and `Duplex` replies, it wraps the creation of the stream, not the stream itself.
+- `aroundMessage` wraps the processing of each message by the handler, with the message and its outcome. As in a handler, pattern matching on the message refines `E` and `A` to the types declared by each message. For `Streamed` and `Duplex` replies, it wraps the creation of the stream, not the stream itself.
 
 ```scala
-val interceptor = new EntityInterceptor {
+val interceptor = new MessageInterceptor[GuildMessage] {
   override def aroundEntity[E, A](recipientType: String, entityId: String)(effect: IO[E, A]): IO[E, A] =
     ZIO.logAnnotate("entity", s"$recipientType/$entityId")(effect)
 
-  override def aroundMessage[E, A](recipientType: String, entityId: String, message: Any)(effect: IO[E, A]): IO[E, A] =
-    effect.timed.flatMap((duration, reply) => ZIO.logDebug(s"Processed $message in ${duration.render}").as(reply))
+  override def aroundMessage[E, A](recipientType: String, entityId: String, message: GuildMessage[E, A])(
+    effect: IO[E, A]
+  ): IO[E, A] =
+    message match {
+      case Join(userId) => effect.tap(members => ZIO.logInfo(s"$userId joined, ${members.size} members"))
+      case _            => effect
+    }
 }
 
 Sharding.registerEntity(Guild, EntityOptions(interceptor = interceptor))(behavior)
 ```
 
-Set it in `EntityOptions` for one entity or topic type, or in `Config.entityInterceptor` for all of them (it then wraps the one of `EntityOptions`). Interceptors combine with `++`: in `a ++ b`, `a` wraps `b`.
+To wrap the entities of every type, set an `EntityInterceptor` in `Config.entityInterceptor`: it has the same methods, with the message typed as `Any`, and wraps the `MessageInterceptor` of each type. `EntityInterceptor`s combine with `++`: in `a ++ b`, `a` wraps `b`.
 If `aroundMessage` fails or dies, it is like the handler failing or dying. If `aroundEntity` dies before the entity starts, it is like the behavior failing.
 
 ## Sending messages
@@ -115,7 +120,7 @@ Besides the error type declared by the message, calls can fail with a `ClusterEr
 
 A message can reply with a stream by declaring a `Streamed[E2, A]` reply type: the entity can fail with `E` before the stream starts, then the stream emits values of type `A` and can fail with `E2`.
 ```scala
-enum GuildMessage[+E, +A] {
+enum GuildMessage[E, A] {
   // ...
   case MemberStream() extends GuildMessage[Nothing, Streamed[Nothing, String]]
 }

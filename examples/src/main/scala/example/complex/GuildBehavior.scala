@@ -8,7 +8,7 @@ import zio.{ IO, Scope, URIO, ZIO }
 object GuildBehavior {
   case class GuildFull(maxMembers: Int)
 
-  enum GuildMessage[+E, +A] {
+  enum GuildMessage[E, A] {
     case Join(userId: String)  extends GuildMessage[GuildFull, Set[String]]
     case Leave(userId: String) extends GuildMessage[Nothing, Unit]
   }

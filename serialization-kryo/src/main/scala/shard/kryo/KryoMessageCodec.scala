@@ -14,7 +14,7 @@ import io.altoo.serialization.kryo.scala.ScalaKryoSerializer
  * and define their `EntityType` / `TopicType` without further ceremony.
  *
  * To use a custom Kryo configuration, shadow the default `given` with
- * `given [Msg[+_, +_]]: MessageCodec[Msg] = KryoMessageCodec.fromConfig[Msg](myConfig)`.
+ * `given [Msg[_, _]]: MessageCodec[Msg] = KryoMessageCodec.fromConfig[Msg](myConfig)`.
  */
 object KryoMessageCodec {
 
@@ -28,16 +28,16 @@ object KryoMessageCodec {
   /**
    * Create a Kryo codec that uses [[defaultSerializer]].
    */
-  def default[Msg[+_, +_]]: MessageCodec[Msg] = fromSerializer(defaultSerializer)
+  def default[Msg[_, _]]: MessageCodec[Msg] = fromSerializer(defaultSerializer)
 
   /**
    * Create a Kryo codec from the given Typesafe Config.
    * See https://github.com/altoo-ag/scala-kryo-serialization for the available options.
    */
-  def fromConfig[Msg[+_, +_]](config: Config): MessageCodec[Msg] =
+  def fromConfig[Msg[_, _]](config: Config): MessageCodec[Msg] =
     fromSerializer(new ScalaKryoSerializer(config, getClass.getClassLoader))
 
-  private def fromSerializer[Msg[+_, +_]](serializer: ScalaKryoSerializer): MessageCodec[Msg] =
+  private def fromSerializer[Msg[_, _]](serializer: ScalaKryoSerializer): MessageCodec[Msg] =
     MessageCodec.uniform(
       Codec(value => serializer.serialize(value).get, bytes => serializer.deserialize[Any](bytes).get)
     )

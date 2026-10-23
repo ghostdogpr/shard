@@ -7,7 +7,7 @@ import zio.test._
 
 object KryoMessageCodecSpec extends ZIOSpecDefault {
 
-  enum Msg[+E, +A] {
+  enum Msg[E, A] {
     case Plain(name: String, count: Int) extends Msg[Nothing, Unit]
     case WithReply(id: Int)              extends Msg[String, Int]
     case WithStreamReply()               extends Msg[Nothing, Streamed[String, Int]]
@@ -18,7 +18,7 @@ object KryoMessageCodecSpec extends ZIOSpecDefault {
   def spec: Spec[TestEnvironment & Scope, Any] =
     suite("KryoMessageCodecSpec")(
       test("roundtrips messages") {
-        val messages: List[Msg[Any, Any]] = List(Msg.Plain("hello", 42), Msg.WithReply(7), Msg.WithStreamReply())
+        val messages: List[Msg[?, ?]] = List(Msg.Plain("hello", 42), Msg.WithReply(7), Msg.WithStreamReply())
         assertTrue(messages.map(msg => codec.decodeMessage(codec.encodeMessage(msg))) == messages)
       },
       test("roundtrips replies and errors") {

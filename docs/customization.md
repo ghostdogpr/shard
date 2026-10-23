@@ -91,10 +91,10 @@ On pods, you also need expose the gRPC API. This is done by adding the `GrpcShar
 The `MessageCodec[Msg]` type class defines how a specific message type is encoded for transport between pods and how its replies and errors are encoded and decoded.
 
 ```scala
-trait MessageCodec[Msg[+_, +_]] {
-  def encodeMessage(message: Msg[Any, Any]): Array[Byte]
+trait MessageCodec[Msg[_, _]] {
+  def encodeMessage[E, A](message: Msg[E, A]): Array[Byte]
   def decodeMessage(bytes: Array[Byte]): Msg[Any, Any]
-  def replyCodec(message: Msg[Any, Any]): ReplyCodec
+  def replyCodec[E, A](message: Msg[E, A]): ReplyCodec
 }
 ```
 
@@ -144,7 +144,7 @@ import shard.kryo.KryoMessageCodec
 import shard.interfaces.MessageCodec
 import com.typesafe.config.ConfigFactory
 
-given [Msg[+_, +_]]: MessageCodec[Msg] = KryoMessageCodec.fromConfig[Msg](ConfigFactory.load("my-kryo.conf"))
+given [Msg[_, _]]: MessageCodec[Msg] = KryoMessageCodec.fromConfig[Msg](ConfigFactory.load("my-kryo.conf"))
 
 object Guild extends EntityType[GuildMessage]("guild")
 ```

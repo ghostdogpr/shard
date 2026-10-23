@@ -3,7 +3,6 @@ package shard
 import _root_.proteus.ProtobufDeriver
 import shard.interfaces.MessageCodec
 
-import scala.deriving.Mirror
 import scala.util.NotGiven
 
 /**
@@ -19,6 +18,9 @@ import scala.util.NotGiven
 package object proteus {
   given defaultDeriver(using NotGiven[ProtobufDeriver]): ProtobufDeriver = ProtobufDeriver
 
-  inline given derive[Msg[+_, +_]](using m: Mirror.SumOf[Msg[Any, Any]], deriver: ProtobufDeriver): MessageCodec[Msg] =
+  inline given derive[Msg[_, _]](using
+    m: ProteusMessageCodec.MessageMirror[Msg],
+    deriver: ProtobufDeriver
+  ): MessageCodec[Msg] =
     ProteusMessageCodec.derived[Msg](using m, deriver)
 }
