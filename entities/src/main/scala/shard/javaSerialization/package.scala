@@ -16,7 +16,7 @@ import shard.interfaces.MessageCodec.Codec
  * `shard.kryo` or a macro-derived backend.
  */
 package object javaSerialization {
-  given derive[Msg[+_, +_]]: MessageCodec[Msg] = MessageCodec.uniform(Codec(writeBytes, readBytes))
+  given derive[Msg[_, _]]: MessageCodec[Msg] = MessageCodec.uniform(Codec(writeBytes, readBytes))
 
   private def writeBytes(value: Any): Array[Byte] = {
     val baos = new ByteArrayOutputStream

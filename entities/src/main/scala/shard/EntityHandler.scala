@@ -15,7 +15,7 @@ import zio.IO
  *   }
  * }}}
  */
-trait EntityHandler[Msg[+_, +_]] {
+trait EntityHandler[Msg[_, _]] {
 
   /**
    * Process a message and return its reply.

@@ -9,7 +9,7 @@ Use `Nothing` for `E` when a message can't fail, and `Unit` for `A` when there i
 A message can also reply with a stream, see [Streaming](#streaming).
 
 ```scala
-enum GuildMessage[+E, +A] {
+enum GuildMessage[E, A] {
   case Join(userId: String)  extends GuildMessage[GuildFull, Set[String]]
   case Leave(userId: String) extends GuildMessage[Nothing, Unit]
   case Members()             extends GuildMessage[Nothing, Set[String]] with Concurrent
@@ -41,28 +41,43 @@ Entity and topic types must all have different names.
 - `interceptor`: wraps the entities and their messages, see [Interceptors](#interceptors).
 
 ```scala
-Sharding.registerEntity(Guild, EntityOptions(maxIdleTime = Some(5.minutes), concurrency = 4))(behavior)
+Sharding.registerEntity(
+  Guild,
+  EntityOptions(
+    maxIdleTime = Some(5.minutes),
+    concurrency = 4,
+    loadEntity = [E, A] => message => message match {
+      case _: Leave => false
+      case _        => true
+    }
+  )
+)(behavior)
 ```
 
 ## Interceptors
 
-An `EntityInterceptor` wraps every entity of a type, e.g. to add log annotations, timing or tracing:
+An `EntityInterceptor` wraps the entities of a type and the processing of their messages, e.g. to add log annotations, timing or tracing:
 - `aroundEntity` wraps the whole life of an entity: its behavior, its messages and the finalizers of its scope. What it sets in fiber refs (e.g. `ZIO.logAnnotate`) applies to all of them, but not to the streams of `Streamed` and `Duplex` replies, which run outside of the entity.
-- `aroundMessage` wraps the processing of each message by the handler, with the message and its outcome. For `Streamed` and `Duplex` replies, it wraps the creation of the stream, not the stream itself.
+- `aroundMessage` wraps the processing of each message by the handler, with the message and its outcome. As in a handler, pattern matching on the message refines `E` and `A` to the types declared by each message. For `Streamed` and `Duplex` replies, it wraps the creation of the stream, not the stream itself.
 
 ```scala
-val interceptor = new EntityInterceptor {
-  override def aroundEntity[E, A](recipientType: String, entityId: String)(effect: IO[E, A]): IO[E, A] =
-    ZIO.logAnnotate("entity", s"$recipientType/$entityId")(effect)
+val interceptor = new EntityInterceptor[GuildMessage] {
+  override def aroundEntity[E, A](recipientType: RecipientType[?], entityId: String)(effect: IO[E, A]): IO[E, A] =
+    ZIO.logAnnotate("entity", s"${recipientType.name}/$entityId")(effect)
 
-  override def aroundMessage[E, A](recipientType: String, entityId: String, message: Any)(effect: IO[E, A]): IO[E, A] =
-    effect.timed.flatMap((duration, reply) => ZIO.logDebug(s"Processed $message in ${duration.render}").as(reply))
+  override def aroundMessage[E, A](recipientType: RecipientType[?], entityId: String, message: GuildMessage[E, A])(
+    effect: IO[E, A]
+  ): IO[E, A] =
+    message match {
+      case Join(userId) => effect.tap(members => ZIO.logInfo(s"$userId joined, ${members.size} members"))
+      case _            => effect
+    }
 }
 
 Sharding.registerEntity(Guild, EntityOptions(interceptor = interceptor))(behavior)
 ```
 
-Set it in `EntityOptions` for one entity or topic type, or in `Config.entityInterceptor` for all of them (it then wraps the one of `EntityOptions`). Interceptors combine with `++`: in `a ++ b`, `a` wraps `b`.
+To wrap the entities of every type, set an `EntityInterceptor[AnyMessage]` (its messages are typed as `Any`) in `Config.entityInterceptor`: it wraps the interceptor of each type. Interceptors combine with `++`: in `a ++ b`, `a` wraps `b`.
 If `aroundMessage` fails or dies, it is like the handler failing or dying. If `aroundEntity` dies before the entity starts, it is like the behavior failing.
 
 ## Sending messages
@@ -115,7 +130,7 @@ Besides the error type declared by the message, calls can fail with a `ClusterEr
 
 A message can reply with a stream by declaring a `Streamed[E2, A]` reply type: the entity can fail with `E` before the stream starts, then the stream emits values of type `A` and can fail with `E2`.
 ```scala
-enum GuildMessage[+E, +A] {
+enum GuildMessage[E, A] {
   // ...
   case MemberStream() extends GuildMessage[Nothing, Streamed[Nothing, String]]
 }

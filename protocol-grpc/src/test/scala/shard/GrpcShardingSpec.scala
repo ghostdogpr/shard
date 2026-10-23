@@ -104,7 +104,7 @@ object GrpcShardingSpec extends ZIOSpecDefault {
     )
 
   object AccountActor {
-    enum AccountMessage[+E, +A] {
+    enum AccountMessage[E, A] {
       case Deposit(amount: Int) extends AccountMessage[Nothing, Unit]
       case Balance()            extends AccountMessage[Nothing, Int]
       // takes longer than Config.sendTimeout
@@ -133,17 +133,16 @@ object GrpcShardingSpec extends ZIOSpecDefault {
             bytes => codec.decode(bytes) match { case -2 | -3 => undecodable; case value => value }
           )
 
-        def encodeMessage(message: AccountMessage[Any, Any]): Array[Byte]          =
+        def encodeMessage[E, A](message: AccountMessage[E, A]): Array[Byte]          =
           message match {
             case Unencodable() => unencodable
             case other         => base.encodeMessage(other)
           }
-        def decodeMessage(bytes: Array[Byte]): AccountMessage[Any, Any]            =
-          base.decodeMessage(bytes) match {
-            case Undecodable() => undecodable
-            case other         => other
-          }
-        def replyCodec(message: AccountMessage[Any, Any]): MessageCodec.ReplyCodec = {
+        def decodeMessage(bytes: Array[Byte]): AccountMessage[Any, Any]              = {
+          val message = base.decodeMessage(bytes)
+          if (message.isInstanceOf[Undecodable]) undecodable else message
+        }
+        def replyCodec[E, A](message: AccountMessage[E, A]): MessageCodec.ReplyCodec = {
           val codec = base.replyCodec(message)
           codec.copy(value = failing(codec.value), streamInput = failing(codec.streamInput))
         }

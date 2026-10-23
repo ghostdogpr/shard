@@ -13,7 +13,7 @@ import shard.interfaces.MessageCodec
  * @param name a unique string that identifies this entity or topic type
  * @tparam Msg the type of message that can be sent to this entity or topic type
  */
-sealed abstract class RecipientType[Msg[+_, +_]](val name: String)(using private[shard] val codec: MessageCodec[Msg]) {
+sealed abstract class RecipientType[Msg[_, _]](val name: String)(using private[shard] val codec: MessageCodec[Msg]) {
 
   /**
    * The handler that processes the messages of this entity or topic type
@@ -23,5 +23,5 @@ sealed abstract class RecipientType[Msg[+_, +_]](val name: String)(using private
   def getShardId(entityId: String, numberOfShards: Int): ShardId =
     math.abs(entityId.hashCode % numberOfShards) + 1
 }
-abstract class EntityType[Msg[+_, +_]](name: String)(using MessageCodec[Msg]) extends RecipientType[Msg](name)
-abstract class TopicType[Msg[+_, +_]](name: String)(using MessageCodec[Msg])  extends RecipientType[Msg](name)
+abstract class EntityType[Msg[_, _]](name: String)(using MessageCodec[Msg]) extends RecipientType[Msg](name)
+abstract class TopicType[Msg[_, _]](name: String)(using MessageCodec[Msg])  extends RecipientType[Msg](name)

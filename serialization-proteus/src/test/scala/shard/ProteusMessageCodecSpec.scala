@@ -25,7 +25,7 @@ object ProteusMessageCodecSpec extends ZIOSpecDefault {
     final case class Invalid()         extends Error
   }
 
-  enum Msg[+E, +A] {
+  enum Msg[E, A] {
     case Plain(name: String, count: Int) extends Msg[Nothing, Unit]
     case WithReply(id: Int)              extends Msg[Error, Reply]
     case WithStreamReply(from: Int)      extends Msg[Error.Invalid, Streamed[Error, StreamReply]]
@@ -39,13 +39,13 @@ object ProteusMessageCodecSpec extends ZIOSpecDefault {
 
   private lazy val rendered = ProteusMessageCodec.dependency[Msg]("msg", "shard.test").render(Nil)
 
-  private def roundtrip(msg: Msg[Any, Any]): Msg[Any, Any] =
+  private def roundtrip(msg: Msg[?, ?]): Msg[?, ?] =
     codec.decodeMessage(codec.encodeMessage(msg))
 
   def spec: Spec[TestEnvironment & Scope, Any] =
     suite("ProteusMessageCodecSpec")(
       test("roundtrips messages") {
-        val messages: List[Msg[Any, Any]] = List(
+        val messages: List[Msg[?, ?]] = List(
           Msg.Plain("hello", 42),
           Msg.WithReply(7),
           Msg.WithStreamReply(3),
@@ -116,7 +116,7 @@ object ProteusMessageCodecSpec extends ZIOSpecDefault {
         for {
           viaGiven  <- typeCheck {
                          """
-                         enum Bad[+E, +A] {
+                         enum Bad[E, A] {
                            case GetCount() extends Bad[Nothing, Int]
                          }
                          summon[shard.interfaces.MessageCodec[Bad]]
@@ -125,13 +125,25 @@ object ProteusMessageCodecSpec extends ZIOSpecDefault {
           // calling `derived` directly shows why
           viaDerive <- typeCheck {
                          """
-                         enum Bad[+E, +A] {
+                         enum Bad[E, A] {
                            case GetCount() extends Bad[Nothing, Int]
                          }
                          shard.proteus.ProteusMessageCodec.derived[Bad]
                          """
                        }
         } yield assertTrue(viaGiven.isLeft, viaDerive.left.exists(_.contains("wrap primitive types")))
+      },
+      test("rejects variants without fixed type arguments at compile time") {
+        for {
+          result <- typeCheck {
+                      """
+                      enum Bad[E, A] {
+                        case Generic[A](reply: A) extends Bad[Nothing, A]
+                      }
+                      shard.proteus.ProteusMessageCodec.derived[Bad]
+                      """
+                    }
+        } yield assertTrue(result.left.exists(_.contains("no fixed error or reply type")))
       }
     )
 }

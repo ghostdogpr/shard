@@ -8,7 +8,7 @@ import zio.stream.ZStream
 import java.util.concurrent.ForkJoinPool
 
 object Server {
-  enum Message[+E, +A] {
+  enum Message[E, A] {
     case Ping(msg: String)                   extends Message[Nothing, String]
     case StreamPing(msg: String, count: Int) extends Message[Nothing, Streamed[Nothing, String]]
   }

@@ -12,7 +12,7 @@ import scala.util.NotGiven
  * The messenger's timeout only applies to `send` and `sendDiscard`.
  * @tparam Msg the type of message that can be sent to this entity type
  */
-trait Messenger[Msg[+_, +_]] {
+trait Messenger[Msg[_, _]] {
 
   /**
    * Send a message and wait for its reply.

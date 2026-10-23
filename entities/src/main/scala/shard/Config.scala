@@ -19,7 +19,7 @@ import zio._
  * @param unhealthyPodReportInterval interval to report unhealthy pods to the Shard Manager (this exists to prevent calling the Shard Manager for each failed message)
  * @param simulateRemotePods disable optimizations when sending a message to an entity hosted on the local shards (this will force serialization of all messages)
  * @param unregisterRetrySchedule retry schedule for unregistering the pod from the Shard Manager
- * @param entityInterceptor interceptor applied to the entities of every type, around the one of their `EntityOptions`
+ * @param entityInterceptor interceptor applied to the entities of every type, around the interceptor of their `EntityOptions`
  */
 case class Config(
   role: Role,
@@ -37,7 +37,7 @@ case class Config(
   unhealthyPodReportInterval: Duration,
   simulateRemotePods: Boolean,
   unregisterRetrySchedule: Schedule[Any, Any, Any],
-  entityInterceptor: EntityInterceptor = EntityInterceptor.none
+  entityInterceptor: EntityInterceptor[AnyMessage] = EntityInterceptor.none
 )
 
 object Config {
