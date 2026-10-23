@@ -46,22 +46,18 @@ Sharding.registerEntity(Guild, EntityOptions(maxIdleTime = Some(5.minutes), conc
 
 ## Interceptors
 
-A `MessageInterceptor` wraps the entities of a type and the processing of their messages, e.g. to add log annotations, timing or tracing:
+An `EntityInterceptor` wraps the entities of a type and the processing of their messages, e.g. to add log annotations, timing or tracing:
 - `aroundEntity` wraps the whole life of an entity: its behavior, its messages and the finalizers of its scope. What it sets in fiber refs (e.g. `ZIO.logAnnotate`) applies to all of them, but not to the streams of `Streamed` and `Duplex` replies, which run outside of the entity.
 - `aroundMessage` wraps the processing of each message by the handler, with the message and its outcome. As in a handler, pattern matching on the message refines `E` and `A` to the types declared by each message. For `Streamed` and `Duplex` replies, it wraps the creation of the stream, not the stream itself.
 
 ```scala
-val interceptor = new MessageInterceptor[GuildMessage] {
-  override def aroundEntity[E, A](recipientType: RecipientType[GuildMessage], entityId: String)(
-    effect: IO[E, A]
-  ): IO[E, A] =
+val interceptor = new EntityInterceptor[GuildMessage] {
+  override def aroundEntity[E, A](recipientType: RecipientType[?], entityId: String)(effect: IO[E, A]): IO[E, A] =
     ZIO.logAnnotate("entity", s"${recipientType.name}/$entityId")(effect)
 
-  override def aroundMessage[E, A](
-    recipientType: RecipientType[GuildMessage],
-    entityId: String,
-    message: GuildMessage[E, A]
-  )(effect: IO[E, A]): IO[E, A] =
+  override def aroundMessage[E, A](recipientType: RecipientType[?], entityId: String, message: GuildMessage[E, A])(
+    effect: IO[E, A]
+  ): IO[E, A] =
     message match {
       case Join(userId) => effect.tap(members => ZIO.logInfo(s"$userId joined, ${members.size} members"))
       case _            => effect
@@ -71,7 +67,7 @@ val interceptor = new MessageInterceptor[GuildMessage] {
 Sharding.registerEntity(Guild, EntityOptions(interceptor = interceptor))(behavior)
 ```
 
-To wrap the entities of every type, set an `EntityInterceptor` in `Config.entityInterceptor`: it has the same methods, with the message typed as `Any`, and wraps the `MessageInterceptor` of each type. `EntityInterceptor`s combine with `++`: in `a ++ b`, `a` wraps `b`.
+To wrap the entities of every type, set an `EntityInterceptor[AnyMessage]` (its messages are typed as `Any`) in `Config.entityInterceptor`: it wraps the interceptor of each type. Interceptors combine with `++`: in `a ++ b`, `a` wraps `b`.
 If `aroundMessage` fails or dies, it is like the handler failing or dying. If `aroundEntity` dies before the entity starts, it is like the behavior failing.
 
 ## Sending messages

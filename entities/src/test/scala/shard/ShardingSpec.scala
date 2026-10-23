@@ -594,8 +594,8 @@ object ShardingSpec extends ZIOSpecDefault {
         )
       },
       test("An interceptor's log annotations apply to the start, the messages and the finalizers of an entity") {
-        val interceptor = new MessageInterceptor[WorkerMessage] {
-          override def aroundEntity[E, A](recipientType: RecipientType[WorkerMessage], entityId: String)(
+        val interceptor = new EntityInterceptor[WorkerMessage] {
+          override def aroundEntity[E, A](recipientType: RecipientType[?], entityId: String)(
             effect: IO[E, A]
           ): IO[E, A] =
             ZIO.logAnnotate("entity", s"${recipientType.name}/$entityId")(effect)
@@ -620,9 +620,9 @@ object ShardingSpec extends ZIOSpecDefault {
       test("An interceptor wraps each message and gets its outcome") {
         for {
           outcomes   <- Ref.make(Chunk.empty[(Any, Exit[Any, Any])])
-          interceptor = new MessageInterceptor[CounterMessage] {
+          interceptor = new EntityInterceptor[CounterMessage] {
                           override def aroundMessage[E, A](
-                            recipientType: RecipientType[CounterMessage],
+                            recipientType: RecipientType[?],
                             entityId: String,
                             message: CounterMessage[E, A]
                           )(effect: IO[E, A]): IO[E, A] =
@@ -647,14 +647,14 @@ object ShardingSpec extends ZIOSpecDefault {
         )
       },
       test("Interceptors that die are treated like handlers that die") {
-        val interceptor = new MessageInterceptor[CounterMessage] {
-          override def aroundEntity[E, A](recipientType: RecipientType[CounterMessage], entityId: String)(
+        val interceptor = new EntityInterceptor[CounterMessage] {
+          override def aroundEntity[E, A](recipientType: RecipientType[?], entityId: String)(
             effect: IO[E, A]
           ): IO[E, A] =
             if (entityId == "bad") ZIO.dieMessage("bad entity") else effect
 
           override def aroundMessage[E, A](
-            recipientType: RecipientType[CounterMessage],
+            recipientType: RecipientType[?],
             entityId: String,
             message: CounterMessage[E, A]
           )(effect: IO[E, A]): IO[E, A] =
@@ -676,9 +676,9 @@ object ShardingSpec extends ZIOSpecDefault {
         for {
           counts     <- Ref.make(Chunk.empty[Int])
           errors     <- Ref.make(Chunk.empty[String])
-          interceptor = new MessageInterceptor[CounterMessage] {
+          interceptor = new EntityInterceptor[CounterMessage] {
                           override def aroundMessage[E, A](
-                            recipientType: RecipientType[CounterMessage],
+                            recipientType: RecipientType[?],
                             entityId: String,
                             message: CounterMessage[E, A]
                           )(effect: IO[E, A]): IO[E, A] =
@@ -759,8 +759,8 @@ object ShardingSpec extends ZIOSpecDefault {
   /**
    * An interceptor that logs around each entity and message.
    */
-  private val logging: EntityInterceptor =
-    new EntityInterceptor {
+  private val logging: EntityInterceptor[AnyMessage] =
+    new EntityInterceptor[AnyMessage] {
       override def aroundEntity[E, A](recipientType: RecipientType[?], entityId: String)(effect: IO[E, A]): IO[E, A] =
         ZIO.log("default entity") *> effect
 
@@ -772,14 +772,14 @@ object ShardingSpec extends ZIOSpecDefault {
 
   private val defaultInterceptor: Spec[Sharding & Scope, Any] =
     test("The interceptor of Config wraps the one of EntityOptions") {
-      val typed = new MessageInterceptor[CounterMessage] {
-        override def aroundEntity[E, A](recipientType: RecipientType[CounterMessage], entityId: String)(
+      val typed = new EntityInterceptor[CounterMessage] {
+        override def aroundEntity[E, A](recipientType: RecipientType[?], entityId: String)(
           effect: IO[E, A]
         ): IO[E, A] =
           ZIO.log("type entity") *> effect
 
         override def aroundMessage[E, A](
-          recipientType: RecipientType[CounterMessage],
+          recipientType: RecipientType[?],
           entityId: String,
           message: CounterMessage[E, A]
         )(effect: IO[E, A]): IO[E, A] =

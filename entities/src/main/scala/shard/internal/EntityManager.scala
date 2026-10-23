@@ -125,6 +125,8 @@ private[shard] final class EntityManager[Msg[_, _]] private (
 
   private val sequential = options.concurrency <= 1
 
+  private val interceptor = config.entityInterceptor ++ options.interceptor
+
   val reaper: UIO[Nothing] = {
     val maxIdleTime   = options.maxIdleTime getOrElse config.entityMaxIdleTime
     val maxIdleMillis = maxIdleTime.toMillis
@@ -250,9 +252,7 @@ private[shard] final class EntityManager[Msg[_, _]] private (
     // the fibers of the entity are forked inside the interceptors, so that they inherit what they set (e.g. log annotations)
     ZIO
       .suspendSucceed(
-        config.entityInterceptor.aroundEntity(recipientType, entity.entityId)(
-          options.interceptor.aroundEntity(recipientType, entity.entityId)(lifecycle(entity))
-        )
+        interceptor.aroundEntity(recipientType, entity.entityId)(lifecycle(entity))
       )
       .catchAllCause(cause =>
         // if it died before running the entity, its messages fail like with a behavior that fails (after, there are none)
@@ -423,11 +423,7 @@ private[shard] final class EntityManager[Msg[_, _]] private (
     entity.state.get.flatMap(s =>
       if (s.poisoned) interrupted
       else
-        config.entityInterceptor.aroundMessage(recipientType, entity.entityId, message)(
-          options.interceptor.aroundMessage(recipientType, entity.entityId, message)(
-            ZIO.suspendSucceed(handler.handle(message))
-          )
-        )
+        interceptor.aroundMessage(recipientType, entity.entityId, message)(ZIO.suspendSucceed(handler.handle(message)))
     )
 
   private def complete(entity: RunningEntity[Msg], envelope: Envelope[Msg], exit: Exit[Any, Any]): UIO[Unit] =
