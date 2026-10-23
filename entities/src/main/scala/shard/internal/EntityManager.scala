@@ -125,6 +125,8 @@ private[shard] final class EntityManager[Msg[+_, +_]] private (
 
   private val sequential = options.concurrency <= 1
 
+  private val interceptor = config.entityInterceptor ++ options.interceptor
+
   val reaper: UIO[Nothing] = {
     val maxIdleTime   = options.maxIdleTime getOrElse config.entityMaxIdleTime
     val maxIdleMillis = maxIdleTime.toMillis
@@ -241,16 +243,37 @@ private[shard] final class EntityManager[Msg[+_, +_]] private (
       _          <- run(entity).forkDaemon
     } yield entity
 
+  /**
+   * Run an entity until it stops, wrapped by the interceptor.
+   */
   private def run(entity: RunningEntity[Msg]): UIO[Unit] =
-    (for {
+    // the fibers of the entity are forked inside the interceptor, so that they inherit what it sets (e.g. log annotations)
+    ZIO
+      .suspendSucceed(interceptor.aroundEntity(recipientType.name, entity.entityId)(lifecycle(entity)))
+      .catchAllCause(cause =>
+        // if it died before running the entity, its messages fail like with a behavior that fails (after, there are none)
+        annotated(entity)(
+          ZIO.logErrorCause(s"The interceptor of ${recipientType.name} ${entity.entityId} died", cause)
+        ) *> failToStart(entity, cause)
+      )
+      .zipRight(entities.update(_ - entity.entityId) *> gauge.decrement)
+      .ensuring(entity.terminated.succeed(()))
+      .uninterruptible
+
+  /**
+   * Start the handler of an entity, then stop it once the entity is closing.
+   */
+  private def lifecycle(entity: RunningEntity[Msg]): UIO[Unit] =
+    for {
       scope      <- Scope.make
       // must stay interruptible to be stopped
       processing <- makeHandler(entity.entityId)
                       .provideEnvironment(ZEnvironment[Scope](scope))
                       .foldCauseZIO(
                         cause =>
-                          ZIO.logErrorCause(s"Failed to start ${recipientType.name} ${entity.entityId}", cause) *>
-                            failToStart(entity, cause),
+                          annotated(entity)(
+                            ZIO.logErrorCause(s"Failed to start ${recipientType.name} ${entity.entityId}", cause)
+                          ) *> failToStart(entity, cause),
                         handler => {
                           val mainLoop: UIO[Nothing] =
                             if (sequential) sequentialLoop(entity, handler)
@@ -274,20 +297,28 @@ private[shard] final class EntityManager[Msg[+_, +_]] private (
                       entity.drained.await.interruptible.timeout(config.entityTerminationTimeout).map(_.isDefined)
       _          <-
         ZIO.unless(drained)(
-          ZIO.logWarning(
-            s"${recipientType.name} ${entity.entityId} did not complete its messages within ${config.entityTerminationTimeout.render}, interrupting them"
+          annotated(entity)(
+            ZIO.logWarning(
+              s"${recipientType.name} ${entity.entityId} did not complete its messages within ${config.entityTerminationTimeout.render}, interrupting them"
+            )
           )
         )
       _          <- processing.interrupt
       _          <- finishQueued(entity, interrupted)
       _          <- scope
                       .close(Exit.unit)
-                      .catchAllCause(
-                        ZIO.logErrorCause(s"A finalizer of ${recipientType.name} ${entity.entityId} died", _)
+                      .catchAllCause(cause =>
+                        annotated(entity)(
+                          ZIO.logErrorCause(s"A finalizer of ${recipientType.name} ${entity.entityId} died", cause)
+                        )
                       )
-      _          <- entities.update(_ - entity.entityId)
-      _          <- gauge.decrement
-    } yield ()).ensuring(entity.terminated.succeed(())).uninterruptible
+    } yield ()
+
+  /**
+   * Annotate a log about an entity with its type and ID.
+   */
+  private def annotated(entity: RunningEntity[Msg])(log: UIO[Unit]): UIO[Unit] =
+    ZIO.logAnnotate(LogAnnotation("entityType", recipientType.name), LogAnnotation("entityId", entity.entityId))(log)
 
   /**
    * Stop an entity whose handler failed to start.
@@ -384,8 +415,16 @@ private[shard] final class EntityManager[Msg[+_, +_]] private (
    * Once a message has died, the next ones are interrupted instead of processed.
    */
   private def handle(entity: RunningEntity[Msg], handler: EntityHandler[Msg], message: Msg[Any, Any]): IO[Any, Any] =
-    // a handler throwing instead of returning an effect is a defect
-    entity.state.get.flatMap(s => if (s.poisoned) interrupted else ZIO.suspendSucceed(handler.handle(message)))
+    // a handler or interceptor throwing instead of returning an effect is a defect
+    entity.state.get.flatMap(s =>
+      if (s.poisoned) interrupted
+      else
+        ZIO.suspendSucceed(
+          interceptor.aroundMessage(recipientType.name, entity.entityId, message)(
+            ZIO.suspendSucceed(handler.handle(message))
+          )
+        )
+    )
 
   private def complete(entity: RunningEntity[Msg], envelope: Envelope[Msg], exit: Exit[Any, Any]): UIO[Unit] =
     exit match {
@@ -398,9 +437,11 @@ private[shard] final class EntityManager[Msg[+_, +_]] private (
       case Exit.Failure(cause) if cause.isDie     =>
         // the state may be corrupt: stop the entity before replying, so that later messages start a new one
         entity.state.update(_.copy(poisoned = true)) *>
-          ZIO.logErrorCause(
-            s"${recipientType.name} ${entity.entityId} died while processing a message, stopping it",
-            cause
+          annotated(entity)(
+            ZIO.logErrorCause(
+              s"${recipientType.name} ${entity.entityId} died while processing a message, stopping it",
+              cause
+            )
           ) *> stopInBackground(entity) *> finish(entity, envelope, exit)
       case _                                      =>
         finish(entity, envelope, exit)
