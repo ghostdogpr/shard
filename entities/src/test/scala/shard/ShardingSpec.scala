@@ -31,7 +31,7 @@ object ShardingSpec extends ZIOSpecDefault {
       )
     ) @@ sequential @@ withLiveClock
 
-  // tests relying on the in-process transport's chunking and delivery order
+  // tests relying on the in-process transport's chunking, delivery order and synchronous cancellation
   val inProcess: String = "in-process"
 
   val tests: List[Spec[Sharding & Scope, Any]] =
@@ -282,7 +282,7 @@ object ShardingSpec extends ZIOSpecDefault {
           _      <- worker.send("w100")(Ping())
           done   <- state.completed.get
         } yield assertTrue(done == 0)
-      },
+      } @@ TestAspect.tag(inProcess),
       test("Cancelled stream messages don't prevent passivation") {
         for {
           state  <- startWorker(EntityOptions(maxIdleTime = Some(500.millis)))
