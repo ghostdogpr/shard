@@ -251,8 +251,8 @@ private[shard] final class EntityManager[Msg[_, _]] private (
     // the fibers of the entity are forked inside the interceptors, so that they inherit what they set (e.g. log annotations)
     ZIO
       .suspendSucceed(
-        config.entityInterceptor.aroundEntity(recipientType.name, entity.entityId)(
-          options.interceptor.aroundEntity(recipientType.name, entity.entityId)(lifecycle(entity))
+        config.entityInterceptor.aroundEntity(recipientType, entity.entityId)(
+          options.interceptor.aroundEntity(recipientType, entity.entityId)(lifecycle(entity))
         )
       )
       .catchAllCause(cause =>
@@ -424,8 +424,8 @@ private[shard] final class EntityManager[Msg[_, _]] private (
     entity.state.get.flatMap(s =>
       if (s.poisoned) interrupted
       else
-        config.entityInterceptor.aroundMessage(recipientType.name, entity.entityId, message)(
-          options.interceptor.aroundMessage(recipientType.name, entity.entityId, message)(
+        config.entityInterceptor.aroundMessage(recipientType, entity.entityId, message)(
+          options.interceptor.aroundMessage(recipientType, entity.entityId, message)(
             ZIO.suspendSucceed(handler.handle(message))
           )
         )

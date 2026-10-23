@@ -10,9 +10,11 @@ import zio.IO
  * `EntityHandler.handle`:
  * {{{
  *   new MessageInterceptor[GuildMessage] {
- *     override def aroundMessage[E, A](recipientType: String, entityId: String, message: GuildMessage[E, A])(
- *       effect: IO[E, A]
- *     ): IO[E, A] =
+ *     override def aroundMessage[E, A](
+ *       recipientType: RecipientType[GuildMessage],
+ *       entityId: String,
+ *       message: GuildMessage[E, A]
+ *     )(effect: IO[E, A]): IO[E, A] =
  *       message match {
  *         case GuildMessage.Join(userId) => effect.tap(members => ZIO.logInfo(s"$userId joined: $members"))
  *         case _                         => effect
@@ -25,12 +27,14 @@ trait MessageInterceptor[Msg[_, _]] {
   /**
    * Wraps the whole life of one entity, like `EntityInterceptor.aroundEntity`.
    */
-  def aroundEntity[E, A](recipientType: String, entityId: String)(effect: IO[E, A]): IO[E, A] = effect
+  def aroundEntity[E, A](recipientType: RecipientType[Msg], entityId: String)(effect: IO[E, A]): IO[E, A] = effect
 
   /**
    * Wraps the processing of one message by the handler, like `EntityInterceptor.aroundMessage`.
    */
-  def aroundMessage[E, A](recipientType: String, entityId: String, message: Msg[E, A])(effect: IO[E, A]): IO[E, A] =
+  def aroundMessage[E, A](recipientType: RecipientType[Msg], entityId: String, message: Msg[E, A])(
+    effect: IO[E, A]
+  ): IO[E, A] =
     effect
 }
 

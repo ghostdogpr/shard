@@ -595,8 +595,10 @@ object ShardingSpec extends ZIOSpecDefault {
       },
       test("An interceptor's log annotations apply to the start, the messages and the finalizers of an entity") {
         val interceptor = new MessageInterceptor[WorkerMessage] {
-          override def aroundEntity[E, A](recipientType: String, entityId: String)(effect: IO[E, A]): IO[E, A] =
-            ZIO.logAnnotate("entity", s"$recipientType/$entityId")(effect)
+          override def aroundEntity[E, A](recipientType: RecipientType[WorkerMessage], entityId: String)(
+            effect: IO[E, A]
+          ): IO[E, A] =
+            ZIO.logAnnotate("entity", s"${recipientType.name}/$entityId")(effect)
         }
         for {
           state  <- WorkerState.make
@@ -620,7 +622,7 @@ object ShardingSpec extends ZIOSpecDefault {
           outcomes   <- Ref.make(Chunk.empty[(Any, Exit[Any, Any])])
           interceptor = new MessageInterceptor[CounterMessage] {
                           override def aroundMessage[E, A](
-                            recipientType: String,
+                            recipientType: RecipientType[CounterMessage],
                             entityId: String,
                             message: CounterMessage[E, A]
                           )(effect: IO[E, A]): IO[E, A] =
@@ -646,12 +648,16 @@ object ShardingSpec extends ZIOSpecDefault {
       },
       test("Interceptors that die are treated like handlers that die") {
         val interceptor = new MessageInterceptor[CounterMessage] {
-          override def aroundEntity[E, A](recipientType: String, entityId: String)(effect: IO[E, A]): IO[E, A] =
-            if (entityId == "bad") ZIO.dieMessage("bad entity") else effect
-
-          override def aroundMessage[E, A](recipientType: String, entityId: String, message: CounterMessage[E, A])(
+          override def aroundEntity[E, A](recipientType: RecipientType[CounterMessage], entityId: String)(
             effect: IO[E, A]
           ): IO[E, A] =
+            if (entityId == "bad") ZIO.dieMessage("bad entity") else effect
+
+          override def aroundMessage[E, A](
+            recipientType: RecipientType[CounterMessage],
+            entityId: String,
+            message: CounterMessage[E, A]
+          )(effect: IO[E, A]): IO[E, A] =
             if (message == DecrementCounter()) ZIO.dieMessage("bad message") else effect
         }
         for {
@@ -672,7 +678,7 @@ object ShardingSpec extends ZIOSpecDefault {
           errors     <- Ref.make(Chunk.empty[String])
           interceptor = new MessageInterceptor[CounterMessage] {
                           override def aroundMessage[E, A](
-                            recipientType: String,
+                            recipientType: RecipientType[CounterMessage],
                             entityId: String,
                             message: CounterMessage[E, A]
                           )(effect: IO[E, A]): IO[E, A] =
@@ -755,10 +761,10 @@ object ShardingSpec extends ZIOSpecDefault {
    */
   private val logging: EntityInterceptor =
     new EntityInterceptor {
-      override def aroundEntity[E, A](recipientType: String, entityId: String)(effect: IO[E, A]): IO[E, A] =
+      override def aroundEntity[E, A](recipientType: RecipientType[?], entityId: String)(effect: IO[E, A]): IO[E, A] =
         ZIO.log("default entity") *> effect
 
-      override def aroundMessage[E, A](recipientType: String, entityId: String, message: Any)(
+      override def aroundMessage[E, A](recipientType: RecipientType[?], entityId: String, message: Any)(
         effect: IO[E, A]
       ): IO[E, A] =
         ZIO.log("default before") *> effect <* ZIO.log("default after")
@@ -767,12 +773,16 @@ object ShardingSpec extends ZIOSpecDefault {
   private val defaultInterceptor: Spec[Sharding & Scope, Any] =
     test("The interceptor of Config wraps the one of EntityOptions") {
       val typed = new MessageInterceptor[CounterMessage] {
-        override def aroundEntity[E, A](recipientType: String, entityId: String)(effect: IO[E, A]): IO[E, A] =
-          ZIO.log("type entity") *> effect
-
-        override def aroundMessage[E, A](recipientType: String, entityId: String, message: CounterMessage[E, A])(
+        override def aroundEntity[E, A](recipientType: RecipientType[CounterMessage], entityId: String)(
           effect: IO[E, A]
         ): IO[E, A] =
+          ZIO.log("type entity") *> effect
+
+        override def aroundMessage[E, A](
+          recipientType: RecipientType[CounterMessage],
+          entityId: String,
+          message: CounterMessage[E, A]
+        )(effect: IO[E, A]): IO[E, A] =
           ZIO.log("type before") *> effect <* ZIO.log("type after")
       }
       for {

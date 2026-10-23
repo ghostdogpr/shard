@@ -52,12 +52,16 @@ A `MessageInterceptor` wraps the entities of a type and the processing of their 
 
 ```scala
 val interceptor = new MessageInterceptor[GuildMessage] {
-  override def aroundEntity[E, A](recipientType: String, entityId: String)(effect: IO[E, A]): IO[E, A] =
-    ZIO.logAnnotate("entity", s"$recipientType/$entityId")(effect)
-
-  override def aroundMessage[E, A](recipientType: String, entityId: String, message: GuildMessage[E, A])(
+  override def aroundEntity[E, A](recipientType: RecipientType[GuildMessage], entityId: String)(
     effect: IO[E, A]
   ): IO[E, A] =
+    ZIO.logAnnotate("entity", s"${recipientType.name}/$entityId")(effect)
+
+  override def aroundMessage[E, A](
+    recipientType: RecipientType[GuildMessage],
+    entityId: String,
+    message: GuildMessage[E, A]
+  )(effect: IO[E, A]): IO[E, A] =
     message match {
       case Join(userId) => effect.tap(members => ZIO.logInfo(s"$userId joined, ${members.size} members"))
       case _            => effect
