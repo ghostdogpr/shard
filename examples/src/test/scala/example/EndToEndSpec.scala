@@ -21,10 +21,20 @@ import zio.test.Assertion._
 import zio.test.TestAspect.{ sequential, withLiveClock }
 import zio.test._
 
+import java.net.Socket
+
 object EndToEndSpec extends ZIOSpecDefault {
 
   val shardManagerServer: ZLayer[ShardManager & ManagerConfig & GrpcConfig, Throwable, Unit] =
-    ZLayer(Server.run.forkDaemon *> ClockLive.sleep(3 seconds).unit)
+    ZLayer.scoped(ZIO.serviceWithZIO[ManagerConfig](config => Server.run.forkScoped *> awaitPort(config.apiPort)))
+
+  /**
+   * Wait until a server accepts connections on the given port.
+   */
+  def awaitPort(port: Int): UIO[Unit] =
+    ZIO.withClock(ClockLive)(
+      ZIO.attemptBlocking(new Socket("localhost", port).close()).retry(Schedule.spaced(50.millis)).orDie
+    )
 
   val container: ZLayer[Any, Nothing, GenericContainer] =
     ZLayer.scoped {
@@ -108,7 +118,7 @@ object EndToEndSpec extends ZIOSpecDefault {
                           ZLayer.succeed(stalledGrpcConfig)
                         )
                         .forkScoped
-            _      <- ClockLive.sleep(3 seconds)
+            _      <- awaitPort(8088)
             client <- ShardManagerClient.live.build
                         .map(_.get)
                         .provideSome[Scope](
