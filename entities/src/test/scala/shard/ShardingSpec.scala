@@ -28,6 +28,21 @@ object ShardingSpec extends ZIOSpecDefault {
         LocalShardManagerClient.live,
         Storage.memory,
         ZLayer.succeed(Config.default.copy(simulateRemotePods = true))
+      ),
+      suite("registered pods")(
+        test("Registered pods are read from the storage") {
+          val pod1 = Pod(PodAddress("host1", 1), "1.0", Role.default)
+          val pod2 = Pod(PodAddress("host2", 2), "2.0", Role("other"))
+          for {
+            _    <- ZIO.serviceWithZIO[Storage](_.savePods(Map(pod1.address -> pod1, pod2.address -> pod2)))
+            pods <- Sharding.getRegisteredPods
+          } yield assertTrue(pods == Set(pod1, pod2))
+        }
+      ).provide(
+        LocalSharding.live,
+        LocalShardManagerClient.live,
+        Storage.memory,
+        ZLayer.succeed(Config.default)
       )
     ) @@ sequential @@ withLiveClock @@ TestAspect.timeout(60.seconds)
 
@@ -571,6 +586,49 @@ object ShardingSpec extends ZIOSpecDefault {
           stopped,
           ping.isSuccess
         )
+      },
+      test("Running entities are listed from their start until their scope is closed") {
+        for {
+          state   <- WorkerState.make
+          // the entities seen by the first entity to stop, from its finalizer
+          seen    <- Promise.make[Nothing, Set[String]]
+          _       <- Sharding.registerEntity(Worker)(entityId =>
+                       worker(state)(entityId) <* ZIO.addFinalizer(Sharding.localEntities(Worker).flatMap(seen.succeed))
+                     )
+          counter <- startCounter()
+          worker  <- Sharding.messenger(Worker)
+          before  <- Sharding.localEntities(Worker)
+          _       <- worker.send("w1")(Ping()) *> worker.send("w2")(Ping()) *> counter.send("c1")(GetCounter())
+          started <- Sharding.localEntities(Worker)
+          _       <- Sharding.terminateLocalEntity(Worker, "w1")
+          closing <- seen.await
+          // removed right after its scope is closed
+          _       <- Sharding.localEntities(Worker).repeatUntil(_ == Set("w2"))
+        } yield assertTrue(before.isEmpty, started == Set("w1", "w2"), closing == started)
+      },
+      test("Passivated entities are no longer listed") {
+        for {
+          state   <- startWorker(EntityOptions(maxIdleTime = Some(100.millis)))
+          worker  <- Sharding.messenger(Worker)
+          // a running message keeps the entity from being passivated
+          blocked <- worker.send("w1")(Block()).fork
+          _       <- state.running.get.repeatUntil(_ == 1)
+          running <- Sharding.localEntities(Worker)
+          _       <- worker.send("w1")(Unblock()) *> blocked.join
+          _       <- Sharding.localEntities(Worker).repeatUntil(_.isEmpty)
+        } yield assertTrue(running == Set("w1"))
+      },
+      test("Only the entities on the shards of this pod are listed") {
+        for {
+          _        <- startWorker()
+          worker   <- Sharding.messenger(Worker)
+          sharding <- ZIO.service[Sharding]
+          _        <- worker.send("w1")(Ping()) *> worker.send("w2")(Ping())
+          shard     = sharding.getShardId(Worker, "w1")
+          // the shard of w1 moves to another pod, which returns once its entities have stopped
+          moved    <- (sharding.unassign(Set(shard)) *> Sharding.localEntities(Worker))
+                        .ensuring(sharding.assign(Set(shard)))
+        } yield assertTrue(sharding.getShardId(Worker, "w2") != shard, moved == Set("w2"))
       },
       test("Messages replying with a value that a stream could inhabit can't be sent with send") {
         for {
