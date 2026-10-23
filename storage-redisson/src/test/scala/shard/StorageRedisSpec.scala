@@ -48,6 +48,17 @@ object StorageRedisSpec extends ZIOSpecDefault {
           actual <- ZIO.serviceWithZIO[Storage](_.getPods)
         } yield assertTrue(expected == actual)
       },
+      test("saving pods forgets the pods left out") {
+        val kept    = Pod(PodAddress("host1", 1), "1.0.0", role)
+        val removed = Pod(PodAddress("host2", 2), "2.0.0", role)
+        for {
+          _     <- ZIO.serviceWithZIO[Storage](_.savePods(Map(kept.address -> kept, removed.address -> removed)))
+          _     <- ZIO.serviceWithZIO[Storage](_.savePods(Map(kept.address -> kept)))
+          after <- ZIO.serviceWithZIO[Storage](_.getPods)
+          _     <- ZIO.serviceWithZIO[Storage](_.savePods(Map.empty))
+          empty <- ZIO.serviceWithZIO[Storage](_.getPods)
+        } yield assertTrue(after == Map(kept.address -> kept), empty.isEmpty)
+      },
       test("save and get assignments") {
         val expected = Map(1 -> Some(PodAddress("host1", 1)), 2 -> None)
         for {
