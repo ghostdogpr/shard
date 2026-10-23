@@ -89,7 +89,7 @@ object GrpcShardingSpec extends ZIOSpecDefault {
           } @@ TestAspect.timeout(10.seconds)
         )
       )
-    ) @@ sequential @@ withLiveClock
+    ) @@ sequential @@ withLiveClock @@ TestAspect.timeout(60.seconds)
 
   private def overGrpc(config: Config)(spec: Spec[Sharding & Storage & Config & Scope, Any]): Spec[Scope, Any] =
     spec.provideSomeShared[Scope](

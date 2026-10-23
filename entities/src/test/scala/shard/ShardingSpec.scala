@@ -29,9 +29,9 @@ object ShardingSpec extends ZIOSpecDefault {
         Storage.memory,
         ZLayer.succeed(Config.default.copy(simulateRemotePods = true))
       )
-    ) @@ sequential @@ withLiveClock
+    ) @@ sequential @@ withLiveClock @@ TestAspect.timeout(60.seconds)
 
-  // tests relying on the in-process transport's chunking and delivery order
+  // tests relying on the in-process transport's chunking, delivery order and synchronous cancellation
   val inProcess: String = "in-process"
 
   val tests: List[Spec[Sharding & Scope, Any]] =
@@ -111,9 +111,9 @@ object ShardingSpec extends ZIOSpecDefault {
           fiber   <- counter.stream("c1")(StreamingChanges()).take(2).tap(_ => latch.succeed(())).runCollect.fork
           _       <- latch.await
           _       <- fiber.interrupt
-          _       <- Clock.sleep(1 second)
-          res     <- counter.send("c1")(GetCounter())
-        } yield assertTrue(res == -1)
+          // the stream sets the counter to -1 when it ends
+          _       <- counter.send("c1")(GetCounter()).repeatUntil(_ == -1)
+        } yield assertCompletes
       },
       test("Response stream is cancelled when the entity stops") {
         for {
@@ -139,15 +139,16 @@ object ShardingSpec extends ZIOSpecDefault {
       },
       test("Entity termination with extension") {
         for {
-          counter <- startCounter(EntityOptions(maxIdleTime = Some(3.seconds)))
-          _       <- counter.sendDiscard("c3")(IncrementCounter())
-          c0      <- counter.send("c3")(GetCounter())
-          _       <- Clock.sleep(2 seconds)
-          _       <- counter.sendDiscard("c3")(IncrementCounter())
-          c1      <- counter.send("c3")(GetCounter())
-          _       <- Clock.sleep(4 seconds)
-          c2      <- counter.send("c3")(GetCounter()) // counter should be restarted
-        } yield assertTrue(c0 == 1, c1 == 2, c2 == 0)
+          state   <- startWorker(EntityOptions(maxIdleTime = Some(3.seconds)))
+          worker  <- Sharding.messenger(Worker)
+          _       <- worker.send("w1")(Ping())
+          _       <- Clock.sleep(1.second)
+          // the entity that receives this message is stopped 3s after it at the earliest
+          stopped <- worker
+                       .send("w1")(Instance())
+                       .flatMap(instance => state.finalized.changes.takeUntil(_ >= instance).runDrain)
+                       .timed
+        } yield assertTrue(stopped._1 >= 3.seconds.minus(50.millis)) // idle time is measured in milliseconds
       },
       test("Entity is not stopped while a message is running") {
         for {
@@ -158,9 +159,8 @@ object ShardingSpec extends ZIOSpecDefault {
           before <- state.finalized.get
           _      <- worker.send("w1")(Unblock())
           _      <- fiber.join
-          _      <- Clock.sleep(2.seconds)
-          after  <- state.finalized.get
-        } yield assertTrue(before == 0, after == 1)
+          _      <- state.finalized.changes.takeUntil(_ == 1).runDrain
+        } yield assertTrue(before == 0)
       },
       test("Messages still running are interrupted after entityTerminationTimeout, even Uninterruptible ones") {
         for {
@@ -180,7 +180,7 @@ object ShardingSpec extends ZIOSpecDefault {
           result._2 == (EntityInterrupted(Worker.name, "w1"), EntityInterrupted(Worker.name, "w3")),
           after == 0
         )
-      } @@ TestAspect.timeout(30.seconds),
+      },
       test("Entity terminated from a finalizer is still interrupted after the timeout") {
         for {
           state  <- startWorker()
@@ -188,35 +188,37 @@ object ShardingSpec extends ZIOSpecDefault {
           _      <- worker.sendDiscard("w2")(Block())
           _      <- state.running.get.repeatUntil(_ == 1)
           _      <- ZIO.unit.ensuring(Sharding.terminateLocalEntity(Worker, "w2"))
-          // 3s of termination timeout (Config.default)
-          _      <- Clock.sleep(5.seconds)
-          after  <- state.running.get
-        } yield assertTrue(after == 0)
+          _      <- state.running.changes.takeUntil(_ == 0).runDrain
+        } yield assertCompletes
       },
       test("Send timeout interrupts the message") {
         for {
           state  <- startWorker()
           worker <- Sharding.messenger(Worker, MessengerTimeout.Timeout(500.millis))
           error  <- worker.send("w1")(Block()).flip
-          _      <- Clock.sleep(200.millis)
-          after  <- state.running.get
+          _      <- state.running.changes.takeUntil(_ == 0).runDrain
           ping   <- worker.send("w1")(Ping()).exit // the entity processes the next message
-        } yield assertTrue(error == SendTimeout(Worker.name, "w1"), after == 0, ping.isSuccess)
+        } yield assertTrue(error == SendTimeout(Worker.name, "w1"), ping.isSuccess)
       },
-      test("Uninterruptible messages complete after a timeout") {
+      test("Uninterruptible messages complete after their sender stops waiting") {
         for {
           state  <- startWorker()
-          worker <- Sharding.messenger(Worker, MessengerTimeout.Timeout(200.millis))
-          error  <- worker.send("w1")(SlowUninterruptible()).flip
-          _      <- Clock.sleep(1.second)
-          done   <- state.completed.get
-        } yield assertTrue(error == SendTimeout(Worker.name, "w1"), done == 1)
+          worker <- Sharding.messenger(Worker)
+          sender <- worker.send("w1")(Gated()).fork
+          _      <- state.running.changes.takeUntil(_ == 1).runDrain
+          _      <- sender.interrupt
+          // gives the cancellation time to reach the entity, which must not interrupt the message
+          _      <- Clock.sleep(200.millis)
+          _      <- state.gate.succeed(())
+          _      <- state.completed.changes.takeUntil(_ == 1).runDrain
+        } yield assertCompletes
       },
       test("Uninterruptible messages are processed even if their sender stopped waiting before they started") {
         for {
           state   <- startWorker()
           worker  <- Sharding.messenger(Worker)
-          timed   <- Sharding.messenger(Worker, MessengerTimeout.Timeout(200.millis))
+          // long enough for the message to reach the mailbox before the timeout
+          timed   <- Sharding.messenger(Worker, MessengerTimeout.Timeout(1.second))
           blocked <- worker.send("w1")(Block()).fork
           _       <- state.running.get.repeatUntil(_ == 1)
           error   <- timed.send("w1")(SlowUninterruptible()).flip
@@ -244,7 +246,7 @@ object ShardingSpec extends ZIOSpecDefault {
           _       <- worker.sendDiscard("w1")(Block())
           _       <- worker.sendDiscard("w1")(Block())
           _       <- worker.sendDiscard("w1")(Block())
-          _       <- Clock.sleep(500.millis)
+          _       <- state.running.changes.takeUntil(_ == 2).runDrain
           running <- worker.send("w1")(Running())
           _       <- worker.send("w1")(Unblock())
         } yield assertTrue(running == 2)
@@ -282,16 +284,15 @@ object ShardingSpec extends ZIOSpecDefault {
           _      <- worker.send("w100")(Ping())
           done   <- state.completed.get
         } yield assertTrue(done == 0)
-      },
+      } @@ TestAspect.tag(inProcess),
       test("Cancelled stream messages don't prevent passivation") {
         for {
           state  <- startWorker(EntityOptions(maxIdleTime = Some(500.millis)))
           worker <- Sharding.messenger(Worker)
           // the message completes after its sender gave up
           _      <- worker.stream("w1")(SlowStream()).runCollect.timeout(100.millis)
-          _      <- Clock.sleep(2.seconds)
-          fin    <- state.finalized.get
-        } yield assertTrue(fin == 1)
+          _      <- state.finalized.changes.takeUntil(_ == 1).runDrain
+        } yield assertCompletes
       },
       test("Stream messages whose sender is interrupted right as they reply don't prevent passivation") {
         for {
@@ -302,9 +303,8 @@ object ShardingSpec extends ZIOSpecDefault {
             ZIO.foreachDiscard(1 to 300)(i =>
               worker.stream("w1")(QuickStream()).runDrain.fork.flatMap(ZIO.yieldNow.repeatN(i % 100) *> _.interrupt)
             )
-          _      <- Clock.sleep(2.seconds)
-          fin    <- state.finalized.get
-        } yield assertTrue(fin == 1)
+          _      <- state.finalized.changes.takeUntil(_ == 1).runDrain
+        } yield assertCompletes
       },
       test("Messages replying with a stream can't be sent with sendDiscard") {
         typeCheck(
@@ -450,10 +450,10 @@ object ShardingSpec extends ZIOSpecDefault {
                        .duplex("c1")(AddAndStreamChanges(), ZStream.fromIterable(List(1, 2, 3)))
                        .takeUntil(_ == 6)
                        .runCollect
-          _       <- Clock.sleep(1 second)
-          res     <- counter.send("c1")(GetCounter())
+          // the stream sets the counter to -1 when it ends
+          _       <- counter.send("c1")(GetCounter()).repeatUntil(_ == -1)
           empty   <- counter.duplex("c1")(Doubled(), ZStream.empty).runCollect
-        } yield assertTrue(items.last == 6, res == -1, empty.isEmpty)
+        } yield assertTrue(items.last == 6, empty.isEmpty)
       },
       test("Duplex: the returned stream fails if the input stream fails, even when the replies end with the inputs") {
         for {
@@ -492,9 +492,10 @@ object ShardingSpec extends ZIOSpecDefault {
         for {
           state  <- startWorker(EntityOptions(mailboxCapacity = 2))
           worker <- Sharding.messenger(Worker)
-          error  <- worker.sendStream("w1")(ZStream(SlowUninterruptible(), Complete(), Complete(), Complete())).flip
-          _      <- Clock.sleep(1.second)
-          _      <- worker.send("w1")(Ping())
+          error  <- worker.sendStream("w1")(ZStream(Gated(), Complete(), Complete(), Complete())).flip
+          _      <- state.gate.succeed(())
+          // accepted once the mailbox has room, and processed after the messages accepted before
+          _      <- worker.send("w1")(Ping()).retryWhile(_.isInstanceOf[MailboxFull])
           done   <- state.completed.get
         } yield assertTrue(error == MailboxFull(Worker.name, "w1"), done == 2) // the messages accepted are processed
       },
@@ -524,7 +525,7 @@ object ShardingSpec extends ZIOSpecDefault {
                          worker(state)(entityId) <* ZIO.addFinalizer(finalized.succeed(()) *> ZIO.dieMessage("boom"))
                        )
           _         <- Sharding.registerScoped
-          worker    <- Sharding.messenger(Worker, MessengerTimeout.Timeout(2.seconds))
+          worker    <- Sharding.messenger(Worker)
           _         <- worker.send("w1")(Ping())
           _         <- Sharding.terminateLocalEntity(Worker, "w1")
           _         <- finalized.await
@@ -602,7 +603,7 @@ object ShardingSpec extends ZIOSpecDefault {
         _       <- latch.await
         _       <- counter.send("c1")(IncrementCounter())
         _       <- Sharding.terminateLocalEntity(Counter, "c1") // restarted from 0, the stream resumes from 2
-        _       <- Clock.sleep(500.millis)
+        _       <- counter.send("c1")(Subscriptions()).repeatUntil(_ == 1)
         _       <- counter.send("c1")(IncrementCounter())
         _       <- counter.send("c1")(IncrementCounter())
         _       <- counter.send("c1")(IncrementCounter())
@@ -630,6 +631,8 @@ object CounterActor {
     // replies with a Duplex that throws when called
     case ThrowingDuplex()                   extends CounterMessage[Nothing, Duplex[Int, Nothing, Int]]
     case TriggerTerminate()                 extends CounterMessage[Nothing, Unit]
+    // number of streams of changes that started on this entity
+    case Subscriptions()                    extends CounterMessage[Nothing, Int]
   }
 
   object Counter extends EntityType[CounterMessage]("counter")
@@ -644,10 +647,15 @@ object CounterActor {
 
   def behavior(entityId: String): URIO[Sharding & Scope, Counter.Handler] =
     for {
-      sharding <- ZIO.service[Sharding]
-      state    <- SubscriptionRef.make(0)
-      _        <- ZIO.logInfo(s"Started entity $entityId")
+      sharding      <- ZIO.service[Sharding]
+      state         <- SubscriptionRef.make(0)
+      subscriptions <- Ref.make(0)
+      _             <- ZIO.logInfo(s"Started entity $entityId")
     } yield new Counter.Handler {
+      // counted once subscribed, when the current value is emitted
+      private val changes: ZStream[Any, Nothing, Int] =
+        state.changes.mapAccumZIO(true)((first, n) => subscriptions.update(_ + 1).when(first).as((false, n)))
+
       def handle[E, A](message: CounterMessage[E, A]): IO[E, A] =
         message match {
           case GetCounter()              => state.get
@@ -655,14 +663,14 @@ object CounterActor {
           case DecrementCounter()        => state.update(_ - 1)
           case Fail()                    => ZIO.fail(CounterError("failed"))
           case Die()                     => ZIO.die(new Exception("boom"))
-          case StreamingChanges(from)    => ZIO.succeed(Streamed(state.changes.filter(_ >= from).ensuring(state.set(-1))))
+          case StreamingChanges(from)    => ZIO.succeed(Streamed(changes.filter(_ >= from).ensuring(state.set(-1))))
           case DyingStream()             =>
             ZIO.succeed(Streamed(ZStream.fromIterable(1 to 1000) ++ ZStream.die(new Exception("boom"))))
           case Chunked()                 => ZIO.succeed(Streamed(ZStream.fromChunks(Chunk(1, 2, 3), Chunk(4, 5))))
           case AddAndStreamChanges(from) =>
             ZIO.succeed(
               Duplex[Int, Nothing, Int](input =>
-                state.changes
+                changes
                   .filter(_ >= from)
                   .drainFork(input.mapZIO(n => state.update(_ + n)))
                   .ensuring(state.set(-1))
@@ -671,6 +679,7 @@ object CounterActor {
           case Doubled()                 => ZIO.succeed(Duplex[Int, Nothing, Int](_.map(_ * 2)))
           case ThrowingDuplex()          => ZIO.succeed(Duplex[Int, Nothing, Int](_ => throw new Exception("boom")))
           case TriggerTerminate()        => sharding.terminateLocalEntity(Counter, entityId)
+          case Subscriptions()           => subscriptions.get
         }
     }
 
@@ -693,6 +702,10 @@ object WorkerActor {
     case Complete()            extends WorkerMessage[Nothing, Unit]
     // counts as completed right away
     case CompleteNow()         extends WorkerMessage[Nothing, Unit]
+    // counts as running until the test opens the gate, then counts as completed
+    case Gated()               extends WorkerMessage[Nothing, Unit] with Uninterruptible
+    // number of the entity, counting from 1 each time it starts
+    case Instance()            extends WorkerMessage[Nothing, Int]
   }
 
   object Worker extends EntityType[WorkerMessage]("worker")
@@ -700,17 +713,30 @@ object WorkerActor {
   def startWorker(options: EntityOptions[WorkerMessage] = EntityOptions()): RIO[Sharding & Scope, WorkerState] =
     WorkerState.make.tap(state => Sharding.registerEntity(Worker, options)(worker(state)) *> Sharding.registerScoped)
 
-  case class WorkerState(running: Ref[Int], finalized: SubscriptionRef[Int], completed: Ref[Int])
+  case class WorkerState(
+    running: SubscriptionRef[Int],
+    finalized: SubscriptionRef[Int],
+    completed: SubscriptionRef[Int],
+    started: Ref[Int],
+    gate: Promise[Nothing, Unit]
+  )
 
   object WorkerState {
     val make: UIO[WorkerState] =
-      (Ref.make(0) <*> SubscriptionRef.make(0) <*> Ref.make(0)).map(WorkerState(_, _, _))
+      for {
+        running   <- SubscriptionRef.make(0)
+        finalized <- SubscriptionRef.make(0)
+        completed <- SubscriptionRef.make(0)
+        started   <- Ref.make(0)
+        gate      <- Promise.make[Nothing, Unit]
+      } yield WorkerState(running, finalized, completed, started, gate)
   }
 
   def worker(state: WorkerState)(entityId: String): URIO[Scope, Worker.Handler] =
     for {
-      unblock <- Promise.make[Nothing, Unit]
-      _       <- ZIO.addFinalizer(state.finalized.update(_ + 1))
+      unblock  <- Promise.make[Nothing, Unit]
+      instance <- state.started.updateAndGet(_ + 1)
+      _        <- ZIO.addFinalizer(state.finalized.update(_ + 1))
     } yield new Worker.Handler {
       private def running(effect: UIO[Unit]): UIO[Unit] =
         ZIO.acquireReleaseWith(state.running.update(_ + 1))(_ => state.running.update(_ - 1))(_ => effect)
@@ -727,6 +753,8 @@ object WorkerActor {
           case QuickStream()         => ZIO.succeed(Streamed(ZStream(1, 2, 3)))
           case Complete()            => Clock.sleep(10.millis) *> state.completed.update(_ + 1)
           case CompleteNow()         => state.completed.update(_ + 1)
+          case Gated()               => running(state.gate.await) *> state.completed.update(_ + 1)
+          case Instance()            => ZIO.succeed(instance)
         }
     }
 }

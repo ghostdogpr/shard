@@ -3,7 +3,6 @@ package example
 import shard._
 import shard.interfaces.{ Pods, PodsHealth, ShardManagerClient, Storage }
 import io.grpc.{ Metadata, Status }
-import zio.Clock.ClockLive
 import zio.test._
 import zio.{ Config => _, _ }
 
@@ -15,7 +14,9 @@ object ShardManagerAuthExampleSpec extends ZIOSpecDefault {
 
   val shardManagerServerLayer: ZLayer[ManagerConfig, Throwable, Unit] =
     ZLayer.makeSome[ManagerConfig, Unit](
-      ZLayer(Server.run.forkDaemon *> ClockLive.sleep(3 seconds).unit),
+      ZLayer.scoped(
+        ZIO.serviceWithZIO[ManagerConfig](config => Server.run.forkScoped *> EndToEndSpec.awaitPort(config.apiPort))
+      ),
       ZLayer.succeed(
         GrpcConfig.default.copy(
           serverInterceptors = Seq(
