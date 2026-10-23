@@ -18,8 +18,8 @@ object BroadcastingSpec extends ZIOSpecDefault {
           _           <- Sharding.registerTopic(IncrementerActor.Incrementer)(IncrementerActor.behavior)
           _           <- Sharding.registerScoped
           incrementer <- Sharding.broadcaster(IncrementerActor.Incrementer)
+          // returns once the message is in the mailbox, so it is processed before the next one
           _           <- incrementer.broadcastDiscard("c1")(IncrementerActor.IncrementerMessage.BroadcastIncrement())
-          _           <- Clock.sleep(1 second)
           c1          <- incrementer.broadcast("c1")(IncrementerActor.IncrementerMessage.GetIncrement())
         } yield assertTrue(
           // Here we have just one pod, so there will be just one incrementer
