@@ -7,9 +7,9 @@ import zio._
 import zio.stream.ZStream
 
 /**
- * Type alias for a proteus [[ServerInterceptor]] scoped to shard's effect types
- * ([[IO]] and [[ZStream]] with [[StatusException]] errors) and the default
- * [[GrpcContext]]. Use the smart constructors in the companion object — or implement
+ * Type alias for a proteus `ServerInterceptor` scoped to shard's effect types
+ * (`IO` and `ZStream` with `StatusException` errors) and the default
+ * `GrpcContext`. Use the smart constructors in the companion object — or implement
  * the trait directly for advanced pre/post/error wrapping.
  */
 type ShardingServerInterceptor = ServerInterceptor[
