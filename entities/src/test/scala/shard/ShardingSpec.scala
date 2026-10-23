@@ -580,9 +580,7 @@ object ShardingSpec extends ZIOSpecDefault {
       },
       test("An interceptor's log annotations apply to the start, the messages and the finalizers of an entity") {
         val interceptor = new EntityInterceptor {
-          override def aroundEntity[R, E, A](recipientType: String, entityId: String)(
-            effect: ZIO[R, E, A]
-          ): ZIO[R, E, A] =
+          override def aroundEntity[E, A](recipientType: String, entityId: String)(effect: IO[E, A]): IO[E, A] =
             ZIO.logAnnotate("entity", s"$recipientType/$entityId")(effect)
         }
         for {
@@ -614,14 +612,12 @@ object ShardingSpec extends ZIOSpecDefault {
       } @@ TestAspect.tag(inProcess),
       test("An interceptor wraps each message and gets its outcome") {
         for {
-          outcomes   <- Ref.make(Chunk.empty[(Any, Either[Option[Any], Any])])
+          outcomes   <- Ref.make(Chunk.empty[(Any, Exit[Any, Any])])
           interceptor = new EntityInterceptor {
                           override def aroundMessage[E, A](recipientType: String, entityId: String, message: Any)(
                             effect: IO[E, A]
                           ): IO[E, A] =
-                            effect.onExit(exit =>
-                              outcomes.update(_ :+ (message -> exit.foldExit(c => Left(c.failureOption), Right(_))))
-                            )
+                            effect.onExit(exit => outcomes.update(_ :+ (message -> exit)))
                         }
           counter    <- startCounter(EntityOptions(interceptor = interceptor))
           _          <- counter.send("c1")(IncrementCounter())
@@ -631,21 +627,19 @@ object ShardingSpec extends ZIOSpecDefault {
           recorded   <- outcomes.get
         } yield assertTrue(
           recorded.take(3) == Chunk(
-            IncrementCounter() -> Right(()),
-            Fail()             -> Left(Some(CounterError("failed"))),
-            GetCounter()       -> Right(1)
+            IncrementCounter() -> Exit.unit,
+            Fail()             -> Exit.fail(CounterError("failed")),
+            GetCounter()       -> Exit.succeed(1)
           ),
           // the creation of the stream, not the stream itself
-          recorded.drop(3).map(_._1) == Chunk(Chunked()),
-          recorded.drop(3).forall(_._2.exists(_.isInstanceOf[Streamed[?, ?]])),
+          recorded.drop(3).map((message, exit) => message -> exit.exists(_.isInstanceOf[Streamed[?, ?]])) ==
+            Chunk(Chunked() -> true),
           items == Chunk(1, 2, 3, 4, 5)
         )
       },
       test("Interceptors that die are treated like handlers that die") {
         val interceptor = new EntityInterceptor {
-          override def aroundEntity[R, E, A](recipientType: String, entityId: String)(
-            effect: ZIO[R, E, A]
-          ): ZIO[R, E, A] =
+          override def aroundEntity[E, A](recipientType: String, entityId: String)(effect: IO[E, A]): IO[E, A] =
             if (entityId == "bad") ZIO.dieMessage("bad entity") else effect
 
           override def aroundMessage[E, A](recipientType: String, entityId: String, message: Any)(

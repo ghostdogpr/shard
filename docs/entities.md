@@ -52,7 +52,7 @@ An `EntityInterceptor` wraps every entity of a type, e.g. to add log annotations
 
 ```scala
 val interceptor = new EntityInterceptor {
-  override def aroundEntity[R, E, A](recipientType: String, entityId: String)(effect: ZIO[R, E, A]): ZIO[R, E, A] =
+  override def aroundEntity[E, A](recipientType: String, entityId: String)(effect: IO[E, A]): IO[E, A] =
     ZIO.logAnnotate("entity", s"$recipientType/$entityId")(effect)
 
   override def aroundMessage[E, A](recipientType: String, entityId: String, message: Any)(effect: IO[E, A]): IO[E, A] =
