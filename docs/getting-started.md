@@ -107,8 +107,9 @@ We now need to define our **entity behavior**: what kind of messages can our ent
 
 First, we need the following dependencies:
 ```
-libraryDependencies += "com.github.ghostdogpr" %% "shard-entities"      % "@VERSION@"
-libraryDependencies += "com.github.ghostdogpr" %% "shard-protocol-grpc" % "@VERSION@"
+libraryDependencies += "com.github.ghostdogpr" %% "shard-entities"           % "@VERSION@"
+libraryDependencies += "com.github.ghostdogpr" %% "shard-protocol-grpc"      % "@VERSION@"
+libraryDependencies += "com.github.ghostdogpr" %% "shard-serialization-kryo" % "@VERSION@"
 ```
 
 Let's start with defining the messages our entities can receive. We will have 2: one for joining a guild and one for leaving.

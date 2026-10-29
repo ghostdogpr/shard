@@ -23,7 +23,7 @@ No. Shard covers only a small portion of what Akka/Pekko does, specifically the 
 
 ## What Scala and JDK versions are required?
 
-Scala 3.9.x LTS and later, on JDK 17 or newer.
+Scala 3.9.x LTS and later, on JDK 17 or newer. The Sage storage module (`shard-storage-sage`) requires JDK 21 or newer.
 
 ## Is Scala.js or Scala Native supported?
 
