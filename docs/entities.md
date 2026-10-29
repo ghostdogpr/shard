@@ -28,6 +28,7 @@ Entity and topic types must all have different names.
 
 - The `Scope` given to the behavior is closed when the entity stops, after its last message was processed: use it to acquire resources or save the entity state.
 - If the behavior fails, the messages sent to the entity fail with `EntityDefect`.
+- An entity runs with the fiber refs of the `registerEntity` call (e.g. its log annotations), not with those of the sender of the message that started it.
 - If processing a message dies with a defect, its sender receives `EntityDefect`, the entity is stopped and the next message starts a new one.
 - `Sharding.terminateLocalEntity` stops an entity explicitly (typically from the entity itself), after completing the messages it already received. The next message starts it again.
 

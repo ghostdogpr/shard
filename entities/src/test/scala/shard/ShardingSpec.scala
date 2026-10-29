@@ -617,6 +617,24 @@ object ShardingSpec extends ZIOSpecDefault {
             Chunk("start", "message", "finalizer")
         )
       } @@ TestAspect.tag(inProcess),
+      test("An entity runs with the context of its registration, not of the message that started it") {
+        for {
+          state  <- WorkerState.make
+          _      <- ZIO.logAnnotate("registered", "worker")(
+                      Sharding.registerEntity(Worker)(entityId => ZIO.log("start") *> worker(state)(entityId))
+                    )
+          _      <- Sharding.registerScoped
+          worker <- Sharding.messenger(Worker)
+          _      <- ZIO.logAnnotate("request", "first")(worker.send("w1")(Log()))
+          _      <- ZIO.logAnnotate("request", "second")(worker.send("w1")(Log()))
+          logs   <- ZTestLogger.logOutput
+        } yield assertTrue(
+          logs.collect {
+            case log if log.annotations.contains("registered") || log.annotations.contains("request") =>
+              log.message() -> log.annotations
+          } == Chunk.fromIterable(List("start", "message", "message").map(_ -> Map("registered" -> "worker")))
+        )
+      },
       test("An interceptor wraps each message and gets its outcome") {
         for {
           outcomes   <- Ref.make(Chunk.empty[(Any, Exit[Any, Any])])
