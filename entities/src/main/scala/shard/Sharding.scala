@@ -30,7 +30,7 @@ class Sharding private (
   storage: Storage,
   eventsHub: Hub[ShardingRegistrationEvent]
 ) { self =>
-  private[shard] def getShardId(recipientType: RecipientType[?], entityId: String): ShardId =
+  def getShardId(recipientType: RecipientType[?], entityId: String): ShardId =
     recipientType.getShardId(entityId, config.numberOfShards)
 
   val register: Task[Unit] =
@@ -713,6 +713,12 @@ object Sharding {
     sendTimeout: MessengerTimeout = MessengerTimeout.InheritConfigTimeout
   ): URIO[Sharding, Broadcaster[Msg]] =
     ZIO.serviceWith[Sharding](_.broadcaster(topicType, sendTimeout))
+
+  /**
+   * Get the shard of an entity or topic, as computed by its type's `getShardId` with the configured number of shards.
+   */
+  def getShardId(recipientType: RecipientType[?], entityId: String): URIO[Sharding, ShardId] =
+    ZIO.serviceWith[Sharding](_.getShardId(recipientType, entityId))
 
   /**
    * Get the list of shards and the pod that holds them.

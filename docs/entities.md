@@ -178,6 +178,11 @@ for {
 `Sharding.localEntities` returns the IDs of the entities of a type currently running on this pod (or the topics, for a topic type).
 An entity is included from its start until its `Scope` is closed, which is useful for debug or admin pages.
 
+## Shard of an entity
+
+`Sharding.getShardId` returns the shard of an entity (or topic), computed by its type's `getShardId` with the configured number of shards.
+Together with `Sharding.getAssignments`, it tells which pod holds an entity.
+
 ## Registered pods
 
 `Sharding.getPods` returns the addresses of the pods holding shards of this pod's role.
