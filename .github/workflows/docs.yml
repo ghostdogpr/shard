@@ -27,8 +27,12 @@ jobs:
           if [ "$GITHUB_EVENT_NAME" = "release" ]; then
             VERSION="${GITHUB_REF_NAME#v}"
           else
-            # the latest release, including pre-releases (gh release view only returns full releases)
-            VERSION=$(gh release list --exclude-drafts --limit 1 --json tagName -q '.[0].tagName' | sed 's/^v//')
+            # the latest stable release, or the latest pre-release if there is none
+            TAG=$(gh release list --exclude-drafts --exclude-pre-releases --limit 1 --json tagName -q '.[0].tagName')
+            if [ -z "$TAG" ]; then
+              TAG=$(gh release list --exclude-drafts --limit 1 --json tagName -q '.[0].tagName')
+            fi
+            VERSION="${TAG#v}"
           fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
         env:
