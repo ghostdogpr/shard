@@ -1,6 +1,6 @@
 # Migrating from Shardcake
 
-Shard 3.0 is the successor of [Shardcake](https://github.com/devsisters/shardcake) 2.x. Most concepts are unchanged (entities, topics, singletons, shards, the Shard Manager), but the messaging API is now typed, pods have roles, and the protocol between pods and with the Shard Manager has changed.
+Shard 3.0 is the successor of [Shardcake](https://github.com/devsisters/shardcake) 2.x. Most concepts are unchanged (entities, topics, singletons, shards, the Shard Manager), but the messaging API is now typed, a Shard Manager can manage several groups of pods, and the protocol between pods and with the Shard Manager has changed.
 
 This section lists what to change in your code, then how to upgrade a running cluster.
 
@@ -143,11 +143,11 @@ A few behaviors changed:
 
 ## Roles
 
-Shard adds **roles**: each pod has a role, and the Shard Manager manages each role independently, with its own shards, assignments and rebalancing.
-Pods only send messages to entities hosted by pods of the same role, and a singleton runs on one pod of each role that registers it.
-This lets you dedicate pods to some entity types, or scale parts of your system independently (see [Configuration](config.md#sharding-configuration)).
+A single Shard Manager can now manage several groups of pods, called **roles**. Where Shardcake needed one Shard Manager (and one storage) per group of pods, e.g. per service, Shard can use one for all of them.
+Each pod has a role, and each role is managed independently, as if it had its own Shard Manager: it has its own shards, assignments and rebalancing.
+Pods only send messages to entities hosted by pods of the same role, and a singleton runs on one pod of each role that registers it (see [Configuration](config.md#sharding-configuration)).
 
-If you don't need them, all pods have the `default` role and behave as before, but a few APIs changed:
+If you only have one group of pods, they all have the `default` role and behave as before, but a few APIs changed:
 - `Config.role` sets the role of a pod (`Role.default` by default).
 - `ManagerConfig.numberOfShards` is a function `Role => Int`. Use `_ => 300` to keep a single number of shards.
 - `RedisConfig.assignmentsKey` is a function `Role => String` (`shard_assignments:<role>` by default).
