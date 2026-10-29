@@ -90,7 +90,8 @@ This is done in parallel.
 6. If there were any pods that failed to be pinged, unassigned or assigned, we check with the Health API if those pods are still alive.
 If they are not, we unregister them and trigger another rebalance immediately after.
 7. Shard Manager persists the new assignments to the chosen Storage and pods get notified of the changes.
-8. If anything failed, another rebalance will be triggered after a retry interval defined by `rebalanceRetryInterval` (see [Config](config.md#shard-manager-configuration)).
+8. If a pod failed during a rebalance triggered by a pod unregistering, another rebalance will be triggered after a retry interval defined by `rebalanceRetryInterval` (see [Config](config.md#shard-manager-configuration)).
+Other failures are handled by the next regular rebalance.
 
 ### Assignment Algorithm
 
@@ -101,10 +102,10 @@ It also cares about the pod version, so that in case of a rolling update, shards
 2. For each pod: if the number of shards assigned to this pod is higher than the average, randomly pick a number of these shards equal to the difference.
 Those are called `extraShardsToAllocate`.
 If some pods have different versions, `extraShardsToAllocate` is set to empty (it means we’re in the middle of a rolling update, we don’t want to rebalance).
-3. Shards to rebalance =  unassigned shards + `extraShardsToAllocate`.
-We sort them to handle unassigned shards first, then shards on the pods with most shards, then shards on old pods.
+3. If some shards are unassigned (e.g. a pod unregistered), only those are rebalanced. Otherwise, the shards to rebalance are `extraShardsToAllocate`.
+We sort them to handle shards on the pods with most shards first, then shards on the pods that registered first.
 4. For each shard to rebalance:
-  1. Find the pod that has the least amount of shards. Pods that don’t have the latest version are excluded from this search (we don’t want to assign shards to old pods since they will be stopped soon).
+  1. Find the pod that has the least amount of shards. Pods that don’t have the latest version are excluded from this search (we don’t want to assign shards to old pods since they will be stopped soon). During a regular rebalance, pods that already received `rebalanceRate` × the number of shards are also excluded.
   2. If that pod is the pod the shard is currently assigned to, don’t create any assignments.
   3. If that pod has only 1 less shard than the currently assigned pod, don’t create any assignments (not worth rebalancing if they have only 1 difference).
   4. Otherwise, create a new assignment for that shard to that pod, and an unassignment for that shard from its previous pod (if any).

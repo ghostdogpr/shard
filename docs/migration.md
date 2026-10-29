@@ -151,6 +151,7 @@ If you only have one group of pods, they all have the `default` role and behave 
 - `Config.role` sets the role of a pod (`Role.default` by default).
 - `ManagerConfig.numberOfShards` is a function `Role => Int`. Use `_ => 300` to keep a single number of shards.
 - `RedisConfig.assignmentsKey` is a function `Role => String` (`shard_assignments:<role>` by default).
+- `K8sConfig.namespace` and `K8sConfig.labelSelector` are functions of the role.
 - Metrics that depend on a role are tagged with `role`.
 
 ## Configuration

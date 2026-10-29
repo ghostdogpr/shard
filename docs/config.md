@@ -2,7 +2,7 @@
 
 ## Sharding Configuration
 
-Here's the list of thing you can configure on the pod side:
+Here's the list of things you can configure on the pod side:
 - `role`: the role of the current pod (defaults to `Role.default`)
 ::: tip Pod Roles
 A `Role` is a tag (a simple wrapper around a `String` name) attached to each pod. Pods with the same role share a pool of shards, while pods with different roles are managed independently by the Shard Manager (each role has its own set of shards, its own rebalancing, and its own assignment state).
@@ -41,11 +41,12 @@ This `serverVersion` allows the Shard Manager to know which pods are old and whi
 - `refreshAssignmentsRetryInterval`: retry interval in case of failure getting shard assignments from storage
 - `unhealthyPodReportInterval`: interval to report unhealthy pods to the Shard Manager (this exists to prevent calling the Shard Manager for each failed message)
 - `simulateRemotePods`: disable optimizations when sending a message to an entity hosted on the local shards (this will force serialization of all messages)
+- `unregisterRetrySchedule`: retry schedule for unregistering the pod from the Shard Manager when it stops
 - `entityInterceptor`: an `EntityInterceptor[AnyMessage]` applied to the entities of every type, around the interceptor of each type (see [Interceptors](entities.md#interceptors)). It is a no-op by default.
 
 ## Shard Manager Configuration
 
-Here's the list of thing you can configure on the Shard Manager side:
+Here's the list of things you can configure on the Shard Manager side:
 - `numberOfShards`: a function `Role => Int` returning the number of shards for a given role (see above)
 ::: tip Why a function?
 Because each role has its own pool of shards, you can pick a different number of shards for each role.
@@ -66,3 +67,13 @@ This is particularly useful if starting entities has a performance cost (e.g. lo
 
 When a pod is leaving, its shards need to be immediately rebalanced so the ratio is not used in that case.
 :::
+
+## gRPC Configuration
+
+When using `shard-protocol-grpc`, both pods and the Shard Manager require a `GrpcConfig` (`GrpcConfig.default` uses the defaults below):
+- `maxInboundMessageSize`: maximum size of a message received by the gRPC clients and servers (32 MB by default)
+- `executor`: a custom executor given to grpc-java for its clients and servers (none by default)
+- `shutdownTimeout`: time to wait for the gRPC server and channels to stop before forcing them (3 seconds by default)
+- `streamingPrefetch`: number of messages fetched ahead of the consumer in streaming calls (16 by default)
+- `clientInterceptors`: grpc-java `ClientInterceptor`s applied to the calls made by pods and by the Shard Manager, e.g. to add headers for tracing. `ShardingClientInterceptor.headersUpdater` builds one that updates the headers of each call.
+- `serverInterceptors`: `ShardingServerInterceptor`s applied to the calls received by pods and by the Shard Manager, e.g. for logging or authentication. `ShardingServerInterceptor.beforeEach` builds one that runs an effect before each call.

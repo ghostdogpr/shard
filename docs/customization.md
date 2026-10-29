@@ -27,15 +27,15 @@ Assignments are stored per `Role`, since each role has its own independent set o
 
 For testing, you can use the `Storage.memory` layer that keeps data in memory.
 
-Shard provides an implementation of `Storage` using Redis (or Valkey) with the [Sage](https://ghostdogpr.github.io/sage/) client. To use it, add the following dependency:
+Shard provides an implementation of `Storage` using Redis (or Valkey) with the [Sage](https://ghostdogpr.github.io/sage/) client, which requires JDK 21 or later. To use it, add the following dependency:
 ```scala
 libraryDependencies += "com.github.ghostdogpr" %% "shard-storage-sage" % "@VERSION@"
 ```
 You can then simply use the `StorageRedis.live` layer.
 
 It requires a `RedisConfig` with the following options:
-- `assignmentsKey`: the key to store shard assignments in Redis
-- `podsKey`: the key to store registered pods in Redis
+- `assignmentsKey`: a function returning the key to store the shard assignments of a role in Redis (`shard_assignments:<role>` by default)
+- `podsKey`: the key to store registered pods in Redis (`pods` by default)
 
 It also requires a `SageClient`. Here's an example how to build it:
 
@@ -202,7 +202,11 @@ Shard provides an implementation of `PodsHealth` using the [Kubernetes](https://
 ```scala
 libraryDependencies += "com.github.ghostdogpr" %% "shard-health-k8s" % "@VERSION@"
 ```
-You can then simply use the `K8sPodsHealth.live` layer. This is requiring a `Pods` layer that comes from [zio-k8s](https://coralogix.github.io/zio-k8s/docs/overview/overview_gettingstarted).
+You can then simply use the `K8sPodsHealth.live` layer. This is requiring a `Pods` layer that comes from [zio-k8s](https://coralogix.github.io/zio-k8s/docs/overview/overview_gettingstarted), and a `K8sConfig` with the following options (`K8sConfig.default` caches 500 pod statuses for 3 seconds and looks in all namespaces):
+- `cacheSize`: how many pod statuses to keep in cache
+- `cacheDuration`: how long to keep a pod status in cache
+- `namespace`: a function returning the namespace to look for the pods of a role in (all namespaces if `None`)
+- `labelSelector`: a function returning a label selector to filter the pods of a role (no filter if `None`)
 
 ::: tip Examples
 Check the [examples](https://github.com/ghostdogpr/shard/tree/series/3.x/examples/src/main/scala/example/complex) folder that contains a full example using Redis, gRPC and the Kryo message codec.
