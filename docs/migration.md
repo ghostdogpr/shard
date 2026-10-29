@@ -1,6 +1,6 @@
 # Migrating from Shardcake
 
-Shard 3.0 is the successor of [Shardcake](https://github.com/devsisters/shardcake) 2.x. Most concepts are unchanged (entities, topics, singletons, shards, roles, the Shard Manager), but the messaging API is now typed, and the protocol between pods and with the Shard Manager has changed.
+Shard 3.0 is the successor of [Shardcake](https://github.com/devsisters/shardcake) 2.x. Most concepts are unchanged (entities, topics, singletons, shards, the Shard Manager), but the messaging API is now typed, pods have roles, and the protocol between pods and with the Shard Manager has changed.
 
 This section lists what to change in your code, then how to upgrade a running cluster.
 
@@ -141,6 +141,18 @@ A few behaviors changed:
 - When the processing of a message times out, it is interrupted (unless it is `Uninterruptible`).
 - When an entity is full, messages fail with `MailboxFull` (see `mailboxCapacity`).
 
+## Roles
+
+Shard adds **roles**: each pod has a role, and the Shard Manager manages each role independently, with its own shards, assignments and rebalancing.
+Pods only send messages to entities hosted by pods of the same role, and a singleton runs on one pod of each role that registers it.
+This lets you dedicate pods to some entity types, or scale parts of your system independently (see [Configuration](config.md#sharding-configuration)).
+
+If you don't need them, all pods have the `default` role and behave as before, but a few APIs changed:
+- `Config.role` sets the role of a pod (`Role.default` by default).
+- `ManagerConfig.numberOfShards` is a function `Role => Int`. Use `_ => 300` to keep a single number of shards.
+- `RedisConfig.assignmentsKey` is a function `Role => String` (`shard_assignments:<role>` by default).
+- Metrics that depend on a role are tagged with `role`.
+
 ## Configuration
 
 On pods, `Config.shardManagerUri` is replaced by `shardManagerHost`, `shardManagerPort` and `shardManagerTimeout`, since the Shard Manager API now uses gRPC instead of GraphQL.
@@ -155,31 +167,30 @@ Config.default.copy(shardManagerUri = uri"http://shard-manager:8080/api/graphql"
 Config.default.copy(shardManagerHost = "shard-manager", shardManagerPort = 8080)
 ```
 
-`Config` also has a new `role` (see [Configuration](config.md#sharding-configuration)) and `entityInterceptor`.
+`Config` also has a new `role` (see [Roles](#roles)) and `entityInterceptor` (see [Interceptors](entities.md#interceptors)).
 
 ## Shard Manager
 
 - `Server.run()` becomes `Server.run`, and requires a `GrpcConfig`. It serves a gRPC API on `apiPort` instead of a GraphQL API over HTTP, along with the standard gRPC health service. Kubernetes probes should use `grpc` instead of `httpGet` on `/health`.
 - The Shard Manager no longer depends on zio-http and Caliban. `Server.run` doesn't take a zio-http `HandlerAspect` anymore: use `GrpcConfig.serverInterceptors` to wrap the API calls instead.
-- `ManagerConfig.numberOfShards` is a function `Role => Int`. Use `_ => 300` if you don't use roles.
 - Tools that called the GraphQL API can use the gRPC API instead, or `Sharding.getAssignments` and `Sharding.getRegisteredPods` from a pod.
 
 ## Storage
 
 The Redis storage has a new default implementation, `shard-storage-sage`, which uses the [Sage](https://ghostdogpr.github.io/sage/) client. The redis4cats (`shard-storage-redis`) and Redisson (`shard-storage-redisson`) implementations are still available (see [Storage](customization.md#storage)).
 
-`RedisConfig.assignmentsKey` is now a function `Role => String`, since each role has its own assignments. The format of the stored pods changed, so Shardcake and Shard can't share the same data (see [below](#upgrading-a-running-cluster)).
+`RedisConfig.assignmentsKey` takes a role (see [Roles](#roles)). The format of the stored pods changed, so Shardcake and Shard can't share the same data (see [below](#upgrading-a-running-cluster)).
 
 ## Custom implementations
 
 If you implemented the pluggable interfaces yourself:
-- `Storage` methods for assignments take a `Role`, and `Pod` has a `role`.
+- `Storage` methods for assignments take a `Role`, and `Pod` has a `role` (see [Roles](#roles)).
 - `Pods` sends `BinaryMessage` and receives `BinaryReply`, which carries the outcome of the message (success, typed failure, defect, interruption, etc.) instead of optional bytes.
 - `Serialization` is replaced by `MessageCodec[Msg]`, which also encodes the replies and errors of each message.
 
 ## Metrics
 
-Metrics are prefixed with `shard.` instead of `shardcake.` (e.g. `shard.entities`), and those that depend on a role are tagged with `role`. Update your dashboards and alerts accordingly (see [Metrics](metrics.md)).
+Metrics are prefixed with `shard.` instead of `shardcake.` (e.g. `shard.entities`). Update your dashboards and alerts accordingly (see [Metrics](metrics.md)).
 
 ## Upgrading a running cluster
 
