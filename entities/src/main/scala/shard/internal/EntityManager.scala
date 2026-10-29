@@ -97,10 +97,11 @@ private[shard] object EntityManager {
     options: EntityOptions[Msg]
   ): URIO[Scope, EntityManager[Msg]] =
     for {
-      entities <- Ref.Synchronized.make[Map[String, RunningEntity[Msg]]](Map())
-      closed   <- Ref.make(false)
-      manager   = new EntityManager(recipientType, makeHandler, entities, closed, sharding, config, options)
-      _        <- manager.reaper.interruptible.forkScoped
+      entities   <- Ref.Synchronized.make[Map[String, RunningEntity[Msg]]](Map())
+      closed     <- Ref.make(false)
+      registered <- ZIO.getFiberRefs
+      manager     = new EntityManager(recipientType, makeHandler, entities, closed, registered, sharding, config, options)
+      _          <- manager.reaper.interruptible.forkScoped
     } yield manager
 }
 
@@ -113,6 +114,7 @@ private[shard] final class EntityManager[Msg[_, _]] private (
   makeHandler: String => URIO[Scope, EntityHandler[Msg]],
   entities: Ref.Synchronized[Map[String, EntityManager.RunningEntity[Msg]]],
   closed: Ref[Boolean],
+  registered: FiberRefs,
   sharding: Sharding,
   config: Config,
   options: EntityOptions[Msg]
@@ -242,7 +244,9 @@ private[shard] final class EntityManager[Msg[_, _]] private (
       terminated <- Promise.make[Nothing, Unit]
       entity      = new RunningEntity(entityId, mailbox, concurrent, state, drained, closing, terminated)
       _          <- gauge.increment
-      _          <- run(entity).forkDaemon
+      // the entity runs with the fiber refs of the registration (e.g. log annotations), not those of the message that
+      // started it, which may come from any sender
+      _          <- (ZIO.updateFiberRefs((fiberId, _) => registered.forkAs(fiberId)) *> run(entity)).forkDaemon
     } yield entity
 
   /**
