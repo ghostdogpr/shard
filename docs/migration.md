@@ -145,6 +145,7 @@ A few behaviors changed:
 
 On pods, `Config.shardManagerUri` is replaced by `shardManagerHost`, `shardManagerPort` and `shardManagerTimeout`, since the Shard Manager API now uses gRPC instead of GraphQL.
 `ShardManagerClient.liveWithSttp` becomes `ShardManagerClient.live`, which requires a `GrpcConfig`.
+Pods no longer depend on sttp and caliban-client: the client uses the same gRPC library as the communication between pods.
 
 ```scala
 // before
@@ -159,6 +160,7 @@ Config.default.copy(shardManagerHost = "shard-manager", shardManagerPort = 8080)
 ## Shard Manager
 
 - `Server.run()` becomes `Server.run`, and requires a `GrpcConfig`. It serves a gRPC API on `apiPort` instead of a GraphQL API over HTTP, along with the standard gRPC health service. Kubernetes probes should use `grpc` instead of `httpGet` on `/health`.
+- The Shard Manager no longer depends on zio-http and Caliban. `Server.run` doesn't take a zio-http `HandlerAspect` anymore: use `GrpcConfig.serverInterceptors` to wrap the API calls instead.
 - `ManagerConfig.numberOfShards` is a function `Role => Int`. Use `_ => 300` if you don't use roles.
 - Tools that called the GraphQL API can use the gRPC API instead, or `Sharding.getAssignments` and `Sharding.getRegisteredPods` from a pod.
 
