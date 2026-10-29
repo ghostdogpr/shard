@@ -29,6 +29,7 @@ export default defineConfig({
           { text: 'Configuration', link: '/config' },
           { text: 'Customization', link: '/customization' },
           { text: 'Metrics', link: '/metrics' },
+          { text: 'Migrating from Shardcake', link: '/migration' },
         ]
       },
       {
