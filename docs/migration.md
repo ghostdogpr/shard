@@ -51,7 +51,7 @@ import shard.kryo.given
 
 object Guild extends EntityType[GuildMessage]("guild")
 ```
-Remove `Serialization` from the layers given to `Sharding.live`. See [Message Codec](customization.md#message-codec) for the other backends, including Proteus.
+Remove `Serialization` from the layers given to `Sharding.live`. See [Message Codec](customization.md#message-codec) for the other backends, including Protobuf.
 
 ## Behaviors
 
