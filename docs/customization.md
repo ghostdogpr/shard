@@ -29,7 +29,7 @@ For testing, you can use the `Storage.memory` layer that keeps data in memory.
 
 Shard provides an implementation of `Storage` using Redis (or Valkey) with the [Sage](https://ghostdogpr.github.io/sage/) client, which requires JDK 21 or later. To use it, add the following dependency:
 ```scala
-libraryDependencies += "com.github.ghostdogpr" %% "shard-storage-sage" % "@VERSION@"
+"com.github.ghostdogpr" %% "shard-storage-sage" % "@VERSION@"
 ```
 You can then simply use the `StorageRedis.live` layer.
 
@@ -80,7 +80,7 @@ For testing, you can use the `Pods.noop` layer that does nothing.
 
 Shard provides an implementation of `Pods` using the gRPC protocol. To use it, add the following dependency:
 ```scala
-libraryDependencies += "com.github.ghostdogpr" %% "shard-protocol-grpc" % "@VERSION@"
+"com.github.ghostdogpr" %% "shard-protocol-grpc" % "@VERSION@"
 ```
 You can then simply use the `GrpcPods.live` layer.
 
@@ -126,7 +126,7 @@ Uses the [Kryo](https://github.com/EsotericSoftware/kryo) binary serialization l
 Reflective — no derivation, no compile-time constraints on the message type. The given covers every type uniformly.
 
 ```scala
-libraryDependencies += "com.github.ghostdogpr" %% "shard-serialization-kryo" % "@VERSION@"
+"com.github.ghostdogpr" %% "shard-serialization-kryo" % "@VERSION@"
 ```
 
 ```scala
@@ -157,7 +157,7 @@ Message types must be a sealed trait or an enum, whose variants extend it with f
 Reply and error types must be a case class, sealed trait, enum, `Unit`, `Nothing` or have a `ProtobufCodec` in scope: other types (`Int`, `Set[String]`, …) need to be wrapped in a case class.
 
 ```scala
-libraryDependencies += "com.github.ghostdogpr" %% "shard-serialization-proteus" % "@VERSION@"
+"com.github.ghostdogpr" %% "shard-serialization-proteus" % "@VERSION@"
 ```
 
 ```scala
@@ -200,7 +200,7 @@ For testing, you can use the `PodsHealth.noop` layer that always returns true, o
 
 Shard provides an implementation of `PodsHealth` using the [Kubernetes](https://kubernetes.io) API. To use it, add the following dependency:
 ```scala
-libraryDependencies += "com.github.ghostdogpr" %% "shard-health-k8s" % "@VERSION@"
+"com.github.ghostdogpr" %% "shard-health-k8s" % "@VERSION@"
 ```
 You can then simply use the `K8sPodsHealth.live` layer. This is requiring a `Pods` layer that comes from [zio-k8s](https://coralogix.github.io/zio-k8s/docs/overview/overview_gettingstarted), and a `K8sConfig` with the following options (`K8sConfig.default` caches 500 pod statuses for 3 seconds and looks in all namespaces):
 - `cacheSize`: how many pod statuses to keep in cache

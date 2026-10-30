@@ -79,8 +79,8 @@ The first thing we need to do is starting the Shard Manager. This component is a
 To make it simpler and run our example without 3rd parties, we're going to run a simple `PodsHealth` implementation that just pings a pod to see if it's alive, and in-memory `Storage`.
 We need a proper messaging protocol to communicate with pods, so we're going to use `shard-protocol-grpc`.
 ```
-libraryDependencies += "com.github.ghostdogpr" %% "shard-manager"       % "@VERSION@"
-libraryDependencies += "com.github.ghostdogpr" %% "shard-protocol-grpc" % "@VERSION@"
+"com.github.ghostdogpr" %% "shard-manager"       % "@VERSION@"
+"com.github.ghostdogpr" %% "shard-protocol-grpc" % "@VERSION@"
 ```
 The Shard Manager exposes a small gRPC API, which means we need to start a small server. This can be done by calling `Server.run` and providing all the required dependencies.
 ```scala
@@ -107,9 +107,9 @@ We now need to define our **entity behavior**: what kind of messages can our ent
 
 First, we need the following dependencies:
 ```
-libraryDependencies += "com.github.ghostdogpr" %% "shard-entities"           % "@VERSION@"
-libraryDependencies += "com.github.ghostdogpr" %% "shard-protocol-grpc"      % "@VERSION@"
-libraryDependencies += "com.github.ghostdogpr" %% "shard-serialization-kryo" % "@VERSION@"
+"com.github.ghostdogpr" %% "shard-entities"           % "@VERSION@"
+"com.github.ghostdogpr" %% "shard-protocol-grpc"      % "@VERSION@"
+"com.github.ghostdogpr" %% "shard-serialization-kryo" % "@VERSION@"
 ```
 
 Let's start with defining the messages our entities can receive. We will have 2: one for joining a guild and one for leaving.
