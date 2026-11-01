@@ -16,7 +16,7 @@ object StorageRedisSpec extends ZIOSpecDefault {
     ZLayer.scoped {
       ZIO.acquireRelease {
         ZIO.attemptBlocking {
-          val container = new GenericContainer(dockerImage = "redis:6.2.5", exposedPorts = Seq(6379))
+          val container = new GenericContainer(dockerImage = "redis:8.8.0", exposedPorts = Seq(6379))
           container.start()
           container
         }.orDie
@@ -27,7 +27,7 @@ object StorageRedisSpec extends ZIOSpecDefault {
     ZLayer {
       for {
         container     <- ZIO.service[GenericContainer]
-        uri            = s"redis://foobared@${container.host}:${container.mappedPort(container.exposedPorts.head)}"
+        uri            = s"redis://${container.host}:${container.mappedPort(container.exposedPorts.head)}"
         redissonConfig = new RedissonConfig()
         _              = redissonConfig.useSingleServer().setAddress(uri)
         client         = Redisson.create(redissonConfig)
