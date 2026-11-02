@@ -6,7 +6,7 @@ import shard.CounterActor._
 import shard.WorkerActor.WorkerMessage._
 import shard.WorkerActor._
 import shard.errors._
-import shard.interfaces.Storage
+import shard.interfaces.{ Pods, Storage }
 import shard.internal.LocalShardManagerClient
 import shard.javaSerialization.given
 import zio.stream.{ SubscriptionRef, ZStream }
@@ -49,8 +49,51 @@ object ShardingSpec extends ZIOSpecDefault {
         LocalShardManagerClient.live,
         Storage.memory,
         ZLayer.succeed(Config.default)
+      ),
+      suite("shards taken back by the Shard Manager")(
+        test("A registered pod keeps its shards until they are unassigned") {
+          for {
+            _      <- Sharding.registerScoped
+            config <- ZIO.service[Config]
+            _      <- giveAllShardsTo(otherPod)
+            _      <- Clock.sleep(300.millis)
+            pods   <- Sharding.getPods
+          } yield assertTrue(pods == Set(PodAddress(config.selfHost, config.shardingPort)))
+        },
+        test("A pod that unregistered sends messages to the pod that took its shards, and stops its singletons") {
+          for {
+            stopped <- Promise.make[Nothing, Unit]
+            _       <- Sharding.registerSingleton("singleton", ZIO.never.onInterrupt(stopped.succeed(())))
+            _       <- Sharding.registerEntity(Counter)(behavior)
+            _       <- Sharding.registerScoped
+            counter <- Sharding.messenger(Counter, MessengerTimeout.Timeout(5.seconds))
+            _       <- counter.send("c1")(IncrementCounter())        // handled locally
+            _       <- Sharding.unregister
+            // the Shard Manager gives the shards of the pod to another pod, without unassigning them from it
+            _       <- giveAllShardsTo(otherPod)
+            _       <- (Clock.sleep(10.millis) *> Sharding.getPods).repeatUntil(_ == Set(otherPod))
+            _       <- counter.sendDiscard("c1")(IncrementCounter()) // sent to the other pod
+            _       <- stopped.await
+          } yield assertCompletes
+        }
+      ).provideSome[Scope](
+        Sharding.live,
+        Pods.noop, // messages sent to other pods succeed
+        LocalShardManagerClient.live,
+        Storage.memory,
+        ZLayer.succeed(Config.default)
       )
     ) @@ sequential @@ withLiveClock @@ TestAspect.timeout(60.seconds)
+
+  val otherPod: PodAddress = PodAddress("other", 1)
+
+  // what the Shard Manager does when it moves shards
+  def giveAllShardsTo(pod: PodAddress): RIO[Storage & Config, Unit] =
+    ZIO.serviceWithZIO[Config](config =>
+      ZIO.serviceWithZIO[Storage](
+        _.saveAssignments(config.role, (1 to config.numberOfShards).map(_ -> Some(pod)).toMap)
+      )
+    )
 
   // tests relying on the in-process transport's chunking, delivery order and synchronous cancellation
   val inProcess: String = "in-process"
