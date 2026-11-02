@@ -157,14 +157,29 @@ class Sharding private (
         .tagged("role", config.role.name)
         .set(assignmentsOpt.count { case (_, podOpt) => podOpt.contains(address) })
         .whenDiscard(replaceAllAssignments) *>
-      (if (replaceAllAssignments) shardAssignments.set(assignments)
+      (if (replaceAllAssignments)
+         // after a storage reconnection, the snapshot may no longer give shard 1 to this pod
+         shardAssignments.set(assignments) *> stopSingletonsIfNeeded
        else
-         shardAssignments.update(map =>
-           // we keep self assignments (we don't override them with the new assignments
-           // because only the Shard Manager is able to change assignments of the current node, via assign/unassign
-           assignments.filter { case (_, pod) => pod != address } ++
-             map.filter { case (_, pod) => pod == address }
-         ))
+         isShuttingDown.flatMap { shuttingDown =>
+           shardAssignments.modify { map =>
+             // we keep self assignments (we don't override them with the new assignments)
+             // because only the Shard Manager is able to change assignments of the current node, via assign/unassign.
+             // Once the pod unregistered, the Shard Manager takes its shards back without calling unassign,
+             // so we drop the self assignments that the new assignments no longer give to this pod.
+             val self    = map.filter { case (shard, pod) =>
+               pod == address && (!shuttingDown || assignments.get(shard).contains(address))
+             }
+             val removed = map.count { case (_, pod) => pod == address } - self.size
+             (removed, assignments.filter { case (_, pod) => pod != address } ++ self)
+           }
+         }.flatMap(removed =>
+           ZIO.when(removed > 0)(
+             Metrics.shards.tagged("role", config.role.name).decrementBy(removed) *>
+               stopSingletonsIfNeeded *>
+               ZIO.logDebug(s"Removed $removed shards taken back by the Shard Manager")
+           )
+         ).unit)
   }
 
   private[shard] val refreshAssignments: ZIO[Scope, Nothing, Unit] =
