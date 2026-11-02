@@ -6,7 +6,7 @@ import shard.CounterActor._
 import shard.WorkerActor.WorkerMessage._
 import shard.WorkerActor._
 import shard.errors._
-import shard.interfaces.{ Pods, Storage }
+import shard.interfaces.{ Pods, ShardManagerClient, Storage }
 import shard.internal.LocalShardManagerClient
 import shard.javaSerialization.given
 import zio.stream.{ SubscriptionRef, ZStream }
@@ -82,7 +82,51 @@ object ShardingSpec extends ZIOSpecDefault {
         LocalShardManagerClient.live,
         Storage.memory,
         ZLayer.succeed(Config.default)
-      )
+      ),
+      test("A pod that unregistered stops its singletons when it reconnects to the storage") {
+        val config = Config.default.copy(refreshAssignmentsRetryInterval = 10.millis)
+        val self   = PodAddress(config.selfHost, config.shardingPort)
+        for {
+          assignments <- Ref.make(Map(1 -> Option(self)))
+          disconnect  <- Promise.make[Nothing, Unit]
+          subscribed  <- Ref.make(false)
+          stopped     <- Promise.make[Nothing, Unit]
+          manager      = new ShardManagerClient {
+                           def register(podAddress: PodAddress, role: Role): Task[Unit]           = ZIO.unit
+                           // the Shard Manager gives the shards of the pod to another pod
+                           def unregister(podAddress: PodAddress): Task[Unit]                     =
+                             assignments.set(Map(1 -> Some(otherPod)))
+                           def notifyUnhealthyPod(podAddress: PodAddress): Task[Unit]             = ZIO.unit
+                           def getAssignments(role: Role): Task[Map[ShardId, Option[PodAddress]]] = assignments.get
+                         }
+          storage      = new Storage {
+                           def getAssignments(role: Role): Task[Map[ShardId, Option[PodAddress]]]                       =
+                             assignments.get
+                           def saveAssignments(role: Role, value: Map[ShardId, Option[PodAddress]]): Task[Unit]         =
+                             assignments.set(value)
+                           // the first subscription fails when disconnected, so the new assignments are only
+                           // received from the Shard Manager when reconnecting
+                           def assignmentsStream(role: Role): ZStream[Any, Throwable, Map[ShardId, Option[PodAddress]]] =
+                             ZStream.unwrap(subscribed.getAndSet(true).map {
+                               case false => ZStream.fromZIO(disconnect.await *> ZIO.fail(new Exception("disconnected")))
+                               case true  => ZStream.never
+                             })
+                           def getPods: Task[Map[PodAddress, Pod]]                                                      = ZIO.succeed(Map.empty)
+                           def savePods(pods: Map[PodAddress, Pod]): Task[Unit]                                         = ZIO.unit
+                         }
+          _           <- (Sharding.registerSingleton("singleton", ZIO.never.onInterrupt(stopped.succeed(()))) *>
+                           Sharding.register *>
+                           Sharding.unregister *>
+                           disconnect.succeed(()) *>
+                           stopped.await).provide(
+                           Sharding.live,
+                           Pods.noop,
+                           ZLayer.succeed(manager),
+                           ZLayer.succeed(storage),
+                           ZLayer.succeed(config)
+                         )
+        } yield assertCompletes
+      }
     ) @@ sequential @@ withLiveClock @@ TestAspect.timeout(60.seconds)
 
   val otherPod: PodAddress = PodAddress("other", 1)

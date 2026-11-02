@@ -157,7 +157,9 @@ class Sharding private (
         .tagged("role", config.role.name)
         .set(assignmentsOpt.count { case (_, podOpt) => podOpt.contains(address) })
         .whenDiscard(replaceAllAssignments) *>
-      (if (replaceAllAssignments) shardAssignments.set(assignments)
+      (if (replaceAllAssignments)
+         // after a storage reconnection, the snapshot may no longer give shard 1 to this pod
+         shardAssignments.set(assignments) *> stopSingletonsIfNeeded
        else
          isShuttingDown.flatMap { shuttingDown =>
            shardAssignments.modify { map =>
