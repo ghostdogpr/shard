@@ -10,7 +10,7 @@ val zioCatsInteropVersion = "23.1.0.14"
 val zioJsonVersion        = "1.1.1"
 val redis4catsVersion     = "2.0.6"
 val redissonVersion       = "4.8.0"
-val sageVersion           = "0.5.0"
+val sageVersion           = "0.6.0"
 val scalaKryoVersion      = "1.5.3"
 val testContainersVersion = "0.44.1"
 
