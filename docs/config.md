@@ -28,12 +28,14 @@ A good rule of thumb is to set the number of shards to 10x the maximum number of
 - `shardManagerHost`: hostname or IP address of the Shard Manager
 - `shardManagerPort`: port of the Shard Manager gRPC API
 - `shardManagerTimeout`: timeout for calls to the Shard Manager
-- `serverVersion`: version of the current pod
+- `serverVersion`: application deployment version of the current pod (defaults to `"1.0.0"`)
 ::: tip What's the version?
 When performing a rolling update (upgrading all pods one by one without downtime), we want to avoid assigning shards to pods that will be stopped soon.
 Ideally, we want to move each shard only once during the whole process.
 
 This `serverVersion` allows the Shard Manager to know which pods are old and which are new. It will then pick the new pods to assign shards.
+
+Use one or more integers separated by dots, such as `"123"` or `"1.2.3"`. All pods running the same release should use the same value, and newer releases should use higher values.
 :::
 - `entityMaxIdleTime`: time of inactivity (without processing any message) after which an entity will be stopped. It can be overridden for each entity type with `EntityOptions`.
 - `entityTerminationTimeout`: time we give to an entity to finish processing its messages when it is stopped. After that, the messages still running are interrupted and their senders receive `EntityInterrupted`. Rebalances wait for this, so keep it below your pods' termination grace period.
