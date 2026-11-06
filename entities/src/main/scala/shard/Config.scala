@@ -11,7 +11,7 @@ import zio._
  * @param shardManagerHost hostname or IP address of the Shard Manager
  * @param shardManagerPort port of the Shard Manager gRPC API
  * @param shardManagerTimeout timeout for calls to the Shard Manager
- * @param serverVersion version of the current pod
+ * @param serverVersion application deployment version of the current pod
  * @param entityMaxIdleTime time of inactivity (without processing any message) after which an entity will be stopped
  * @param entityTerminationTimeout time we give to an entity to finish processing its messages when it is stopped
  * @param sendTimeout default timeout when sending a message
