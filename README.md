@@ -13,5 +13,3 @@ The [Documentation](https://ghostdogpr.github.io/shard/) explains how to use Sha
 - the [architecture](https://ghostdogpr.github.io/shard/architecture) behind Shard
 - how to [configure](https://ghostdogpr.github.io/shard/config) it
 - parts you can [customize](https://ghostdogpr.github.io/shard/customization)
-
-Part of the [ghostdogpr stack](https://ghostdogpr.github.io/).
