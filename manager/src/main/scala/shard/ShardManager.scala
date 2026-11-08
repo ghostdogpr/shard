@@ -228,9 +228,7 @@ class ShardManager(
 
   private def persistPods: UIO[Unit] =
     withRetry(
-      stateRef.get.flatMap(states =>
-        stateRepository.savePods(states.values.flatMap(_.pods.map { case (k, v) => (k, v.pod) }).toMap)
-      )
+      stateRef.get.flatMap(states => stateRepository.savePods(states.values.flatMap(_.pods.values.map(_.pod)).toSet))
     )
 
   private def updateShardsState(role: Role, shards: Set[ShardId], podAddress: Option[PodAddress]): Task[Unit] =
@@ -268,7 +266,7 @@ object ShardManager {
         podApi              <- ZIO.service[Pods]
         oldPods             <- stateRepository.getPods
         // remove unhealthy pods on startup
-        aliveStatuses       <- ZIO.foreachPar(oldPods.values)(pod => healthApi.isAlive(pod).map(pod -> _))
+        aliveStatuses       <- ZIO.foreachPar(oldPods)(pod => healthApi.isAlive(pod).map(pod -> _))
         (failedPods, pods)   = aliveStatuses.partitionMap {
                                  case (pod, false) => Left(pod)
                                  case (pod, true)  => Right(pod)

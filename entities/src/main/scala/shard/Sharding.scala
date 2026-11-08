@@ -142,7 +142,7 @@ class Sharding private (
 
   val getRegisteredPods: Task[Set[Pod]] =
     // only the storage knows the version and role of the pods, saved by the Shard Manager
-    storage.getPods.map(_.values.toSet)
+    storage.getPods
 
   def localEntities(recipientType: RecipientType[?]): UIO[Set[String]] =
     entityStates.get.flatMap(_.get(recipientType.name).fold(ZIO.succeed(Set.empty[String]))(_.entityIds))

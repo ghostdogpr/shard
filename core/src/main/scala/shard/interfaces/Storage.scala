@@ -27,12 +27,12 @@ trait Storage {
   /**
    * Get the list of existing pods
    */
-  def getPods: Task[Map[PodAddress, Pod]]
+  def getPods: Task[Set[Pod]]
 
   /**
    * Save the list of existing pods
    */
-  def savePods(pods: Map[PodAddress, Pod]): Task[Unit]
+  def savePods(pods: Set[Pod]): Task[Unit]
 }
 
 object Storage {
@@ -45,7 +45,7 @@ object Storage {
     ZLayer {
       for {
         assignmentsRefs <- Ref.Synchronized.make(Map.empty[Role, SubscriptionRef[Map[ShardId, Option[PodAddress]]]])
-        podsRef         <- Ref.make(Map.empty[PodAddress, Pod])
+        podsRef         <- Ref.make(Set.empty[Pod])
       } yield new Storage {
         private def assignmentsRef(role: Role): UIO[SubscriptionRef[Map[ShardId, Option[PodAddress]]]] =
           assignmentsRefs.modifyZIO(refs =>
@@ -62,8 +62,8 @@ object Storage {
           assignmentsRef(role).flatMap(_.set(assignments))
         def assignmentsStream(role: Role): ZStream[Any, Throwable, Map[ShardId, Option[PodAddress]]] =
           ZStream.unwrap(assignmentsRef(role).map(_.changes))
-        def getPods: Task[Map[PodAddress, Pod]]                                                      = podsRef.get
-        def savePods(pods: Map[PodAddress, Pod]): Task[Unit]                                         = podsRef.set(pods)
+        def getPods: Task[Set[Pod]]                                                                  = podsRef.get
+        def savePods(pods: Set[Pod]): Task[Unit]                                                     = podsRef.set(pods)
       }
     }
 }

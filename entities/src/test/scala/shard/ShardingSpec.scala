@@ -40,7 +40,7 @@ object ShardingSpec extends ZIOSpecDefault {
           val pod1 = Pod(PodAddress("host1", 1), "1.0", Role.default)
           val pod2 = Pod(PodAddress("host2", 2), "2.0", Role("other"))
           for {
-            _    <- ZIO.serviceWithZIO[Storage](_.savePods(Map(pod1.address -> pod1, pod2.address -> pod2)))
+            _    <- ZIO.serviceWithZIO[Storage](_.savePods(Set(pod1, pod2)))
             pods <- Sharding.getRegisteredPods
           } yield assertTrue(pods == Set(pod1, pod2))
         }
@@ -75,10 +75,20 @@ object ShardingSpec extends ZIOSpecDefault {
             _       <- counter.sendDiscard("c1")(IncrementCounter()) // sent to the other pod
             _       <- stopped.await
           } yield assertCompletes
+        },
+        test("A message expecting a reply from another pod fails with Pods.noop") {
+          for {
+            _       <- Sharding.registerScoped
+            _       <- Sharding.unregister
+            _       <- giveAllShardsTo(otherPod)
+            _       <- (Clock.sleep(10.millis) *> Sharding.getPods).repeatUntil(_ == Set(otherPod))
+            counter <- Sharding.messenger(Counter, MessengerTimeout.Timeout(5.seconds))
+            result  <- counter.send("c1")(GetCounter()).either
+          } yield assertTrue(result == Left(EntityDefect("Pods.noop sends no messages")))
         }
       ).provideSome[Scope](
         Sharding.live,
-        Pods.noop, // messages sent to other pods succeed
+        Pods.noop, // messages sent to other pods without expecting a reply succeed
         LocalShardManagerClient.live,
         Storage.memory,
         ZLayer.succeed(Config.default)
@@ -111,8 +121,8 @@ object ShardingSpec extends ZIOSpecDefault {
                                case false => ZStream.fromZIO(disconnect.await *> ZIO.fail(new Exception("disconnected")))
                                case true  => ZStream.never
                              })
-                           def getPods: Task[Map[PodAddress, Pod]]                                                      = ZIO.succeed(Map.empty)
-                           def savePods(pods: Map[PodAddress, Pod]): Task[Unit]                                         = ZIO.unit
+                           def getPods: Task[Set[Pod]]                                                                  = ZIO.succeed(Set.empty)
+                           def savePods(pods: Set[Pod]): Task[Unit]                                                     = ZIO.unit
                          }
           _           <- (Sharding.registerSingleton("singleton", ZIO.never.onInterrupt(stopped.succeed(()))) *>
                            Sharding.register *>

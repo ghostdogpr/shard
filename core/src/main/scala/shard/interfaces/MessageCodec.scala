@@ -35,8 +35,6 @@ trait MessageCodec[Msg[_, _]] {
 }
 
 object MessageCodec {
-  type Encoder    = Any => Array[Byte]
-  type Decoder[A] = Array[Byte] => A
 
   /**
    * Create a codec that uses the same `Codec` for messages and all their replies.
@@ -50,7 +48,7 @@ object MessageCodec {
       def replyCodec[E, A](message: Msg[E, A]): ReplyCodec     = replies
     }
 
-  final case class Codec(encode: Encoder, decode: Decoder[Any])
+  final case class Codec(encode: Any => Array[Byte], decode: Array[Byte] => Any)
 
   object Codec {
 

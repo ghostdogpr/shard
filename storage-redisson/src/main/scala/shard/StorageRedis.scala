@@ -7,7 +7,6 @@ import org.redisson.api.BatchOptions.ExecutionMode
 import org.redisson.api.{ BatchOptions, RedissonClient }
 import org.redisson.api.listener.MessageListener
 import org.redisson.client.codec.StringCodec
-import zio.json._
 import zio.stream.ZStream
 import zio.{ Queue, Task, Unsafe, ZIO, ZLayer }
 
@@ -21,26 +20,20 @@ object StorageRedis {
       for {
         config      <- ZIO.service[RedisConfig]
         redisClient <- ZIO.service[RedissonClient]
-        podsMap      = redisClient.getMap[String, String](config.podsKey)
+        podsMap      = redisClient.getMap[String, String](config.podsKey, StringCodec.INSTANCE)
       } yield new Storage {
         def getAssignments(role: Role): Task[Map[ShardId, Option[PodAddress]]] = {
-          val assignmentsMap = redisClient.getMap[String, String](config.assignmentsKey(role))
+          val assignmentsMap = redisClient.getMap[String, String](config.assignmentsKey(role), StringCodec.INSTANCE)
           ZIO
-            .fromCompletionStage(assignmentsMap.readAllEntrySetAsync())
-            .map(
-              _.asScala
-                .flatMap(entry =>
-                  entry.getKey.toIntOption.map(
-                    _ -> (if (entry.getValue.isEmpty) None
-                          else PodAddress(entry.getValue))
-                  )
-                )
-                .toMap
-            )
+            .fromCompletionStage(assignmentsMap.readAllMapAsync())
+            .map(_.asScala.toMap.flatMap { case (k, v) =>
+              val pod = if (v.isEmpty) None else PodAddress(v)
+              k.toIntOption.map(_ -> pod)
+            })
         }
 
         def saveAssignments(role: Role, assignments: Map[ShardId, Option[PodAddress]]): Task[Unit] = {
-          val assignmentsMap   = redisClient.getMap[String, String](config.assignmentsKey(role))
+          val assignmentsMap   = redisClient.getMap[String, String](config.assignmentsKey(role), StringCodec.INSTANCE)
           val assignmentsTopic = redisClient.getTopic(config.assignmentsKey(role), StringCodec.INSTANCE)
           ZIO.fromCompletionStage(assignmentsMap.putAllAsync(assignments.map { case (k, v) =>
             k.toString -> v.fold("")(_.toString)
@@ -49,40 +42,40 @@ object StorageRedis {
         }
 
         def assignmentsStream(role: Role): ZStream[Any, Throwable, Map[ShardId, Option[PodAddress]]] =
-          ZStream.unwrap {
+          ZStream.unwrapScoped {
+            val assignmentsTopic = redisClient.getTopic(config.assignmentsKey(role), StringCodec.INSTANCE)
             for {
-              queue           <- Queue.unbounded[String]
-              runtime         <- ZIO.runtime[Any]
-              assignmentsTopic = redisClient.getTopic(config.assignmentsKey(role), StringCodec.INSTANCE)
-              _               <- ZIO.fromCompletionStage(
-                                   assignmentsTopic.addListenerAsync(
-                                     classOf[String],
-                                     new MessageListener[String] {
-                                       def onMessage(channel: CharSequence, msg: String): Unit =
-                                         Unsafe.unsafe(implicit unsafe => runtime.unsafe.run(queue.offer(msg)))
-                                     }
-                                   )
-                                 )
-            } yield ZStream.fromQueueWithShutdown(queue).mapZIO(_ => getAssignments(role))
+              queue   <- ZIO.acquireRelease(Queue.unbounded[String])(_.shutdown)
+              runtime <- ZIO.runtime[Any]
+              // removed when the stream ends, before the queue shuts down
+              _       <- ZIO.acquireRelease(
+                           ZIO.fromCompletionStage(
+                             assignmentsTopic.addListenerAsync(
+                               classOf[String],
+                               new MessageListener[String] {
+                                 def onMessage(channel: CharSequence, msg: String): Unit =
+                                   Unsafe.unsafe(implicit unsafe => runtime.unsafe.run(queue.offer(msg)))
+                               }
+                             )
+                           )
+                         )(id => ZIO.fromCompletionStage(assignmentsTopic.removeListenerAsync(id)).ignoreLogged)
+            } yield ZStream.fromQueue(queue).mapZIO(_ => getAssignments(role))
           }
-        def getPods: Task[Map[PodAddress, Pod]]                                                      =
+
+        def getPods: Task[Set[Pod]] =
           ZIO
-            .fromCompletionStage(podsMap.readAllEntrySetAsync())
-            .map(
-              _.asScala
-                .flatMap(entry =>
-                  PodAddress(entry.getKey).flatMap(address => entry.getValue.fromJson[Pod].toOption.map(address -> _))
-                )
-                .toMap
-            )
-        def savePods(pods: Map[PodAddress, Pod]): Task[Unit]                                         = {
-          // replaces the whole map, so that the pods left out (unregistered) are removed
-          val batch = redisClient.createBatch(BatchOptions.defaults().executionMode(ExecutionMode.IN_MEMORY_ATOMIC))
-          val map   = batch.getMap[String, String](config.podsKey)
-          map.deleteAsync()
-          if (pods.nonEmpty) map.putAllAsync(pods.map { case (k, v) => k.toString -> v.toJson }.asJava)
-          ZIO.fromCompletionStage(batch.executeAsync()).unit
-        }
+            .fromCompletionStage(podsMap.readAllMapAsync())
+            .map(_.asScala.flatMap { case (k, v) => PodAddress(k).flatMap(Pod.decode(_, v)) }.toSet)
+
+        def savePods(pods: Set[Pod]): Task[Unit] =
+          // replaces the whole map atomically, so that the pods left out (unregistered) are removed
+          ZIO.fromCompletionStage {
+            val batch = redisClient.createBatch(BatchOptions.defaults().executionMode(ExecutionMode.IN_MEMORY_ATOMIC))
+            val map   = batch.getMap[String, String](config.podsKey, StringCodec.INSTANCE)
+            map.deleteAsync()
+            map.putAllAsync(pods.map(pod => pod.address.toString -> Pod.encode(pod)).toMap.asJava)
+            batch.executeAsync()
+          }.unit
       }
     }
 }

@@ -19,8 +19,8 @@ trait Storage {
 
   def assignmentsStream(role: Role): ZStream[Any, Throwable, Map[ShardId, Option[PodAddress]]]
 
-  def getPods: Task[Map[PodAddress, Pod]]
-  def savePods(pods: Map[PodAddress, Pod]): Task[Unit]
+  def getPods: Task[Set[Pod]]
+  def savePods(pods: Set[Pod]): Task[Unit]
 }
 ```
 Assignments are stored per `Role`, since each role has its own independent set of shards.
