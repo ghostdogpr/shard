@@ -13,4 +13,6 @@ My other projects:
 - [PureLogic](https://github.com/ghostdogpr/purelogic), a direct-style, pure domain logic library for Scala
 - [Sage](https://github.com/ghostdogpr/sage), a Redis & Valkey client for Scala 3
 
+See them all on the [ghostdogpr stack](https://ghostdogpr.github.io/) page.
+
 If you find Shard useful, consider [sponsoring me on GitHub](https://github.com/sponsors/ghostdogpr) to support continued development.
