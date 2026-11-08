@@ -186,6 +186,7 @@ The Redis storage has a new default implementation, `shard-storage-sage`, which 
 
 If you implemented the pluggable interfaces yourself:
 - `Storage` methods for assignments take a `Role`, and `Pod` has a `role` (see [Roles](#roles)).
+- `Storage.getPods` and `savePods` use a `Set[Pod]` instead of a `Map[PodAddress, Pod]`, since each `Pod` holds its address.
 - `Pods` sends `BinaryMessage` and receives `BinaryReply`, which carries the outcome of the message (success, typed failure, defect, interruption, etc.) instead of optional bytes.
 - `Serialization` is replaced by `MessageCodec[Msg]`, which also encodes the replies and errors of each message.
 

@@ -1,18 +1,15 @@
 package shard
 
 import shard.StorageRedis.Redis
-import shard.interfaces.Storage
 import com.dimafeng.testcontainers.GenericContainer
 import dev.profunktor.redis4cats.Redis
 import dev.profunktor.redis4cats.connection.RedisClient
 import dev.profunktor.redis4cats.data.RedisCodec
 import dev.profunktor.redis4cats.effect.Log
 import dev.profunktor.redis4cats.pubsub.PubSub
-import zio.Clock.ClockLive
 import zio._
 import zio.interop.catz._
-import zio.stream.ZStream
-import zio.test.TestAspect.sequential
+import zio.test.TestAspect.{ sequential, timeout }
 import zio.test._
 
 object StorageRedisSpec extends ZIOSpecDefault {
@@ -49,50 +46,8 @@ object StorageRedisSpec extends ZIOSpecDefault {
         )
     }
 
-  private val role = Role.default
-
   def spec: Spec[TestEnvironment & Scope, Any] =
-    suite("StorageRedisSpec")(
-      test("save and get pods") {
-        val expected =
-          List(Pod(PodAddress("host1", 1), "1.0.0", role), Pod(PodAddress("host2", 2), "2.0.0", role))
-            .map(p => p.address -> p)
-            .toMap
-        for {
-          _      <- ZIO.serviceWithZIO[Storage](_.savePods(expected))
-          actual <- ZIO.serviceWithZIO[Storage](_.getPods)
-        } yield assertTrue(expected == actual)
-      },
-      test("saving pods forgets the pods left out") {
-        val kept    = Pod(PodAddress("host1", 1), "1.0.0", role)
-        val removed = Pod(PodAddress("host2", 2), "2.0.0", role)
-        for {
-          _     <- ZIO.serviceWithZIO[Storage](_.savePods(Map(kept.address -> kept, removed.address -> removed)))
-          _     <- ZIO.serviceWithZIO[Storage](_.savePods(Map(kept.address -> kept)))
-          after <- ZIO.serviceWithZIO[Storage](_.getPods)
-          _     <- ZIO.serviceWithZIO[Storage](_.savePods(Map.empty))
-          empty <- ZIO.serviceWithZIO[Storage](_.getPods)
-        } yield assertTrue(after == Map(kept.address -> kept), empty.isEmpty)
-      },
-      test("save and get assignments") {
-        val expected = Map(1 -> Some(PodAddress("host1", 1)), 2 -> None)
-        for {
-          _      <- ZIO.serviceWithZIO[Storage](_.saveAssignments(role, expected))
-          actual <- ZIO.serviceWithZIO[Storage](_.getAssignments(role))
-        } yield assertTrue(expected == actual)
-      },
-      test("assignments stream") {
-        val expected = Map(1 -> Some(PodAddress("host1", 1)), 2 -> None)
-        for {
-          p      <- Promise.make[Nothing, Map[Int, Option[PodAddress]]]
-          _      <- ZStream.serviceWithStream[Storage](_.assignmentsStream(role)).runForeach(p.succeed(_)).fork
-          // saved again until the stream receives it, since it only receives the assignments saved once subscribed
-          _      <- (ZIO.serviceWithZIO[Storage](_.saveAssignments(role, expected)) *> ClockLive.sleep(100.millis))
-                      .repeatUntilZIO(_ => p.isDone)
-          actual <- p.await
-        } yield assertTrue(expected == actual)
-      }
-    ).provideLayerShared(
+    suite("StorageRedisSpec")(StorageSuite.tests*).provideLayerShared(
       container >>> redis ++ ZLayer.succeed(RedisConfig.default) >>> StorageRedis.live
-    ) @@ sequential
+    ) @@ sequential @@ timeout(1.minute)
 }

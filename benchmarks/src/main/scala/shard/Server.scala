@@ -42,15 +42,15 @@ object Server {
     ZLayer {
       for {
         assignmentsRef <- Ref.make(Map.empty[Role, Map[ShardId, Option[PodAddress]]])
-        podsRef        <- Ref.make(Map.empty[PodAddress, Pod])
+        podsRef        <- Ref.make(Set.empty[Pod])
       } yield new Storage {
         def getAssignments(role: Role): Task[Map[ShardId, Option[PodAddress]]]                       =
           assignmentsRef.get.map(_.getOrElse(role, Map.empty))
         def saveAssignments(role: Role, assignments: Map[ShardId, Option[PodAddress]]): Task[Unit]   =
           assignmentsRef.update(_.updated(role, assignments))
         def assignmentsStream(role: Role): ZStream[Any, Throwable, Map[ShardId, Option[PodAddress]]] = ZStream.never
-        def getPods: Task[Map[PodAddress, Pod]]                                                      = podsRef.get
-        def savePods(pods: Map[PodAddress, Pod]): Task[Unit]                                         = podsRef.set(pods)
+        def getPods: Task[Set[Pod]]                                                                  = podsRef.get
+        def savePods(pods: Set[Pod]): Task[Unit]                                                     = podsRef.set(pods)
       }
     }
 

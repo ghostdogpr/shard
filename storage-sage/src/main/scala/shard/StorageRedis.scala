@@ -3,7 +3,6 @@ package shard
 import shard.interfaces.Storage
 import sage.backend.{ subscribe, SageClient }
 import sage.commands.Commands
-import zio.json._
 import zio.stream.ZStream
 import zio.{ Task, ZIO, ZLayer }
 
@@ -37,16 +36,14 @@ object StorageRedis {
         def assignmentsStream(role: Role): ZStream[Any, Throwable, Map[ShardId, Option[PodAddress]]] =
           client.subscribe[String](config.assignmentsKey(role)).mapZIO(_ => getAssignments(role))
 
-        def getPods: Task[Map[PodAddress, Pod]] =
+        def getPods: Task[Set[Pod]] =
           client
             .hGetAll[String, String](config.podsKey)
-            .map(_.toList.flatMap { case (k, v) =>
-              PodAddress(k).flatMap(address => v.fromJson[Pod].toOption.map(address -> _))
-            }.toMap)
+            .map(_.flatMap { case (k, v) => PodAddress(k).flatMap(Pod.decode(_, v)) }.toSet)
 
-        def savePods(pods: Map[PodAddress, Pod]): Task[Unit] =
+        def savePods(pods: Set[Pod]): Task[Unit] =
           // replaces the whole hash atomically, so that the pods left out (unregistered) are removed
-          pods.toList.map { case (k, v) => k.toString -> v.toJson } match {
+          pods.toList.map(pod => pod.address.toString -> Pod.encode(pod)) match {
             case head :: tail =>
               client
                 .transaction(_.exec((Commands.del(config.podsKey), Commands.hSet(config.podsKey, head, tail*))))

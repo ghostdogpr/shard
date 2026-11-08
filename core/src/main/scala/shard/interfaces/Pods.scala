@@ -51,6 +51,7 @@ object Pods {
 
   /**
    * A layer that creates a service that does nothing when called.
+   * Messages that expect a reply get a `Defect` reply, since no pod answers them.
    * Useful for testing ShardManager or when we don't need messages being sent.
    */
   val noop: ULayer[Pods] =
@@ -59,7 +60,10 @@ object Pods {
       def unassignShards(pod: PodAddress, shards: Set[ShardId]): Task[Unit]                              = ZIO.unit
       def ping(pod: PodAddress): Task[Unit]                                                              = ZIO.unit
       def sendMessage(pod: PodAddress, message: BinaryMessage): Task[BinaryReply]                        =
-        ZIO.succeed(BinaryReply.Success(Array.emptyByteArray))
+        ZIO.succeed(
+          if (message.expectsReply) BinaryReply.Defect("Pods.noop sends no messages")
+          else BinaryReply.Success(Array.emptyByteArray)
+        )
       def sendStream(pod: PodAddress, messages: ZStream[Any, Nothing, BinaryMessage]): Task[BinaryReply] =
         ZIO.succeed(BinaryReply.Success(Array.emptyByteArray))
       def sendStreamAndReceiveStream(

@@ -7,7 +7,6 @@ val zioK8sVersion         = "3.2.1"
 val zioK8sSttpVersion     = "3.11.0"
 val zioCacheVersion       = "0.3.0"
 val zioCatsInteropVersion = "23.1.0.14"
-val zioJsonVersion        = "1.1.1"
 val redis4catsVersion     = "2.0.6"
 val redissonVersion       = "4.8.0"
 val sageVersion           = "0.6.0"
@@ -66,8 +65,7 @@ lazy val core = project
     libraryDependencies ++=
       Seq(
         "dev.zio" %% "zio"         % zioVersion,
-        "dev.zio" %% "zio-streams" % zioVersion,
-        "dev.zio" %% "zio-json"    % zioJsonVersion
+        "dev.zio" %% "zio-streams" % zioVersion
       )
   )
 
@@ -102,7 +100,7 @@ lazy val storageSage = project
   .in(file("storage-sage"))
   .settings(name := "shard-storage-sage")
   .settings(commonSettings)
-  .dependsOn(core)
+  .dependsOn(core % "compile->compile;test->test")
   .settings(
     libraryDependencies ++=
       Seq(
@@ -114,7 +112,7 @@ lazy val storageRedis = project
   .in(file("storage-redis"))
   .settings(name := "shard-storage-redis")
   .settings(commonSettings)
-  .dependsOn(core)
+  .dependsOn(core % "compile->compile;test->test")
   .settings(
     libraryDependencies ++=
       Seq(
@@ -128,7 +126,7 @@ lazy val storageRedisson = project
   .in(file("storage-redisson"))
   .settings(name := "shard-storage-redisson")
   .settings(commonSettings)
-  .dependsOn(core)
+  .dependsOn(core % "compile->compile;test->test")
   .settings(
     libraryDependencies ++=
       Seq(

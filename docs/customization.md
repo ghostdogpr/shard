@@ -19,8 +19,8 @@ trait Storage {
 
   def assignmentsStream(role: Role): ZStream[Any, Throwable, Map[ShardId, Option[PodAddress]]]
 
-  def getPods: Task[Map[PodAddress, Pod]]
-  def savePods(pods: Map[PodAddress, Pod]): Task[Unit]
+  def getPods: Task[Set[Pod]]
+  def savePods(pods: Set[Pod]): Task[Unit]
 }
 ```
 Assignments are stored per `Role`, since each role has its own independent set of shards.
@@ -76,7 +76,7 @@ trait Pods {
   ): ZStream[Any, Throwable, BinaryReply]
 }
 ```
-For testing, you can use the `Pods.noop` layer that does nothing.
+For testing, you can use the `Pods.noop` layer that does nothing: messages that expect a reply fail with `EntityDefect`.
 
 Shard provides an implementation of `Pods` using the gRPC protocol. To use it, add the following dependency:
 ```scala

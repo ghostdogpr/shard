@@ -211,9 +211,9 @@ object ShardManagerSpec extends ZIOSpecDefault {
               _ <- ZIO.iterate(Map.empty[ShardId, Option[PodAddress]])(_.isEmpty)(_ =>
                      ZIO.serviceWithZIO[Storage](_.getAssignments(role))
                    )
-              _ <- ZIO.iterate(Map.empty[PodAddress, Pod])(_.isEmpty)(_ => ZIO.serviceWithZIO[Storage](_.getPods))
+              _ <- ZIO.iterate(Set.empty[Pod])(_.isEmpty)(_ => ZIO.serviceWithZIO[Storage](_.getPods))
               // simulate non-persistent storage restart
-              _ <- ZIO.serviceWithZIO[Storage](s => s.saveAssignments(role, Map.empty) *> s.savePods(Map.empty))
+              _ <- ZIO.serviceWithZIO[Storage](s => s.saveAssignments(role, Map.empty) *> s.savePods(Set.empty))
             } yield {}).provideSome[Storage](
               ZLayer.makeSome[Storage, ShardManager](config, Pods.noop, PodsHealth.local, ShardManager.live)
             )
@@ -243,8 +243,8 @@ object ShardManagerSpec extends ZIOSpecDefault {
     def getAssignments(role: Role): Task[Map[ShardId, Option[PodAddress]]]                       = ZIO.succeed(Map.empty)
     def saveAssignments(role: Role, assignments: Map[ShardId, Option[PodAddress]]): Task[Unit]   = ZIO.unit
     def assignmentsStream(role: Role): ZStream[Any, Throwable, Map[ShardId, Option[PodAddress]]] = ZStream.empty
-    def getPods: Task[Map[PodAddress, Pod]]                                                      = ZIO.succeed(Map.empty)
-    def savePods(pods: Map[PodAddress, Pod]): Task[Unit]                                         = ZIO.unit
+    def getPods: Task[Set[Pod]]                                                                  = ZIO.succeed(Set.empty)
+    def savePods(pods: Set[Pod]): Task[Unit]                                                     = ZIO.unit
   })
 
   val shardManager: ZLayer[Any, Throwable, ShardManager] =
