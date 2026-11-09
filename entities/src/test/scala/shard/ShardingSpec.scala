@@ -369,7 +369,19 @@ object ShardingSpec extends ZIOSpecDefault {
           _       <- latch.await
           _       <- Sharding.terminateLocalEntity(Counter, "c1")
           error   <- fiber.join
-        } yield assertTrue(error == StreamCancelled)
+          // before any reply too, once the entity consumed an input that a new attempt couldn't get again
+          inputs  <- Queue.unbounded[Int]
+          taken   <- Promise.make[Nothing, Unit]
+          _       <- inputs.offer(1)
+          summing <-
+            counter.duplex("c2")(Sum(), ZStream.fromQueue(inputs).tap(_ => taken.succeed(()))).runDrain.flip.fork
+          _       <- taken.await
+          // over gRPC, the inputs are taken before the entity starts
+          _       <- Sharding.localEntities(Counter).repeatUntil(_.contains("c2"))
+          _       <- Clock.sleep(100.millis) // the message reaches the mailbox right after the entity starts
+          _       <- Sharding.terminateLocalEntity(Counter, "c2")
+          summed  <- summing.join.timeout(10.seconds)
+        } yield assertTrue(error == StreamCancelled, summed.contains(StreamCancelled))
       },
       test("A stream message whose entity stops before its first element is sent again") {
         for {
@@ -828,11 +840,23 @@ object ShardingSpec extends ZIOSpecDefault {
       },
       test("Cluster singleton") {
         for {
-          p   <- Promise.make[Nothing, Unit]
-          _   <- Sharding.registerSingleton("singleton", p.succeed(()) *> ZIO.never)
-          _   <- Sharding.registerScoped
-          res <- p.await
-        } yield assertTrue(() == res)
+          p        <- Promise.make[Nothing, Unit]
+          stopping <- Promise.make[Nothing, Unit]
+          release  <- Promise.make[Nothing, Unit]
+          _        <- Sharding.registerSingleton(
+                        "singleton",
+                        (p.succeed(()) *> ZIO.never).onInterrupt(stopping.succeed(()) *> release.await)
+                      )
+          _        <- Sharding.registerScoped
+          res      <- p.await
+          // assigning another shard doesn't wait for a singleton that is stopping
+          sharding <- ZIO.service[Sharding]
+          _        <- sharding.unassign(Set(2))
+          moving   <- sharding.unassign(Set(1)).fork
+          _        <- stopping.await
+          assigned <- sharding.assign(Set(2)).timeout(1.second).ensuring(release.succeed(()))
+          _        <- moving.join *> sharding.assign(Set(1))
+        } yield assertTrue(() == res, assigned.isDefined)
       },
       test("Send stream") {
         for {
@@ -1251,6 +1275,8 @@ object CounterActor {
     case AddAndStreamChanges(from: Int = 0) extends CounterMessage[Nothing, Duplex[Int, Nothing, Int]]
     // replies with each input doubled, and ends when the inputs end
     case Doubled()                          extends CounterMessage[Nothing, Duplex[Int, Nothing, Int]]
+    // replies only once its inputs end
+    case Sum()                              extends CounterMessage[Nothing, Duplex[Int, Nothing, Int]]
     // replies with a Duplex that throws when called
     case ThrowingDuplex()                   extends CounterMessage[Nothing, Duplex[Int, Nothing, Int]]
     case TriggerTerminate()                 extends CounterMessage[Nothing, Unit]
@@ -1317,6 +1343,7 @@ object CounterActor {
               )
             )
           case Doubled()                 => ZIO.succeed(Duplex[Int, Nothing, Int](_.map(_ * 2)))
+          case Sum()                     => ZIO.succeed(Duplex[Int, Nothing, Int](input => ZStream.fromZIO(input.runSum)))
           case ThrowingDuplex()          => ZIO.succeed(Duplex[Int, Nothing, Int](_ => throw new Exception("boom")))
           case TriggerTerminate()        => sharding.terminateLocalEntity(Counter, entityId)
           case Subscriptions()           => subscriptions.get

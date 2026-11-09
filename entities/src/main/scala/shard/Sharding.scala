@@ -60,33 +60,39 @@ class Sharding private (
     // Start singletons on the pod hosting shard 1.
     shardAssignments.get.map(_.get(1).contains(address))
 
-  // `isSingletonNode` is read under the lock of `singletons`, so that the last start or stop sees the latest assignments
+  // `isSingletonNode` is read before the lock of `singletons`, which is held while a singleton stops,
+  // so that assigning another shard doesn't wait for it, and again under the lock,
+  // so that the last start or stop sees the latest assignments
   private def startSingletonsIfNeeded: UIO[Unit] =
-    singletons.updateZIO { singletons =>
-      ZIO.ifZIO(isSingletonNode)(
-        onTrue = ZIO.foreach(singletons) {
-          case (name, run, None) =>
-            ZIO.logDebug(s"Starting singleton $name") *>
-              Metrics.singletons.tagged("role", config.role.name).tagged("singleton_name", name).increment *>
-              run.forkDaemon.map(fiber => (name, run, Some(fiber)))
-          case other             => ZIO.succeed(other)
-        },
-        onFalse = ZIO.succeed(singletons)
-      )
+    ZIO.whenZIODiscard(isSingletonNode) {
+      singletons.updateZIO { singletons =>
+        ZIO.ifZIO(isSingletonNode)(
+          onTrue = ZIO.foreach(singletons) {
+            case (name, run, None) =>
+              ZIO.logDebug(s"Starting singleton $name") *>
+                Metrics.singletons.tagged("role", config.role.name).tagged("singleton_name", name).increment *>
+                run.forkDaemon.map(fiber => (name, run, Some(fiber)))
+            case other             => ZIO.succeed(other)
+          },
+          onFalse = ZIO.succeed(singletons)
+        )
+      }
     }
 
   private def stopSingletonsIfNeeded: UIO[Unit] =
-    singletons.updateZIO { singletons =>
-      ZIO.ifZIO(isSingletonNode)(
-        onTrue = ZIO.succeed(singletons),
-        onFalse = ZIO.foreach(singletons) {
-          case (name, run, Some(fiber)) =>
-            ZIO.logDebug(s"Stopping singleton $name") *>
-              Metrics.singletons.tagged("role", config.role.name).tagged("singleton_name", name).decrement *>
-              fiber.interrupt.as((name, run, None))
-          case other                    => ZIO.succeed(other)
-        }
-      )
+    ZIO.unlessZIODiscard(isSingletonNode) {
+      singletons.updateZIO { singletons =>
+        ZIO.ifZIO(isSingletonNode)(
+          onTrue = ZIO.succeed(singletons),
+          onFalse = ZIO.foreach(singletons) {
+            case (name, run, Some(fiber)) =>
+              ZIO.logDebug(s"Stopping singleton $name") *>
+                Metrics.singletons.tagged("role", config.role.name).tagged("singleton_name", name).decrement *>
+                fiber.interrupt.as((name, run, None))
+            case other                    => ZIO.succeed(other)
+          }
+        )
+      }
     }
 
   /**
@@ -337,19 +343,26 @@ class Sharding private (
 
   /**
    * Receive a stream from the pod that hosts an entity, retrying if the pod can't be reached or no longer hosts it.
-   * Until a reply was received, it is also sent again if the entity stops. After that, the stream fails with
+   * Until a reply was received, it is also sent again if the entity stops, unless the entity may have consumed inputs,
+   * since they would be lost if the input stream can't be run again. After that, the stream fails with
    * `StreamCancelled` instead of retrying.
    */
-  private def streamFromEntity(entityType: EntityType[?], entityId: String)(
-    send: PodAddress => ZStream[Any, Any, Any]
-  ): ZStream[Any, Any, Any] =
+  private def streamFromEntity(
+    entityType: EntityType[?],
+    entityId: String,
+    inputConsumed: UIO[Boolean] = ZIO.succeed(false)
+  )(send: PodAddress => ZStream[Any, Any, Any]): ZStream[Any, Any, Any] =
     ZStream.unwrap((Ref.make(false) <*> podOf(entityType, entityId)).map { case (started, pod) =>
+      def retryUnless(cancelled: UIO[Boolean]): ZStream[Any, Any, Any] =
+        ZStream.unwrap(cancelled.map {
+          case false =>
+            ZStream.execute(Clock.sleep(200.millis)) ++ streamFromEntity(entityType, entityId, inputConsumed)(send)
+          case true  => ZStream.fail(StreamCancelled)
+        })
+
       send(pod).mapChunksZIO(chunk => started.set(true).when(chunk.nonEmpty).as(chunk)).catchSome {
-        case Sharding.Retry(_) | StreamCancelled =>
-          ZStream.unwrap(started.get.map {
-            case false => ZStream.execute(Clock.sleep(200.millis)) ++ streamFromEntity(entityType, entityId)(send)
-            case true  => ZStream.fail(StreamCancelled)
-          })
+        case Sharding.Retry(_) => retryUnless(started.get)
+        case StreamCancelled   => retryUnless(started.get.zipWith(inputConsumed)(_ || _))
       }
     })
 
@@ -487,9 +500,11 @@ class Sharding private (
         input: ZStream[Any, E1, In]
       ): ZStream[Any, E | E1 | E2 | ClusterError, A] =
         ZStream
-          .unwrap(Promise.make[Any, Nothing].map { inputFailure =>
-            val safeInput = input.catchAllCause(cause => ZStream.execute(inputFailure.failCause(cause)))
-            streamFromEntity(entityType, entityId)(
+          .unwrap((Promise.make[Any, Nothing] <*> Ref.make(false)).map { case (inputFailure, consumed) =>
+            val safeInput = input
+              .mapChunksZIO(chunk => consumed.set(true).when(chunk.nonEmpty).as(chunk))
+              .catchAllCause(cause => ZStream.execute(inputFailure.failCause(cause)))
+            streamFromEntity(entityType, entityId, consumed.get)(
               deliverStream(entityType, entityId, _, message, safeInput, inputFailure.fail(_))
             )
               .interruptWhen(inputFailure) ++
