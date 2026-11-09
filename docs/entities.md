@@ -36,7 +36,7 @@ Entity and topic types must all have different names.
 
 `registerEntity` takes an optional `EntityOptions` to configure each entity type:
 - `maxIdleTime`: time without processing any message after which an entity is stopped (defaults to `Config.entityMaxIdleTime`). An entity with messages in progress or open streams is never stopped.
-- `concurrency`: maximum number of messages processed at the same time by an entity. The default is 1: messages are processed one at a time, in order.
+- `concurrency`: maximum number of messages processed at the same time by an entity. The default is 1: messages are processed one at a time, in order. Above 65536, the concurrency is unbounded.
 - `mailboxCapacity`: maximum number of messages waiting or being processed by an entity (4096 by default, `EntityOptions.Unbounded` for no limit). Beyond that, messages fail with `MailboxFull`.
 - `loadEntity`: whether a message should start the entity when it isn't running. If not, the message is discarded: `sendDiscard` succeeds and `send` fails with `MessageDiscarded`.
 - `interceptor`: wraps the entities and their messages, see [Interceptors](#interceptors).
@@ -58,7 +58,7 @@ Sharding.registerEntity(
 ## Interceptors
 
 An `EntityInterceptor` wraps the entities of a type and the processing of their messages, e.g. to add log annotations, timing or tracing:
-- `aroundEntity` wraps the whole life of an entity: its behavior, its messages and the finalizers of its scope. What it sets in fiber refs (e.g. `ZIO.logAnnotate`) applies to all of them, but not to the streams of `Streamed` and `Duplex` replies, which run outside of the entity.
+- `aroundEntity` wraps the whole life of an entity: its behavior, its messages and the finalizers of its scope. Stopping the entity waits for it to return for at most twice `entityTerminationTimeout`. What it sets in fiber refs (e.g. `ZIO.logAnnotate`) applies to all of them, but not to the streams of `Streamed` and `Duplex` replies, which run outside of the entity.
 - `aroundMessage` wraps the processing of each message by the handler, with the message and its outcome. As in a handler, pattern matching on the message refines `E` and `A` to the types declared by each message. For `Streamed` and `Duplex` replies, it wraps the creation of the stream, not the stream itself.
 
 ```scala
@@ -92,7 +92,7 @@ A `Messenger` offers several ways to send messages, each taking the ID of the ta
 - `streamAutoRestart` and `duplexAutoRestart` are like `stream` and `duplex`, but restart the stream when the entity is rebalanced.
   The message is built from a cursor, which is updated with each reply so that the stream restarts where it ended.
 
-The compiler rejects messages whose reply is a stream in `send` and `sendDiscard`.
+The compiler rejects messages whose reply is a stream in `send` and `sendDiscard`, as long as it knows the reply type: in a helper generic in the reply type, it can't.
 
 ```scala
 for {
@@ -177,7 +177,7 @@ for {
 ## Running entities
 
 `Sharding.localEntities` returns the IDs of the entities of a type currently running on this pod (or the topics, for a topic type).
-An entity is included from its start until its `Scope` is closed, which is useful for debug or admin pages.
+An entity is included from its start until its `Scope` is closed, or until twice `entityTerminationTimeout` after its stop began if it takes longer, which is useful for debug or admin pages.
 
 ## Shard of an entity
 

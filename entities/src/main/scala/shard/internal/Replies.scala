@@ -7,8 +7,6 @@ import shard.interfaces.Pods.BinaryReply
 import zio._
 import zio.stream.ZStream
 
-import scala.util.control.NonFatal
-
 /**
  * Conversions between the results of messages and their binary replies.
  */
@@ -22,37 +20,27 @@ private[shard] object Replies {
     exit.foldExit(cause => Exit.fail(toError(cause, interruptedError)), Exit.succeed)
 
   def toError(cause: Cause[Any], interruptedError: => ClusterError): Any =
-    cause.failureOrCause match {
-      case Left(error)  => error
-      case Right(other) => other.dieOption.fold[Any](interruptedError)(entityDefect)
-    }
+    foldCause[Any](cause, entityDefect, interruptedError)(identity)
 
   def encodeExit(exit: Exit[Any, Any], codec: ReplyCodec): BinaryReply =
     exit match {
       case Exit.Success(value) => attempt("encode a reply")(BinaryReply.Success(codec.value.encode(value)))
       case Exit.Failure(cause) =>
-        cause.failureOrCause match {
-          case Left(error)  => attempt("encode a failure")(BinaryReply.Failure(codec.error.encode(error)))
-          case Right(other) => other.dieOption.fold[BinaryReply](BinaryReply.Interrupted)(defect)
-        }
+        foldCause[BinaryReply](cause, defect, BinaryReply.Interrupted)(error =>
+          attempt("encode a failure")(BinaryReply.Failure(codec.error.encode(error)))
+        )
     }
 
   def encodeStream(stream: ZStream[Any, Any, Any], codec: ReplyCodec): ZStream[Any, Nothing, BinaryReply] =
-    stream
-      .mapChunksZIO(chunk =>
-        ZIO
-          .attempt(chunk.map(value => BinaryReply.Element(codec.value.encode(value))))
-          .mapError(serializationError("encode a stream element", _))
-      )
+    mapElements(stream, "encode a stream element")(value => BinaryReply.Element(codec.value.encode(value)))
       .catchAllCause(cause =>
-        ZStream.succeed(cause.failureOrCause match {
-          case Left(StreamCancelled)           => BinaryReply.Interrupted
+        ZStream.succeed(foldCause[BinaryReply](cause, defect, BinaryReply.Interrupted) {
+          case StreamCancelled           => BinaryReply.Interrupted
           // the entity is stopping: the sender sends the message again
-          case Left(_: Sharding.Retry)         => BinaryReply.EntityNotManagedByThisPod
-          case Left(error: SerializationError) => BinaryReply.SerializationError(error.message)
-          case Left(error)                     =>
+          case _: Sharding.Retry         => BinaryReply.EntityNotManagedByThisPod
+          case error: SerializationError => BinaryReply.SerializationError(error.message)
+          case error                     =>
             attempt("encode a stream failure")(BinaryReply.StreamFailure(codec.streamError.encode(error)))
-          case Right(other)                    => other.dieOption.fold[BinaryReply](BinaryReply.Interrupted)(defect)
         })
       )
 
@@ -65,7 +53,7 @@ private[shard] object Replies {
     // an element is decoded, a reply ending the stream becomes its failure
     def toExit(reply: BinaryReply): Exit[Option[Any], Any] =
       reply match {
-        case BinaryReply.Element(body)       => Exit.succeed(codec.value.decode(body))
+        case BinaryReply.Element(body)       => decode(codec.value, body, "a stream element").mapErrorExit(Some(_))
         case BinaryReply.StreamFailure(body) =>
           decode(codec.streamError, body, "a stream failure").flatMapExit(Exit.fail).mapErrorExit(Some(_))
         case BinaryReply.Interrupted         => Exit.fail(Some(StreamCancelled))
@@ -74,9 +62,7 @@ private[shard] object Replies {
         case other                           => decodeReply(other, codec, entityType, entityId).mapErrorExit(Some(_))
       }
 
-    replies
-      .mapChunksZIO(chunk => ZIO.attempt(chunk.map(toExit)).mapError(serializationError("decode a stream element", _)))
-      .flattenExitOption
+    replies.map(toExit).flattenExitOption
   }
 
   def decodeReply(reply: BinaryReply, codec: ReplyCodec, entityType: String, entityId: String): Exit[Any, Any] =
@@ -101,17 +87,36 @@ private[shard] object Replies {
   def serializationError(action: String, throwable: Throwable): SerializationError =
     SerializationError(s"Failed to $action: $throwable")
 
+  /**
+   * Convert the elements of a stream with a codec, failing with a `SerializationError` for `action` if it throws.
+   */
+  def mapElements[E, A, B](stream: ZStream[Any, E, A], action: String)(
+    f: A => B
+  ): ZStream[Any, E | SerializationError, B] =
+    stream.mapChunksZIO(chunk =>
+      catching[Exit[SerializationError, Chunk[B]]](action)(Exit.succeed(chunk.map(f)))(Exit.fail)
+    )
+
+  // what `ZIO.attempt` catches, without its work per call
+  private inline def catching[A](inline action: String)(inline body: A)(inline onError: SerializationError => A): A =
+    try body
+    catch {
+      case throwable if !throwable.isInstanceOf[VirtualMachineError] => onError(serializationError(action, throwable))
+    }
+
+  // a defect wins over a failure in the same cause, since it stops the entity
+  private def foldCause[B](cause: Cause[Any], onDefect: Throwable => B, onInterrupt: => B)(onFailure: Any => B): B =
+    cause.dieOption.fold(cause.failureOption.fold(onInterrupt)(onFailure))(onDefect)
+
   private def entityDefect(throwable: Throwable): EntityDefect =
     EntityDefect(s"Entity died with ${throwable.getClass.getName}: ${throwable.getMessage}")
 
   private def decode(codec: Codec, body: Array[Byte], what: String): Exit[SerializationError, Any] =
-    try Exit.succeed(codec.decode(body))
-    catch { case NonFatal(throwable) => Exit.fail(serializationError(s"decode $what", throwable)) }
+    catching[Exit[SerializationError, Any]](s"decode $what")(Exit.succeed(codec.decode(body)))(Exit.fail)
 
   private def defect(throwable: Throwable): BinaryReply =
     BinaryReply.Defect(entityDefect(throwable).message)
 
   private def attempt(action: String)(reply: => BinaryReply): BinaryReply =
-    try reply
-    catch { case NonFatal(throwable) => BinaryReply.SerializationError(serializationError(action, throwable).message) }
+    catching(action)(reply)(error => BinaryReply.SerializationError(error.message))
 }

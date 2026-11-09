@@ -27,6 +27,7 @@ trait EntityInterceptor[-Msg[_, _]] { self =>
    * Wraps the whole life of one entity: its behavior, every message, and the finalizers of its scope.
    * The streams of `Streamed` and `Duplex` replies run outside of it.
    * It must run `effect` once. If it dies, the messages sent to the entity fail with `EntityDefect`.
+   * Stopping the entity waits for it to return for at most twice `entityTerminationTimeout`.
    */
   def aroundEntity[E, A](recipientType: RecipientType[?], entityId: String)(effect: IO[E, A]): IO[E, A] = effect
 

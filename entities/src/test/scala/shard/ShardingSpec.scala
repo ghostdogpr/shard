@@ -9,7 +9,7 @@ import shard.errors._
 import shard.interfaces.{ Pods, ShardManagerClient, Storage }
 import shard.internal.LocalShardManagerClient
 import shard.javaSerialization.given
-import zio.stream.{ SubscriptionRef, ZStream }
+import zio.stream.{ SubscriptionRef, ZChannel, ZStream }
 import zio.test.TestAspect.{ sequential, withLiveClock }
 import zio.test._
 import zio.{ Config => _, _ }
@@ -99,31 +99,9 @@ object ShardingSpec extends ZIOSpecDefault {
         for {
           assignments <- Ref.make(Map(1 -> Option(self)))
           disconnect  <- Promise.make[Nothing, Unit]
-          subscribed  <- Ref.make(false)
           stopped     <- Promise.make[Nothing, Unit]
-          manager      = new ShardManagerClient {
-                           def register(podAddress: PodAddress, role: Role): Task[Unit]           = ZIO.unit
-                           // the Shard Manager gives the shards of the pod to another pod
-                           def unregister(podAddress: PodAddress): Task[Unit]                     =
-                             assignments.set(Map(1 -> Some(otherPod)))
-                           def notifyUnhealthyPod(podAddress: PodAddress): Task[Unit]             = ZIO.unit
-                           def getAssignments(role: Role): Task[Map[ShardId, Option[PodAddress]]] = assignments.get
-                         }
-          storage      = new Storage {
-                           def getAssignments(role: Role): Task[Map[ShardId, Option[PodAddress]]]                       =
-                             assignments.get
-                           def saveAssignments(role: Role, value: Map[ShardId, Option[PodAddress]]): Task[Unit]         =
-                             assignments.set(value)
-                           // the first subscription fails when disconnected, so the new assignments are only
-                           // received from the Shard Manager when reconnecting
-                           def assignmentsStream(role: Role): ZStream[Any, Throwable, Map[ShardId, Option[PodAddress]]] =
-                             ZStream.unwrap(subscribed.getAndSet(true).map {
-                               case false => ZStream.fromZIO(disconnect.await *> ZIO.fail(new Exception("disconnected")))
-                               case true  => ZStream.never
-                             })
-                           def getPods: Task[Set[Pod]]                                                                  = ZIO.succeed(Set.empty)
-                           def savePods(pods: Set[Pod]): Task[Unit]                                                     = ZIO.unit
-                         }
+          reconnected <- Promise.make[Nothing, Unit]
+          storage     <- reconnectingStorage(assignments, disconnect, reconnected)
           _           <- (Sharding.registerSingleton("singleton", ZIO.never.onInterrupt(stopped.succeed(()))) *>
                            Sharding.register *>
                            Sharding.unregister *>
@@ -131,15 +109,112 @@ object ShardingSpec extends ZIOSpecDefault {
                            stopped.await).provide(
                            Sharding.live,
                            Pods.noop,
-                           ZLayer.succeed(manager),
+                           ZLayer.succeed(takingShardsBack(assignments)),
                            ZLayer.succeed(storage),
                            ZLayer.succeed(config)
                          )
         } yield assertCompletes
+      },
+      test("A singleton slow to stop doesn't block the assignments of a pod reconnecting to the storage") {
+        val config = Config.default.copy(refreshAssignmentsRetryInterval = 10.millis)
+        val self   = PodAddress(config.selfHost, config.shardingPort)
+        for {
+          assignments <- Ref.make(Map(1 -> Option(self)))
+          disconnect  <- Promise.make[Nothing, Unit]
+          release     <- Promise.make[Nothing, Unit]
+          reconnected <- Promise.make[Nothing, Unit]
+          storage     <- reconnectingStorage(assignments, disconnect, reconnected)
+          result      <- (Sharding.registerSingleton("singleton", ZIO.never.onInterrupt(release.await)) *>
+                           Sharding.register *>
+                           Sharding.unregister *>
+                           disconnect.succeed(()) *>
+                           reconnected.await.timeout(5.seconds) <*
+                           release.succeed(())).provide(
+                           Sharding.live,
+                           Pods.noop,
+                           ZLayer.succeed(takingShardsBack(assignments)),
+                           ZLayer.succeed(storage),
+                           ZLayer.succeed(config)
+                         )
+        } yield assertTrue(result.isDefined)
+      },
+      test("A snapshot fetched before the Shard Manager assigned shards to the pod doesn't undo the assignment") {
+        val config = Config.default.copy(refreshAssignmentsRetryInterval = 10.millis)
+        val self   = PodAddress(config.selfHost, config.shardingPort)
+        for {
+          assignments <- Ref.make(Map[ShardId, Option[PodAddress]](1 -> None))
+          fetches     <- Ref.make(0)
+          disconnect  <- Promise.make[Nothing, Unit]
+          fetched     <- Promise.make[Nothing, Unit]
+          late        <- Promise.make[Nothing, Unit]
+          reconnected <- Promise.make[Nothing, Unit]
+          stopped     <- Promise.make[Nothing, Unit]
+          manager      = new ShardManagerClient {
+                           def register(podAddress: PodAddress, role: Role): Task[Unit]           = ZIO.unit
+                           def unregister(podAddress: PodAddress): Task[Unit]                     = ZIO.unit
+                           def notifyUnhealthyPod(podAddress: PodAddress): Task[Unit]             = ZIO.unit
+                           // the reply to the first call after reconnecting arrives late, with the old assignments
+                           def getAssignments(role: Role): Task[Map[ShardId, Option[PodAddress]]] =
+                             assignments.get <* fetches
+                               .updateAndGet(_ + 1)
+                               .flatMap(n => (fetched.succeed(()) *> late.await).when(n == 2))
+                         }
+          storage     <- reconnectingStorage(assignments, disconnect, reconnected)
+          result      <- (for {
+                           sharding  <- ZIO.service[Sharding]
+                           _         <- Sharding.registerSingleton("singleton", ZIO.never.onInterrupt(stopped.succeed(())))
+                           _         <- disconnect.succeed(())
+                           _         <- fetched.await
+                           _         <- assignments.set(Map(1 -> Some(self)))
+                           _         <- sharding.assign(Set(1))
+                           _         <- late.succeed(())
+                           _         <- reconnected.await
+                           singleton <- Sharding.isSingletonNode
+                           interrupt <- stopped.isDone
+                         } yield (singleton, interrupt)).provide(
+                           Sharding.live,
+                           Pods.noop,
+                           ZLayer.succeed(manager),
+                           ZLayer.succeed(storage),
+                           ZLayer.succeed(config)
+                         )
+        } yield assertTrue(result == (true, false))
       }
     ) @@ sequential @@ withLiveClock @@ TestAspect.timeout(60.seconds)
 
   val otherPod: PodAddress = PodAddress("other", 1)
+
+  // a Shard Manager that gives the shards of a pod that unregisters to another pod
+  private def takingShardsBack(assignments: Ref[Map[ShardId, Option[PodAddress]]]): ShardManagerClient =
+    new ShardManagerClient {
+      def register(podAddress: PodAddress, role: Role): Task[Unit]           = ZIO.unit
+      def unregister(podAddress: PodAddress): Task[Unit]                     = assignments.set(Map(1 -> Some(otherPod)))
+      def notifyUnhealthyPod(podAddress: PodAddress): Task[Unit]             = ZIO.unit
+      def getAssignments(role: Role): Task[Map[ShardId, Option[PodAddress]]] = assignments.get
+    }
+
+  // a storage whose first subscription fails when `disconnect` completes, so that the new assignments are only received
+  // from the Shard Manager when reconnecting; `reconnected` completes on the next subscription
+  private def reconnectingStorage(
+    assignments: Ref[Map[ShardId, Option[PodAddress]]],
+    disconnect: Promise[Nothing, Unit],
+    reconnected: Promise[Nothing, Unit]
+  ): UIO[Storage] =
+    Ref.make(false).map { subscribed =>
+      new Storage {
+        def getAssignments(role: Role): Task[Map[ShardId, Option[PodAddress]]]                       =
+          assignments.get
+        def saveAssignments(role: Role, value: Map[ShardId, Option[PodAddress]]): Task[Unit]         =
+          assignments.set(value)
+        def assignmentsStream(role: Role): ZStream[Any, Throwable, Map[ShardId, Option[PodAddress]]] =
+          ZStream.unwrap(subscribed.getAndSet(true).map {
+            case false => ZStream.fromZIO(disconnect.await *> ZIO.fail(new Exception("disconnected")))
+            case true  => ZStream.fromZIO(reconnected.succeed(())) *> ZStream.never
+          })
+        def getPods: Task[Set[Pod]]                                                                  = ZIO.succeed(Set.empty)
+        def savePods(pods: Set[Pod]): Task[Unit]                                                     = ZIO.unit
+      }
+    }
 
   // what the Shard Manager does when it moves shards
   def giveAllShardsTo(pod: PodAddress): RIO[Storage & Config, Unit] =
@@ -182,6 +257,14 @@ object ShardingSpec extends ZIOSpecDefault {
           c1      <- counter.send("c1")(GetCounter()) // counter should be restarted
         } yield assertTrue(error == EntityDefect("Entity died with java.lang.Exception: boom"), c1 == 0)
       },
+      test("A message that both fails and dies is a defect") {
+        for {
+          counter <- startCounter()
+          _       <- counter.send("c1")(IncrementCounter())
+          error   <- counter.send("c1")(FailAndDie()).flip
+          c1      <- counter.send("c1")(GetCounter()) // counter should be restarted
+        } yield assertTrue(error == EntityDefect("Entity died with java.lang.Exception: boom"), c1 == 0)
+      },
       test("A defect in a response stream ends it with EntityDefect, after its elements") {
         for {
           counter <- startCounter()
@@ -195,12 +278,51 @@ object ShardingSpec extends ZIOSpecDefault {
       test("Messages to an entity type that is not registered fail with TransportError") {
         for {
           _       <- Sharding.registerScoped
-          counter <- Sharding.messenger(Counter)
+          counter <- Sharding.messenger(NeverRegistered)
           error   <- counter.send("c1")(GetCounter()).flip
         } yield assertTrue(error match {
-          case TransportError(message) => message.contains("Entity type counter was not registered")
+          case TransportError(message) => message.contains("Entity type never-registered was not registered")
           case _                       => false
         })
+      },
+      test("Messages to an entity type whose registration closed are retried") {
+        for {
+          _       <- Sharding.registerScoped
+          _       <- ZIO.scoped(Sharding.registerEntity(ClosedCounter)(behavior))
+          counter <- Sharding.messenger(ClosedCounter, MessengerTimeout.Timeout(500.millis))
+          error   <- counter.send("c1")(GetCounter()).flip
+        } yield assertTrue(error == SendTimeout(ClosedCounter.name, "c1"))
+      },
+      test("A sendDiscard that can't be delivered times out even from an uninterruptible region") {
+        for {
+          _       <- Sharding.registerScoped
+          _       <- ZIO.scoped(Sharding.registerEntity(ClosedCounter)(behavior))
+          counter <- Sharding.messenger(ClosedCounter, MessengerTimeout.Timeout(500.millis))
+          sent    <- counter.sendDiscard("c1")(GetCounter()).uninterruptible.fork
+          exit    <- sent.await.timeout(5.seconds)
+        } yield assertTrue(exit.contains(Exit.fail(SendTimeout(ClosedCounter.name, "c1"))))
+      },
+      test("An empty sendStream to an entity type that is not registered does nothing, like on a remote pod") {
+        for {
+          _       <- Sharding.registerScoped
+          counter <- Sharding.messenger(NeverRegistered)
+          _       <- counter.sendStream("c1")(ZStream.empty)
+        } yield assertCompletes
+      },
+      test("Messages sent while the pod is stopping are retried, even after their entity type is unregistered") {
+        for {
+          _      <- Sharding.registerScoped
+          state  <- WorkerState.make
+          _      <- ZIO.scoped(Sharding.registerEntity(Worker)(worker(state)) *> Sharding.unregister)
+          worker <- Sharding.messenger(Worker, MessengerTimeout.Timeout(500.millis))
+          error  <- worker.send("w1")(Ping()).flip
+        } yield assertTrue(error == SendTimeout(Worker.name, "w1"))
+      },
+      test("A getShardId that throws is a defect of the returned effect") {
+        for {
+          counter <- Sharding.messenger(UnhashableCounter)
+          exit    <- counter.send("c1")(GetCounter()).exit
+        } yield assertTrue(exit.causeOption.exists(_.isDie))
       },
       test("Response stream") {
         for {
@@ -222,6 +344,12 @@ object ShardingSpec extends ZIOSpecDefault {
           restart <- counter.streamAutoRestart("c1", 0)(_ => Chunked())((c, _) => c).chunks.runCollect
         } yield assertTrue(chunks == Chunk(Chunk(1, 2, 3), Chunk(4, 5)), restart == chunks)
       } @@ TestAspect.tag(inProcess),
+      test("A response stream that both fails and dies is a defect") {
+        for {
+          counter <- startCounter()
+          error   <- counter.stream("c1")(FailingAndDyingStream()).runDrain.flip
+        } yield assertTrue(error == EntityDefect("Entity died with java.lang.Exception: boom"))
+      },
       test("Response stream interruption") {
         for {
           counter <- startCounter()
@@ -242,6 +370,18 @@ object ShardingSpec extends ZIOSpecDefault {
           _       <- Sharding.terminateLocalEntity(Counter, "c1")
           error   <- fiber.join
         } yield assertTrue(error == StreamCancelled)
+      },
+      test("A stream message whose entity stops before its first element is sent again") {
+        for {
+          state  <- startWorker()
+          worker <- Sharding.messenger(Worker)
+          fiber  <- worker.stream("w1")(GatedStream()).runCollect.fork
+          _      <- state.running.changes.takeUntil(_ == 1).runDrain
+          _      <- Sharding.terminateLocalEntity(Worker, "w1")
+          _      <- state.started.get.repeatUntil(_ == 2).timeout(5.seconds)
+          _      <- state.gate.succeed(())
+          items  <- fiber.join
+        } yield assertTrue(items == Chunk(2))
       },
       autoRestartTest("Response stream auto restart")(
         _.streamAutoRestart("c1", 0)(from => StreamingChanges(from))((_, n) => n + 1)
@@ -308,6 +448,160 @@ object ShardingSpec extends ZIOSpecDefault {
           _      <- ZIO.unit.ensuring(Sharding.terminateLocalEntity(Worker, "w2"))
           _      <- state.running.changes.takeUntil(_ == 0).runDrain
         } yield assertCompletes
+      },
+      test("A finalizer that never ends doesn't block the shard's rebalance, and the entity can start again") {
+        for {
+          _        <- Sharding.registerScoped
+          state    <- WorkerState.make
+          hung     <- Ref.make(true)
+          _        <- Sharding.registerEntity(Worker)(entityId =>
+                        worker(state)(entityId) <* ZIO.addFinalizer(hung.getAndSet(false).flatMap(ZIO.never.when(_)))
+                      )
+          worker   <- Sharding.messenger(Worker)
+          sharding <- ZIO.service[Sharding]
+          _        <- worker.send("w1")(Ping())
+          shard     = sharding.getShardId(Worker, "w1")
+          moved    <- sharding.unassign(Set(shard)).ensuring(sharding.assign(Set(shard))).timeout(10.seconds)
+          ping     <- worker.send("w1")(Ping()).exit
+        } yield assertTrue(moved.isDefined, ping.isSuccess)
+      },
+      test("The entity types of a shard stop in parallel when it is unassigned") {
+        for {
+          first    <- Promise.make[Nothing, Unit]
+          second   <- Promise.make[Nothing, Unit]
+          state    <- WorkerState.make
+          // each finalizer waits for the other one, so stopping the types one at a time reaches the stop bound
+          _        <- Sharding.registerEntity(Worker)(entityId =>
+                        worker(state)(entityId) <* ZIO.addFinalizer(first.succeed(()) *> second.await)
+                      )
+          _        <- Sharding.registerEntity(Counter)(entityId =>
+                        behavior(entityId) <* ZIO.addFinalizer(second.succeed(()) *> first.await)
+                      )
+          _        <- Sharding.registerScoped
+          workers  <- Sharding.messenger(Worker)
+          counters <- Sharding.messenger(Counter)
+          sharding <- ZIO.service[Sharding]
+          _        <- workers.send("w1")(Ping())
+          _        <- counters.send("w1")(GetCounter())
+          shard     = sharding.getShardId(Worker, "w1")
+          moved    <- sharding.unassign(Set(shard)).timed.ensuring(sharding.assign(Set(shard)))
+        } yield assertTrue(moved._1 < Config.default.entityTerminationTimeout)
+      },
+      test("A message stuck in uninterruptible code doesn't block the shard's rebalance") {
+        val interceptor = new EntityInterceptor[WorkerMessage] {
+          override def aroundMessage[E, A](
+            recipientType: RecipientType[?],
+            entityId: String,
+            message: WorkerMessage[E, A]
+          )(effect: IO[E, A]): IO[E, A] =
+            effect.uninterruptible
+        }
+        for {
+          state    <- startWorker(EntityOptions(interceptor = interceptor))
+          worker   <- Sharding.messenger(Worker)
+          sharding <- ZIO.service[Sharding]
+          _        <- worker.sendDiscard("w1")(Gated())
+          _        <- state.running.changes.takeUntil(_ == 1).runDrain
+          shard     = sharding.getShardId(Worker, "w1")
+          moved    <- sharding
+                        .unassign(Set(shard))
+                        .timeout(10.seconds)
+                        .ensuring(state.gate.succeed(()) *> sharding.assign(Set(shard)))
+        } yield assertTrue(moved.isDefined)
+      },
+      test("An interceptor dying after the end of the entity doesn't delay the shard's rebalance") {
+        val interceptor = new EntityInterceptor[WorkerMessage] {
+          override def aroundEntity[E, A](recipientType: RecipientType[?], entityId: String)(
+            effect: IO[E, A]
+          ): IO[E, A] =
+            effect <* ZIO.dieMessage("boom")
+        }
+        for {
+          _        <- startWorker(EntityOptions(interceptor = interceptor))
+          worker   <- Sharding.messenger(Worker)
+          sharding <- ZIO.service[Sharding]
+          _        <- worker.send("w1")(Ping())
+          shard     = sharding.getShardId(Worker, "w1")
+          moved    <- sharding.unassign(Set(shard)).timed.ensuring(sharding.assign(Set(shard)))
+          entities <- Sharding.localEntities(Worker)
+          ping     <- worker.send("w1")(Ping()).exit
+        } yield assertTrue(moved._1 < Config.default.entityTerminationTimeout, !entities.contains("w1"), ping.isSuccess)
+      },
+      test("An interceptor that never runs the entity doesn't block the shard's rebalance") {
+        for {
+          _        <- startWorker(EntityOptions(interceptor = neverRunsEntity))
+          worker   <- Sharding.messenger(Worker, MessengerTimeout.NoTimeout)
+          sharding <- ZIO.service[Sharding]
+          sent     <- worker.send("w1")(Ping()).exit.fork
+          _        <- Sharding.localEntities(Worker).repeatUntil(_.contains("w1"))
+          _        <- Clock.sleep(100.millis) // the message reaches the mailbox right after the entity starts
+          shard     = sharding.getShardId(Worker, "w1")
+          moved    <- sharding.unassign(Set(shard)).timeout(10.seconds).ensuring(sharding.assign(Set(shard)))
+          exit     <- sent.join.timeout(1.second)
+        } yield assertTrue(moved.isDefined, exit.contains(Exit.fail(EntityInterrupted(Worker.name, "w1"))))
+      },
+      test("An interceptor that never runs the entity doesn't keep a stopped entity forever") {
+        for {
+          _      <- startWorker(EntityOptions(interceptor = neverRunsEntity))
+          worker <- Sharding.messenger(Worker, MessengerTimeout.NoTimeout)
+          sent   <- worker.send("w1")(Ping()).exit.fork
+          _      <- Sharding.localEntities(Worker).repeatUntil(_.contains("w1"))
+          _      <- Clock.sleep(100.millis) // the message reaches the mailbox right after the entity starts
+          _      <- Sharding.terminateLocalEntity(Worker, "w1")
+          exit   <- sent.join.timeout(10.seconds)
+        } yield assertTrue(exit.contains(Exit.fail(EntityInterrupted(Worker.name, "w1"))))
+      },
+      test("An interceptor running the entity after the stop gave up on it doesn't start it") {
+        for {
+          gate       <- Promise.make[Nothing, Unit]
+          ended      <- Promise.make[Nothing, Unit]
+          interceptor = new EntityInterceptor[WorkerMessage] {
+                          override def aroundEntity[E, A](recipientType: RecipientType[?], entityId: String)(
+                            effect: IO[E, A]
+                          ): IO[E, A] =
+                            (gate.await *> effect).ensuring(ended.succeed(()))
+                        }
+          state      <- startWorker(EntityOptions(interceptor = interceptor))
+          worker     <- Sharding.messenger(Worker)
+          sharding   <- ZIO.service[Sharding]
+          _          <- worker.sendDiscard("w1")(Ping())
+          _          <- Sharding.localEntities(Worker).repeatUntil(_.contains("w1"))
+          shard       = sharding.getShardId(Worker, "w1")
+          _          <- sharding.unassign(Set(shard)).ensuring(sharding.assign(Set(shard)))
+          _          <- gate.succeed(())
+          _          <- ended.await
+          started    <- state.started.get
+        } yield assertTrue(started == 0)
+      },
+      test("A message sent from a finalizer is delivered even if the entity is stopping") {
+        for {
+          state   <- startWorker()
+          worker  <- Sharding.messenger(Worker, MessengerTimeout.NoTimeout)
+          _       <- worker.sendDiscard("w1")(Gated())
+          _       <- state.running.changes.takeUntil(_ == 1).runDrain
+          _       <- Sharding.terminateLocalEntity(Worker, "w1") // stopping until the gate opens
+          started <- Promise.make[Nothing, Unit]
+          result  <- Promise.make[Nothing, Exit[Any, Unit]]
+          sender  <-
+            (started.succeed(()) *> ZIO.never).ensuring(worker.send("w1")(Ping()).exit.flatMap(result.succeed)).fork
+          _       <- started.await
+          _       <- sender.interrupt.fork
+          _       <- Clock.sleep(300.millis)                     // longer than the delay before trying again
+          _       <- state.gate.succeed(())
+          exit    <- result.await
+        } yield assertTrue(exit.isSuccess)
+      },
+      test("A message sent with sendDiscard from a fiber being interrupted is delivered") {
+        for {
+          state   <- startWorker()
+          worker  <- Sharding.messenger(Worker)
+          started <- Promise.make[Nothing, Unit]
+          sender  <- (started.succeed(()) *> ZIO.never).ensuring(worker.sendDiscard("w1")(CompleteNow()).ignore).fork
+          _       <- started.await
+          _       <- sender.interrupt
+          _       <- state.completed.changes.takeUntil(_ == 1).runDrain.timeout(5.seconds)
+          done    <- state.completed.get
+        } yield assertTrue(done == 1)
       },
       test("Send timeout interrupts the message") {
         for {
@@ -871,6 +1165,11 @@ object ShardingSpec extends ZIOSpecDefault {
       }
     )
 
+  private val neverRunsEntity: EntityInterceptor[WorkerMessage] = new EntityInterceptor[WorkerMessage] {
+    override def aroundEntity[E, A](recipientType: RecipientType[?], entityId: String)(effect: IO[E, A]): IO[E, A] =
+      ZIO.never *> effect
+  }
+
   /**
    * An interceptor that logs around each entity and message.
    */
@@ -941,11 +1240,14 @@ object CounterActor {
     case IncrementCounter()                 extends CounterMessage[Nothing, Unit]
     case DecrementCounter()                 extends CounterMessage[Nothing, Unit]
     case Fail()                             extends CounterMessage[CounterError, Unit]
+    case FailAndDie()                       extends CounterMessage[CounterError, Unit]
     case Die()                              extends CounterMessage[Nothing, Unit]
     case StreamingChanges(from: Int = 0)    extends CounterMessage[Nothing, Streamed[Nothing, Int]]
     // 1 to 1000, then dies
     case DyingStream()                      extends CounterMessage[Nothing, Streamed[Nothing, Int]]
     case Chunked()                          extends CounterMessage[Nothing, Streamed[Nothing, Int]]
+    // fails with a cause that has both a failure and a defect
+    case FailingAndDyingStream()            extends CounterMessage[CounterError, Streamed[CounterError, Int]]
     case AddAndStreamChanges(from: Int = 0) extends CounterMessage[Nothing, Duplex[Int, Nothing, Int]]
     // replies with each input doubled, and ends when the inputs end
     case Doubled()                          extends CounterMessage[Nothing, Duplex[Int, Nothing, Int]]
@@ -957,6 +1259,14 @@ object CounterActor {
   }
 
   object Counter extends EntityType[CounterMessage]("counter")
+
+  object NeverRegistered extends EntityType[CounterMessage]("never-registered")
+
+  object ClosedCounter extends EntityType[CounterMessage]("closed-counter")
+
+  object UnhashableCounter extends EntityType[CounterMessage]("unhashable") {
+    override def getShardId(entityId: String, numberOfShards: Int): ShardId = throw new Exception("boom")
+  }
 
   // a different entity type with the same name
   object OtherCounter extends TopicType[CounterMessage]("counter")
@@ -983,11 +1293,20 @@ object CounterActor {
           case IncrementCounter()        => state.update(_ + 1)
           case DecrementCounter()        => state.update(_ - 1)
           case Fail()                    => ZIO.fail(CounterError("failed"))
+          case FailAndDie()              => ZIO.fail(CounterError("failed")).ensuring(ZIO.die(new Exception("boom")))
           case Die()                     => ZIO.die(new Exception("boom"))
           case StreamingChanges(from)    => ZIO.succeed(Streamed(changes.filter(_ >= from).ensuring(state.set(-1))))
           case DyingStream()             =>
             ZIO.succeed(Streamed(ZStream.fromIterable(1 to 1000) ++ ZStream.die(new Exception("boom"))))
           case Chunked()                 => ZIO.succeed(Streamed(ZStream.fromChunks(Chunk(1, 2, 3), Chunk(4, 5))))
+          case FailingAndDyingStream()   =>
+            ZIO.succeed(
+              Streamed(
+                ZStream.fromChannel(
+                  ZChannel.refailCause(Cause.fail(CounterError("failed")) && Cause.die(new Exception("boom")))
+                )
+              )
+            )
           case AddAndStreamChanges(from) =>
             ZIO.succeed(
               Duplex[Int, Nothing, Int](input =>
@@ -1019,6 +1338,8 @@ object WorkerActor {
     case LongUninterruptible() extends WorkerMessage[Nothing, Unit] with Uninterruptible
     case SlowStream()          extends WorkerMessage[Nothing, Streamed[Nothing, Int]] with Uninterruptible
     case QuickStream()         extends WorkerMessage[Nothing, Streamed[Nothing, Int]]
+    // counts as running until the test opens the gate, then emits the number of the entity
+    case GatedStream()         extends WorkerMessage[Nothing, Streamed[Nothing, Int]]
     // takes 10ms, then counts as completed
     case Complete()            extends WorkerMessage[Nothing, Unit]
     // counts as completed right away
@@ -1074,6 +1395,7 @@ object WorkerActor {
           case SlowUninterruptible() => Clock.sleep(500.millis) *> state.completed.update(_ + 1)
           case SlowStream()          => Clock.sleep(500.millis).as(Streamed(ZStream(1, 2, 3)))
           case QuickStream()         => ZIO.succeed(Streamed(ZStream(1, 2, 3)))
+          case GatedStream()         => ZIO.succeed(Streamed(ZStream.fromZIO(running(state.gate.await).as(instance))))
           case Complete()            => Clock.sleep(10.millis) *> state.completed.update(_ + 1)
           case CompleteNow()         => state.completed.update(_ + 1)
           case Gated()               => running(state.gate.await) *> state.completed.update(_ + 1)
