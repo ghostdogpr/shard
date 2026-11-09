@@ -13,8 +13,6 @@ private[shard] object EntityManager {
 
   /**
    * The reply of a Streamed or Duplex message: runs its stream given its inputs (ignored for Streamed).
-   *
-   * @param usesInput false for Streamed, whose stream never runs its inputs
    */
   final case class StreamReply(usesInput: Boolean, run: ZStream[Any, Nothing, Any] => ZStream[Any, Any, Any])
 
@@ -338,15 +336,9 @@ private[shard] final class EntityManager[Msg[_, _]] private (
   private def consume(mailbox: Queue[Envelope[Msg]])(f: Envelope[Msg] => UIO[Any]): UIO[Nothing] =
     mailbox.take.interruptible.flatMap(f).uninterruptible.forever
 
-  /**
-   * Fork a child of the caller that is given its own fiber.
-   */
   private def forkWithSelf[A](f: Fiber.Runtime[Nothing, Any] => UIO[A]): UIO[Fiber.Runtime[Nothing, A]] =
     Promise.make[Nothing, Fiber.Runtime[Nothing, Any]].flatMap(self => self.await.flatMap(f).fork.tap(self.succeed))
 
-  /**
-   * Run the handler on a message on the given fiber and pass its result to `onExit`, unless the message was cancelled.
-   */
   private def runIfQueued(
     entity: RunningEntity[Msg],
     handler: EntityHandler[Msg],
@@ -362,13 +354,12 @@ private[shard] final class EntityManager[Msg[_, _]] private (
 
   private def sequentialLoop(entity: RunningEntity[Msg], handler: EntityHandler[Msg]): UIO[Nothing] =
     // a cancelled message interrupts the loop's fiber, then a new one takes over
-    // the loop is a child of the dispatcher, so that interrupting the dispatcher stops it
     forkWithSelf(loop =>
       consume(entity.mailbox)(envelope =>
         runIfQueued(entity, handler, envelope, loop)(exit =>
           envelope.state.getAndSet(EnvelopeState.Done).flatMap { previous =>
             complete(entity, envelope, exit) *>
-              // cancelled while running: wait for the sender's interruption, then a new loop takes over
+              // cancelled while running: wait for the sender's interruption
               ZIO.when(previous == EnvelopeState.Done)(ZIO.interruptible(ZIO.never)).unit
           }
         )
@@ -386,10 +377,8 @@ private[shard] final class EntityManager[Msg[_, _]] private (
       // the entity is stopping before the message started
       permits.offer(()).interruptible.onInterrupt(finish(entity, envelope, interrupted))
     ) *>
-      // the forked fiber marks the message as running before calling the handler,
+      // starts uninterruptible and marks the message as running before calling the handler,
       // so that a message cancelled before that never starts
-      // called from an uninterruptible region, so that the forked fiber starts uninterruptible
-      // a child of the dispatcher, so that interrupting the dispatcher interrupts it and waits for it
       forkWithSelf(fiber =>
         runIfQueued(entity, handler, envelope, fiber)(complete(entity, envelope, _)) *> releasePermit
       )
@@ -421,8 +410,8 @@ private[shard] final class EntityManager[Msg[_, _]] private (
           Exit.succeed(StreamReply(usesInput = true, input => track(entity, ZStream.suspend(run(input)))))
         )
       case Exit.Failure(cause) if cause.isDie     =>
-        // the state may be corrupt: stop the entity before replying, so that later messages start a new one
-        // don't wait for the other messages, since the state may be corrupt
+        // the state may be corrupt: stop the entity before replying, so that later messages start a new one,
+        // without waiting for the other messages
         entity.drained.succeed(()) *>
           ZIO.logErrorCause(
             s"${recipientType.name} ${entity.entityId} died while processing a message, stopping it",
@@ -433,9 +422,6 @@ private[shard] final class EntityManager[Msg[_, _]] private (
         finish(entity, envelope, exit)
     }
 
-  /**
-   * Complete a message with its result.
-   */
   private def finish(entity: RunningEntity[Msg], envelope: Envelope[Msg], exit: Exit[Any, Any]): UIO[Unit] =
     envelope.result.succeed(exit) *> release(entity)
 
@@ -486,9 +472,8 @@ private[shard] final class EntityManager[Msg[_, _]] private (
     }.flatten.uninterruptible
 
   /**
-   * In the background, give up on an entity that hasn't terminated after twice `entityTerminationTimeout`, the longest
-   * its stop should take: the interceptor, a handler or a finalizer may never return.
-   * Its queued messages are completed once only, since a message that outlived the stop's timeout may never finish.
+   * In the background, give up on an entity that hasn't terminated after twice `entityTerminationTimeout`,
+   * since the interceptor, a handler or a finalizer may never return.
    */
   private def abandonIfStuck(entity: RunningEntity[Msg]): UIO[Unit] =
     entity.terminated.await.interruptible // interruptible so that the timeout works
@@ -529,8 +514,7 @@ private[shard] final class EntityManager[Msg[_, _]] private (
     entities.modifyZIO(map => ZIO.succeed((map, map)))
 
   /**
-   * Get the IDs of the entities running on this pod, from their start until their scope is closed,
-   * or until twice `entityTerminationTimeout` after their stop began if they take longer.
+   * Get the IDs of the entities running on this pod, from their start until they terminate.
    */
   def entityIds: UIO[Set[String]] =
     // under the lock, so that an entity whose behavior was called is always included

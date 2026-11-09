@@ -60,9 +60,8 @@ class Sharding private (
     // Start singletons on the pod hosting shard 1.
     shardAssignments.get.map(_.get(1).contains(address))
 
-  // `isSingletonNode` is read before the lock of `singletons`, which is held while a singleton stops,
-  // so that assigning another shard doesn't wait for it, and again under the lock,
-  // so that the last start or stop sees the latest assignments
+  // `isSingletonNode` is checked before the lock, which is held while a singleton stops,
+  // and again under it, to act on the latest assignments
   private def startSingletonsIfNeeded: UIO[Unit] =
     ZIO.whenZIODiscard(isSingletonNode) {
       singletons.updateZIO { singletons =>
@@ -95,10 +94,7 @@ class Sharding private (
       }
     }
 
-  /**
-   * Stop the singletons when the shard has already moved, so that nothing waits for them:
-   * a singleton slow to stop must not delay the processing of the assignments.
-   */
+  // a singleton slow to stop must not delay the processing of the assignments
   private def stopSingletonsInBackground: UIO[Unit] =
     stopSingletonsIfNeeded.forkDaemon.unit
 
@@ -163,9 +159,8 @@ class Sharding private (
     assignments.filter { case (_, pod) => pod == address }
 
   /**
-   * Replace the assignments with a snapshot from the Shard Manager.
-   * If it assigned or unassigned shards of this pod in the meantime, the snapshot may not reflect that:
-   * get a new one, so that a late snapshot doesn't undo the assignment.
+   * Replace the assignments with a snapshot from the Shard Manager,
+   * getting a new one if the shards of this pod changed in the meantime, since a late snapshot would undo that.
    */
   private def replaceAssignments: Task[Unit] =
     shardAssignments.get.flatMap { before =>
@@ -235,7 +230,7 @@ class Sharding private (
   private def entityManager(entityType: String, entityId: String): Task[EntityManager[?]] =
     entityStates.get.flatMap(_.get(entityType) match {
       case Some(Some(manager)) => ZIO.succeed(manager)
-      // a stopping pod has removed its types, but other pods may still send it messages until they see the new assignments
+      // other pods may still send messages to a stopping pod until they see the new assignments
       case Some(None)          => ZIO.fail(EntityNotManagedByThisPod(entityId))
       case None                => ZIO.fail(new Exception(s"Entity type $entityType was not registered."))
     })
@@ -343,9 +338,8 @@ class Sharding private (
 
   /**
    * Receive a stream from the pod that hosts an entity, retrying if the pod can't be reached or no longer hosts it.
-   * Until a reply was received, it is also sent again if the entity stops, unless the entity may have consumed inputs,
-   * since they would be lost if the input stream can't be run again. After that, the stream fails with
-   * `StreamCancelled` instead of retrying.
+   * Until a reply was received or an input consumed, it is also sent again if the entity stops.
+   * After that, the stream fails with `StreamCancelled` instead of retrying.
    */
   private def streamFromEntity(
     entityType: EntityType[?],
@@ -788,8 +782,7 @@ object Sharding {
 
   /**
    * Get the IDs of the entities of a given type running on this pod, or the topics for a topic type.
-   * An entity is included from its start until its `Scope` is closed,
-   * or until twice `entityTerminationTimeout` after its stop began if it takes longer.
+   * An entity is included from its start until its `Scope` is closed.
    */
   def localEntities(recipientType: RecipientType[?]): URIO[Sharding, Set[String]] =
     ZIO.serviceWithZIO[Sharding](_.localEntities(recipientType))
