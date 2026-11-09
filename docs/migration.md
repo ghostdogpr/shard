@@ -96,7 +96,7 @@ def behavior(entityId: String): ZIO[Scope, Nothing, Guild.Handler] =
 A message can no longer be left without a reply: the sender always gets the result of `handle`, or `EntityDefect` if it died.
 
 Some patterns of the queue-based behaviors have a different equivalent:
-- `terminateMessage` is replaced by the `Scope` given to the behavior: use `ZIO.addFinalizer` to save the entity state when it stops. The finalizers run after the last message was processed, within `entityTerminationTimeout`.
+- `terminateMessage` is replaced by the `Scope` given to the behavior: use `ZIO.addFinalizer` to save the entity state when it stops. The finalizers run after the last message was processed, and the whole stop is bounded by twice `entityTerminationTimeout`.
 - Messages were processed one at a time unless the behavior forked them. Use the `concurrency` option to process several messages at the same time, or the `Concurrent` marker trait for messages that can run alongside the others (see [Messages](entities.md#messages)).
 - Work running in the background of an entity (timers, subscriptions) can be forked in its scope with `forkScoped`: it is interrupted when the entity stops.
 

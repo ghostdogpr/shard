@@ -38,7 +38,7 @@ This `serverVersion` allows the Shard Manager to know which pods are old and whi
 Use one or more integers separated by dots, such as `"123"` or `"1.2.3"`. All pods running the same release should use the same value, and newer releases should use higher values.
 :::
 - `entityMaxIdleTime`: time of inactivity (without processing any message) after which an entity will be stopped. It can be overridden for each entity type with `EntityOptions`.
-- `entityTerminationTimeout`: time we give to an entity to finish processing its messages when it is stopped. After that, the messages still running are interrupted and their senders receive `EntityInterrupted`. Rebalances wait for this, so keep it below your pods' termination grace period.
+- `entityTerminationTimeout`: time we give to an entity to finish processing its messages when it is stopped. After that, the messages still running are interrupted and their senders receive `EntityInterrupted`. The whole stop, finalizers included, is bounded by twice this time. Rebalances wait for it, so keep twice this value below your pods' termination grace period.
 - `sendTimeout`: default timeout when sending a message, after which the sender receives `SendTimeout`. It can be overridden for each messenger.
 - `refreshAssignmentsRetryInterval`: retry interval in case of failure getting shard assignments from storage
 - `unhealthyPodReportInterval`: interval to report unhealthy pods to the Shard Manager (this exists to prevent calling the Shard Manager for each failed message)

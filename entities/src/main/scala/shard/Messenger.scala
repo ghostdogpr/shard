@@ -28,13 +28,14 @@ trait Messenger[Msg[_, _]] {
 
   /**
    * Send a message and receive a stream of replies.
-   * The stream fails with `StreamCancelled` if the entity is rebalanced (see `streamAutoRestart`).
+   * The stream fails with `StreamCancelled` if the entity is rebalanced after sending its first reply (see `streamAutoRestart`).
    */
   def stream[E, E2, A](entityId: String)(message: Msg[E, Streamed[E2, A]]): ZStream[Any, E | E2 | ClusterError, A]
 
   /**
    * Send a message with a stream of inputs and receive a stream of replies.
-   * The stream fails with `StreamCancelled` if the entity is rebalanced (see `duplexAutoRestart`).
+   * The stream fails with `StreamCancelled` if the entity is rebalanced after sending its first reply
+   * or starting to read its inputs (see `duplexAutoRestart`).
    */
   def duplex[E, In, E1, E2, A](entityId: String)(
     message: Msg[E, Duplex[In, E2, A]],
@@ -92,6 +93,7 @@ object Messenger {
 
 /**
  * Evidence that a reply is a single value, not a stream.
+ * The compiler can only check a reply type it knows: in a helper generic in the reply type, it can't reject a stream.
  */
 @implicitNotFound(
   "Cannot send a message whose reply type is ${A} with `send` or `sendDiscard`. Use `stream` for Streamed replies and `duplex` for Duplex replies. A reply type that could be a stream (e.g. Any) or Nothing is not supported: use Unit for messages that reply with nothing."

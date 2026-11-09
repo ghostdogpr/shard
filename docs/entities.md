@@ -124,7 +124,7 @@ Besides the error type declared by the message, calls can fail with a `ClusterEr
 
 - If the pod hosting an entity becomes unavailable while processing a message, the message is sent again once the entity has moved, so it may be processed more than once.
 - A message is not sent again once `sendDiscard` returned, or when it fails with `EntityInterrupted`.
-- A message whose reply is a stream is sent again only until the first element was received. After that, the stream fails with `StreamCancelled` if the entity is rebalanced (use `streamAutoRestart` or `duplexAutoRestart` to restart it).
+- A message whose reply is a stream is sent again only until the first element was received, or for a `duplex` until its inputs started being read. After that, the stream fails with `StreamCancelled` if the entity is rebalanced (use `streamAutoRestart` or `duplexAutoRestart` to restart it).
 - When a `duplex` or `sendStream` is sent again, its input stream is run again from the start, so it must be one that can be run more than once.
 
 ## Streaming
