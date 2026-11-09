@@ -369,12 +369,15 @@ object ShardingSpec extends ZIOSpecDefault {
           _       <- latch.await
           _       <- Sharding.terminateLocalEntity(Counter, "c1")
           error   <- fiber.join
-          // before any reply too, once the entity consumed an input that a new attempt couldn't get again
+          // before any reply too, once the inputs were read (even if still buffered): a new attempt couldn't get them again
           inputs  <- Queue.unbounded[Int]
           taken   <- Promise.make[Nothing, Unit]
           _       <- inputs.offer(1)
-          summing <-
-            counter.duplex("c2")(Sum(), ZStream.fromQueue(inputs).tap(_ => taken.succeed(()))).runDrain.flip.fork
+          summing <- counter
+                       .duplex("c2")(Sum(), ZStream.fromQueue(inputs).tap(_ => taken.succeed(())).rechunk(2))
+                       .runDrain
+                       .flip
+                       .fork
           _       <- taken.await
           // over gRPC, the inputs are taken before the entity starts
           _       <- Sharding.localEntities(Counter).repeatUntil(_.contains("c2"))

@@ -338,25 +338,25 @@ class Sharding private (
 
   /**
    * Receive a stream from the pod that hosts an entity, retrying if the pod can't be reached or no longer hosts it.
-   * Until a reply was received or an input consumed, it is also sent again if the entity stops.
+   * Until a reply was received or the inputs were read, it is also sent again if the entity stops.
    * After that, the stream fails with `StreamCancelled` instead of retrying.
    */
   private def streamFromEntity(
     entityType: EntityType[?],
     entityId: String,
-    inputConsumed: UIO[Boolean] = ZIO.succeed(false)
+    inputRead: UIO[Boolean] = ZIO.succeed(false)
   )(send: PodAddress => ZStream[Any, Any, Any]): ZStream[Any, Any, Any] =
     ZStream.unwrap((Ref.make(false) <*> podOf(entityType, entityId)).map { case (started, pod) =>
       def retryUnless(cancelled: UIO[Boolean]): ZStream[Any, Any, Any] =
         ZStream.unwrap(cancelled.map {
           case false =>
-            ZStream.execute(Clock.sleep(200.millis)) ++ streamFromEntity(entityType, entityId, inputConsumed)(send)
+            ZStream.execute(Clock.sleep(200.millis)) ++ streamFromEntity(entityType, entityId, inputRead)(send)
           case true  => ZStream.fail(StreamCancelled)
         })
 
       send(pod).mapChunksZIO(chunk => started.set(true).when(chunk.nonEmpty).as(chunk)).catchSome {
         case Sharding.Retry(_) => retryUnless(started.get)
-        case StreamCancelled   => retryUnless(started.get.zipWith(inputConsumed)(_ || _))
+        case StreamCancelled   => retryUnless(started.get.zipWith(inputRead)(_ || _))
       }
     })
 
@@ -494,11 +494,11 @@ class Sharding private (
         input: ZStream[Any, E1, In]
       ): ZStream[Any, E | E1 | E2 | ClusterError, A] =
         ZStream
-          .unwrap((Promise.make[Any, Nothing] <*> Ref.make(false)).map { case (inputFailure, consumed) =>
-            val safeInput = input
-              .mapChunksZIO(chunk => consumed.set(true).when(chunk.nonEmpty).as(chunk))
+          .unwrap((Promise.make[Any, Nothing] <*> Ref.make(false)).map { case (inputFailure, inputRead) =>
+            // set before the first pull, since the input may consume elements while buffering a chunk
+            val safeInput = (ZStream.execute(inputRead.set(true)) ++ input)
               .catchAllCause(cause => ZStream.execute(inputFailure.failCause(cause)))
-            streamFromEntity(entityType, entityId, consumed.get)(
+            streamFromEntity(entityType, entityId, inputRead.get)(
               deliverStream(entityType, entityId, _, message, safeInput, inputFailure.fail(_))
             )
               .interruptWhen(inputFailure) ++

@@ -35,7 +35,7 @@ trait Messenger[Msg[_, _]] {
   /**
    * Send a message with a stream of inputs and receive a stream of replies.
    * The stream fails with `StreamCancelled` if the entity is rebalanced after sending its first reply
-   * or consuming its first input (see `duplexAutoRestart`).
+   * or starting to read its inputs (see `duplexAutoRestart`).
    */
   def duplex[E, In, E1, E2, A](entityId: String)(
     message: Msg[E, Duplex[In, E2, A]],
