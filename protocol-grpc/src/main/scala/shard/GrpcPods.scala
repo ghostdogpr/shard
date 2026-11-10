@@ -13,46 +13,40 @@ import java.util.concurrent.TimeUnit
 
 class GrpcPods(
   config: GrpcConfig,
-  connections: Ref.Synchronized[Map[PodAddress, (PodClient, Fiber[Throwable, Nothing])]]
+  // closes the channels when the layer is released, or right away if it already was
+  scope: Scope,
+  connections: Ref.Synchronized[Map[PodAddress, PodClient]]
 ) extends Pods {
 
   private def getConnection(pod: PodAddress): Task[PodClient] =
     // optimize happy path and only get first
     connections.get.flatMap(_.get(pod) match {
-      case Some((client, _)) => ZIO.succeed(client)
-      case None              =>
+      case Some(client) => ZIO.succeed(client)
+      case None         =>
         // then do modify in the case it doesn't already exist
         connections.modifyZIO { map =>
           map.get(pod) match {
-            case Some((client, _)) => ZIO.succeed((client, map))
-            case None              =>
-              // create a fiber that never ends and keeps the connection alive
-              for {
-                _       <- ZIO.logDebug(s"Opening connection to pod $pod")
-                promise <- Promise.make[Throwable, PodClient]
-                fiber   <- ZIO
-                             .scoped[Any] {
-                               GrpcPods
-                                 .clientBackend(pod.host, pod.port, config)
-                                 .flatMap(backend => promise.succeed(PodClient.from(backend)) *> ZIO.never)
-                             }
-                             .onError(promise.failCause(_))
-                             .ensuring(
-                               connections.update(_ - pod) *> ZIO.logDebug(s"Closed connection to pod $pod")
-                             )
-                             .forkDaemon
-                client  <- promise.await
-              } yield (client, map.updated(pod, (client, fiber)))
+            case Some(client) => ZIO.succeed((client, map))
+            case None         =>
+              scope
+                .extend(
+                  ZIO.logDebug(s"Opening connection to pod $pod") *>
+                    ZIO.addFinalizer(ZIO.logDebug(s"Closing connection to pod $pod")) *>
+                    GrpcPods.clientBackend(pod.host, pod.port, config)
+                )
+                .map { backend =>
+                  val client = new PodClient(backend)
+                  (client, map.updated(pod, client))
+                }
           }
-        }
+        }.uninterruptible
     })
 
-  private def mapClientError(pod: PodAddress, isStream: Boolean)(t: Throwable): Throwable =
-    t match {
-      case ex: StatusException if ex.getStatus.getCode == Status.Code.UNAVAILABLE => PodUnavailable(pod)
-      case ex: StatusException if ex.getStatus.getCode == Status.Code.CANCELLED   =>
-        if (isStream) StreamCancelled else PodUnavailable(pod)
-      case other                                                                  => other
+  private def mapClientError(pod: PodAddress, streamedReplies: Boolean)(ex: StatusException): Throwable =
+    ex.getStatus.getCode match {
+      case Status.Code.CANCELLED if streamedReplies        => StreamCancelled
+      case Status.Code.UNAVAILABLE | Status.Code.CANCELLED => PodUnavailable(pod)
+      case _                                               => ex
     }
 
   def assignShards(pod: PodAddress, shards: Set[ShardId]): Task[Unit] =
@@ -64,19 +58,14 @@ class GrpcPods(
   def ping(pod: PodAddress): Task[Unit] =
     getConnection(pod).flatMap(_.pingShards(PingShardsRequest()).unit)
 
+  private def singleReply(pod: PodAddress)(response: IO[StatusException, SendResponse]): Task[BinaryReply] =
+    response.mapBoth(mapClientError(pod, streamedReplies = false), _.reply)
+
   def sendMessage(pod: PodAddress, message: BinaryMessage): Task[BinaryReply] =
-    getConnection(pod).flatMap { conn =>
-      conn
-        .send(message)
-        .mapBoth(mapClientError(pod, isStream = false), _.reply)
-    }
+    getConnection(pod).flatMap(conn => singleReply(pod)(conn.send(message)))
 
   def sendStream(pod: PodAddress, messages: ZStream[Any, Nothing, BinaryMessage]): Task[BinaryReply] =
-    getConnection(pod).flatMap { conn =>
-      conn
-        .sendStream(messages)
-        .mapBoth(mapClientError(pod, isStream = false), _.reply)
-    }
+    getConnection(pod).flatMap(conn => singleReply(pod)(conn.sendStream(messages)))
 
   def sendStreamAndReceiveStream(
     pod: PodAddress,
@@ -86,7 +75,7 @@ class GrpcPods(
       .fromZIO(getConnection(pod))
       .flatMap(
         _.sendStreamAndReceiveStream(messages)
-          .mapBoth(mapClientError(pod, isStream = true), _.reply)
+          .mapBoth(mapClientError(pod, streamedReplies = true), _.reply)
       )
 }
 
@@ -120,12 +109,8 @@ object GrpcPods {
     ZLayer.scoped {
       for {
         config      <- ZIO.service[GrpcConfig]
-        connections <- Ref.Synchronized
-                         .make(Map.empty[PodAddress, (PodClient, Fiber[Throwable, Nothing])])
-                         .withFinalizer(
-                           // stop all connection fibers on release
-                           _.get.flatMap(conns => ZIO.foreachDiscard(conns) { case (_, (_, fiber)) => fiber.interrupt })
-                         )
-      } yield new GrpcPods(config, connections)
+        scope       <- ZIO.serviceWithZIO[Scope](_.forkWith(ExecutionStrategy.Parallel))
+        connections <- Ref.Synchronized.make(Map.empty[PodAddress, PodClient])
+      } yield new GrpcPods(config, scope, connections)
     }
 }

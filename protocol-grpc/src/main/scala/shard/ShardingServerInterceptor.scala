@@ -6,24 +6,19 @@ import proteus.server.{ GrpcContext, ServerInterceptor }
 import zio._
 import zio.stream.ZStream
 
+private type UnaryEffect[A]  = IO[StatusException, A]
+private type StreamEffect[A] = ZStream[Any, StatusException, A]
+
 /**
  * Type alias for a proteus `ServerInterceptor` scoped to shard's effect types
  * (`IO` and `ZStream` with `StatusException` errors) and the default
  * `GrpcContext`. Use the smart constructors in the companion object — or implement
  * the trait directly for advanced pre/post/error wrapping.
  */
-type ShardingServerInterceptor = ServerInterceptor[
-  [A] =>> IO[StatusException, A],
-  [A] =>> IO[StatusException, A],
-  [A] =>> ZStream[Any, StatusException, A],
-  [A] =>> ZStream[Any, StatusException, A],
-  GrpcContext,
-  GrpcContext
-]
+type ShardingServerInterceptor =
+  ServerInterceptor[UnaryEffect, UnaryEffect, StreamEffect, StreamEffect, GrpcContext, GrpcContext]
 
 object ShardingServerInterceptor {
-  private type UnaryEffect[A]  = IO[StatusException, A]
-  private type StreamEffect[A] = ZStream[Any, StatusException, A]
 
   /**
    * An interceptor that does nothing — useful as a starting point or for composition.
@@ -63,42 +58,28 @@ object ShardingServerInterceptor {
    * sequence runs outermost (i.e. its pre-logic runs first, its post-logic runs last).
    */
   def compose(interceptors: Seq[ShardingServerInterceptor]): ShardingServerInterceptor =
-    interceptors match {
-      case Seq()     => identity
-      case Seq(only) => only
-      case _         =>
-        new ShardingServerInterceptor {
-          def unary[Req: ProtobufCodec, Resp: ProtobufCodec](
-            io: GrpcContext => UnaryEffect[Resp]
-          ): Req => GrpcContext => UnaryEffect[Resp] =
-            interceptors.foldRight(((_: Req) => io): Req => GrpcContext => UnaryEffect[Resp]) { (i, acc) => req =>
-              val applied: Req => GrpcContext => UnaryEffect[Resp] = i.unary[Req, Resp](acc(req))
-              applied(req)
-            }
+    interceptors.reduceRightOption(wrap).getOrElse(identity)
 
-          def clientStreaming[Req: ProtobufCodec, Resp: ProtobufCodec](
-            io: StreamEffect[Req] => GrpcContext => UnaryEffect[Resp]
-          ): StreamEffect[Req] => GrpcContext => UnaryEffect[Resp] =
-            interceptors.foldRight(io) { (i, acc) =>
-              val step: StreamEffect[Req] => GrpcContext => UnaryEffect[Resp] = i.clientStreaming[Req, Resp](acc)
-              step
-            }
+  private def wrap(outer: ShardingServerInterceptor, inner: ShardingServerInterceptor): ShardingServerInterceptor =
+    new ShardingServerInterceptor {
+      def unary[Req: ProtobufCodec, Resp: ProtobufCodec](
+        io: GrpcContext => UnaryEffect[Resp]
+      ): Req => GrpcContext => UnaryEffect[Resp] =
+        req => outer.unary[Req, Resp](inner.unary[Req, Resp](io).apply(req)).apply(req)
 
-          def serverStreaming[Req: ProtobufCodec, Resp: ProtobufCodec](
-            io: GrpcContext => StreamEffect[Resp]
-          ): Req => GrpcContext => StreamEffect[Resp] =
-            interceptors.foldRight(((_: Req) => io): Req => GrpcContext => StreamEffect[Resp]) { (i, acc) => req =>
-              val applied: Req => GrpcContext => StreamEffect[Resp] = i.serverStreaming[Req, Resp](acc(req))
-              applied(req)
-            }
+      def clientStreaming[Req: ProtobufCodec, Resp: ProtobufCodec](
+        io: StreamEffect[Req] => GrpcContext => UnaryEffect[Resp]
+      ): StreamEffect[Req] => GrpcContext => UnaryEffect[Resp] =
+        outer.clientStreaming[Req, Resp](inner.clientStreaming[Req, Resp](io))
 
-          def bidiStreaming[Req: ProtobufCodec, Resp: ProtobufCodec](
-            io: StreamEffect[Req] => GrpcContext => StreamEffect[Resp]
-          ): StreamEffect[Req] => GrpcContext => StreamEffect[Resp] =
-            interceptors.foldRight(io) { (i, acc) =>
-              val step: StreamEffect[Req] => GrpcContext => StreamEffect[Resp] = i.bidiStreaming[Req, Resp](acc)
-              step
-            }
-        }
+      def serverStreaming[Req: ProtobufCodec, Resp: ProtobufCodec](
+        io: GrpcContext => StreamEffect[Resp]
+      ): Req => GrpcContext => StreamEffect[Resp] =
+        req => outer.serverStreaming[Req, Resp](inner.serverStreaming[Req, Resp](io).apply(req)).apply(req)
+
+      def bidiStreaming[Req: ProtobufCodec, Resp: ProtobufCodec](
+        io: StreamEffect[Req] => GrpcContext => StreamEffect[Resp]
+      ): StreamEffect[Req] => GrpcContext => StreamEffect[Resp] =
+        outer.bidiStreaming[Req, Resp](inner.bidiStreaming[Req, Resp](io))
     }
 }

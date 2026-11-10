@@ -170,6 +170,8 @@ Config.default.copy(shardManagerHost = "shard-manager", shardManagerPort = 8080)
 
 `Config` also has a new `role` (see [Roles](#roles)) and `entityInterceptor` (see [Interceptors](entities.md#interceptors)).
 
+`GrpcConfig` no longer uses zio-grpc types: `clientInterceptors` takes grpc-java `ClientInterceptor`s and `serverInterceptors` takes `ShardingServerInterceptor`s. `ShardingClientInterceptor.headersUpdater` and `ShardingServerInterceptor.beforeEach` replace the common uses (see [gRPC Configuration](config.md#grpc-configuration)). The first of the `serverInterceptors` now runs first, while Shardcake ran the last one first: reverse the sequence if the order matters.
+
 ## Shard Manager
 
 - `Server.run()` becomes `Server.run`, and requires a `GrpcConfig`. It serves a gRPC API on `apiPort` instead of a GraphQL API over HTTP, along with the standard gRPC health service. Kubernetes probes should use `grpc` instead of `httpGet` on `/health`.

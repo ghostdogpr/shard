@@ -10,7 +10,7 @@ import java.util.concurrent.Executor
  *
  * @param maxInboundMessageSize the maximum message size allowed to be received by the grpc client and server
  * @param executor a custom executor to pass to grpc-java when creating gRPC clients and servers
- * @param shutdownTimeout the timeout to wait for the gRPC server to shutdown before forcefully shutting it down
+ * @param shutdownTimeout the timeout to wait for the gRPC server and channels to shutdown before forcefully shutting them down
  * @param streamingPrefetch the in-flight window for streaming RPCs (request/response messages fetched ahead of the consumer)
  * @param clientInterceptors the interceptors to be used by the gRPC client, e.g. for adding tracing or logging
  * @param serverInterceptors the interceptors to be used by the gRPC server, e.g. for adding tracing or logging

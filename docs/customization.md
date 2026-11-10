@@ -154,7 +154,7 @@ object Guild extends EntityType[GuildMessage]("guild")
 Uses [Proteus](https://github.com/ghostdogpr/proteus) (macro-derived, protobuf-compatible wire format).
 The codec is derived per message type at compile time.
 Message types must be a sealed trait or an enum, whose variants extend it with fixed type arguments.
-Reply and error types must be a case class, sealed trait, enum, `Unit`, `Nothing` or have a `ProtobufCodec` in scope: other types (`Int`, `Set[String]`, …) need to be wrapped in a case class.
+Reply and error types must be a case class, sealed trait, enum, `Unit`, `Nothing` or have a `ProtobufCodec` in scope that encodes a message or an enum: other types (`Int`, `Option[A]`, `List[A]`, `Set[String]`, …) need to be wrapped in a case class.
 
 ```scala
 "com.github.ghostdogpr" %% "shard-serialization-proteus" % "@VERSION@"
@@ -166,7 +166,7 @@ import shard.proteus.given
 object Guild extends EntityType[GuildMessage]("guild")
 ```
 
-The Proteus given will pick up any in-scope `ProtobufCodec[T]` you've declared (e.g. via `derives proteus.ProtobufCodec` on your types) before falling back to deriving one — useful if you want to register custom field codecs.
+For message, reply, error and stream types, the Proteus given will pick up any in-scope `ProtobufCodec[T]` you've declared (e.g. via `derives _root_.proteus.ProtobufCodec` on your types: after `import shard._`, the name `proteus` means `shard.proteus`) before falling back to deriving one. Fields don't use these: to customize the codec of a field's type, bring a `given ProtobufDeriver` into scope (e.g. `ProtobufDeriver.instance[T](codec)`).
 
 To get a .proto file describing a message type, use `ProteusMessageCodec.dependency`. It includes the message and all its reply, error and stream types.
 
@@ -183,7 +183,7 @@ Proteus also offers protobuf's forward/backward compatibility rules, which makes
 ::: tip Server updates and message versioning
 - Messages are not persisted, which means that if you stop and restart the whole system, you can change anything in the message format.
 - On the other hand, if you wish to do rolling updates (update servers progressively without downtime), you need to be careful with changes in the message format.
-- What you can do largely depends on the backend you choose. [Kryo](https://github.com/EsotericSoftware/kryo) is reflective and pretty strict by default — most changes will break the wire format. Proteus uses protobuf's evolution rules, so adding optional fields or new variants is safe.
+- What you can do largely depends on the backend you choose. [Kryo](https://github.com/EsotericSoftware/kryo) is reflective and pretty strict by default — most changes will break the wire format. Proteus uses protobuf's evolution rules, so adding optional fields is safe as long as they go last, since fields and variants are numbered in declaration order (or use the `reserved` modifier to keep the existing numbers). The same goes for new variants, but a pod that doesn't know a variant can't decode it and fails with a `SerializationError`, unless the type has a default value to decode it as: `given Schema[Status] = Schema.derived[Status].defaultValue(Status.Unknown())` in its companion (`zio.blocks.schema.Schema`; not for an enum whose cases have no fields). Otherwise, don't send or reply with a new variant until the rolling update is finished, and always for a new variant of the message type itself: the entity would receive the default message, and its reply wouldn't be the one the sender expects. An enum whose cases have no fields can't gain a case with fields: it changes from a protobuf enum to a message.
 - When you can't modify an existing message, the usual fallback is to introduce a new message type that won't be used until the rolling update is finished (so old nodes never receive new messages).
 :::
 

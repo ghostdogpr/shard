@@ -5,6 +5,7 @@ import shard.interfaces.MessageCodec
 import shard.proteus.ProteusMessageCodec
 import shard.proteus.given
 import zio.Scope
+import zio.blocks.schema.Schema
 import zio.test._
 
 object ProteusMessageCodecSpec extends ZIOSpecDefault {
@@ -35,6 +36,39 @@ object ProteusMessageCodecSpec extends ZIOSpecDefault {
     case GetTrack(id: String)            extends Msg[Nothing, Track]
   }
 
+  final case class Count(value: Int)
+
+  private given ProtobufCodec[Count] = ProtobufCodec.derived[Int].transform(Count(_), _.value)
+
+  enum NonMessage[E, A] {
+    case Get() extends NonMessage[Nothing, Count]
+  }
+
+  // A reply type before and after a rolling update that adds a variant
+  sealed trait OldStatus
+  object OldStatus {
+    final case class Active(since: Int) extends OldStatus
+    final case class Unknown()          extends OldStatus
+    given Schema[OldStatus] = Schema.derived[OldStatus].defaultValue(Unknown())
+  }
+  sealed trait NewStatus
+  object NewStatus {
+    final case class Active(since: Int)    extends NewStatus
+    final case class Unknown()             extends NewStatus
+    final case class Suspended(until: Int) extends NewStatus
+  }
+  final case class OldAccount(status: OldStatus)
+  final case class NewAccount(status: NewStatus)
+
+  enum OldMsg[E, A] {
+    case GetStatus()  extends OldMsg[OldStatus, OldStatus]
+    case GetAccount() extends OldMsg[Nothing, OldAccount]
+  }
+  enum NewMsg[E, A] {
+    case GetStatus()  extends NewMsg[NewStatus, NewStatus]
+    case GetAccount() extends NewMsg[Nothing, NewAccount]
+  }
+
   private val codec = summon[MessageCodec[Msg]]
 
   private lazy val rendered = ProteusMessageCodec.dependency[Msg]("msg", "shard.test").render(Nil)
@@ -54,6 +88,18 @@ object ProteusMessageCodecSpec extends ZIOSpecDefault {
           Msg.Singleton
         )
         assertTrue(messages.map(roundtrip) == messages)
+      },
+      test("decodes a variant it doesn't know as the default value of its type") {
+        val (oldCodec, newCodec)     = (summon[MessageCodec[OldMsg]], summon[MessageCodec[NewMsg]])
+        val (oldStatus, newStatus)   = (oldCodec.replyCodec(OldMsg.GetStatus()), newCodec.replyCodec(NewMsg.GetStatus()))
+        val (oldAccount, newAccount) =
+          (oldCodec.replyCodec(OldMsg.GetAccount()), newCodec.replyCodec(NewMsg.GetAccount()))
+        val suspended                = NewStatus.Suspended(3)
+        assertTrue(
+          oldStatus.value.decode(newStatus.value.encode(suspended)) == OldStatus.Unknown(),
+          oldStatus.error.decode(newStatus.error.encode(suspended)) == OldStatus.Unknown(),
+          oldAccount.value.decode(newAccount.value.encode(NewAccount(suspended))) == OldAccount(OldStatus.Unknown())
+        )
       },
       test("encodes Unit replies without bytes and has no error codec when the error type is Nothing") {
         val replyCodec = codec.replyCodec(Msg.Plain("hello", 42))
@@ -112,7 +158,7 @@ object ProteusMessageCodecSpec extends ZIOSpecDefault {
       test("renders a transformed reply codec as the underlying message") {
         assertTrue(rendered.contains("message TrackItem {"), !rendered.contains("message Track {"))
       },
-      test("rejects primitive reply types at compile time") {
+      test("rejects primitive reply types at compile time, and at declaration for an in-scope codec") {
         for {
           viaGiven  <- typeCheck {
                          """
@@ -131,7 +177,30 @@ object ProteusMessageCodecSpec extends ZIOSpecDefault {
                          shard.proteus.ProteusMessageCodec.derived[Bad]
                          """
                        }
-        } yield assertTrue(viaGiven.isLeft, viaDerive.left.exists(_.contains("wrap primitive types")))
+          viaOption <- typeCheck {
+                         """
+                         enum Bad[E, A] {
+                           case Find() extends Bad[Nothing, Option[Reply]]
+                         }
+                         shard.proteus.ProteusMessageCodec.derived[Bad]
+                         """
+                       }
+          viaList   <- typeCheck {
+                         """
+                         enum Bad[E, A] {
+                           case All() extends Bad[List[Reply], Unit]
+                         }
+                         shard.proteus.ProteusMessageCodec.derived[Bad]
+                         """
+                       }
+          viaCodec   = scala.util.Try(ProteusMessageCodec.derived[NonMessage])
+        } yield assertTrue(
+          viaGiven.isLeft,
+          viaDerive.left.exists(_.contains("wrap primitive types")),
+          viaOption.left.exists(_.contains("wrap primitive types")),
+          viaList.left.exists(_.contains("wrap primitive types")),
+          viaCodec.failed.toOption.exists(_.getMessage.contains("message or an enum"))
+        )
       },
       test("rejects variants without fixed type arguments at compile time") {
         for {
