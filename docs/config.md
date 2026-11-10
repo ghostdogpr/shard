@@ -40,7 +40,7 @@ Use one or more integers separated by dots, such as `"123"` or `"1.2.3"`. All po
 - `entityMaxIdleTime`: time of inactivity (without processing any message) after which an entity will be stopped. It can be overridden for each entity type with `EntityOptions`.
 - `entityTerminationTimeout`: time we give to an entity to finish processing its messages when it is stopped. After that, the messages still running are interrupted and their senders receive `EntityInterrupted`. The whole stop, finalizers included, is bounded by twice this time. Rebalances wait for it, so keep twice this value below your pods' termination grace period.
 - `sendTimeout`: default timeout when sending a message, after which the sender receives `SendTimeout`. It can be overridden for each messenger.
-- `refreshAssignmentsRetryInterval`: retry interval in case of failure getting shard assignments from storage
+- `refreshAssignmentsRetryInterval`: retry interval in case of failure getting shard assignments from storage. Messages that can't reach their entity also make the pod read the assignments again, at most once per this interval, in case it missed a change.
 - `unhealthyPodReportInterval`: interval to report unhealthy pods to the Shard Manager (this exists to prevent calling the Shard Manager for each failed message)
 - `simulateRemotePods`: disable optimizations when sending a message to an entity hosted on the local shards (this will force serialization of all messages)
 - `unregisterRetrySchedule`: retry schedule for unregistering the pod from the Shard Manager when it stops

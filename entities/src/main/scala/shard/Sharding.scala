@@ -24,6 +24,7 @@ class Sharding private (
   entityStates: Ref.Synchronized[Map[String, Option[EntityManager[?]]]], // None once its registration has closed
   singletons: Ref.Synchronized[List[(String, UIO[Nothing], Option[Fiber[Nothing, Nothing]])]],
   lastUnhealthyNodeReported: Ref[OffsetDateTime],
+  lastStaleRefresh: Ref[Long],
   isShuttingDownRef: Ref[Boolean],
   shardManager: ShardManagerClient,
   pods: Pods,
@@ -106,8 +107,10 @@ class Sharding private (
   private[shard] def assign(shards: Set[ShardId]): UIO[Unit] =
     ZIO
       .unlessZIO(isShuttingDown) {
-        shardAssignments.update(shards.foldLeft(_) { case (map, shard) => map.updated(shard, address) }) *>
-          Metrics.shards.tagged("role", config.role.name).incrementBy(shards.size) *>
+        shardAssignments.modify { map =>
+          val added = shards.count(shard => !map.get(shard).contains(address))
+          (added, shards.foldLeft(map)(_.updated(_, address)))
+        }.flatMap(Metrics.shards.tagged("role", config.role.name).incrementBy(_)) *>
           startSingletonsIfNeeded *>
           ZIO.logDebug(s"Assigned shards: ${renderShardIds(shards)}")
       }
@@ -204,6 +207,18 @@ class Sharding private (
           .unit
       )
   }
+
+  // another pod can't take a message: a notification of the storage may have been missed (e.g. while reconnecting)
+  private def refreshStaleAssignments(pod: PodAddress): UIO[Unit] =
+    ZIO.unlessDiscard(pod == address)(
+      Clock.nanoTime
+        .flatMap(now =>
+          lastStaleRefresh.modify(last =>
+            if (now - last >= config.refreshAssignmentsRetryInterval.toNanos) (true, now) else (false, last)
+          )
+        )
+        .flatMap(ZIO.whenDiscard(_)(storage.getAssignments(config.role).flatMap(updateAssignments).ignore.forkDaemon))
+    )
 
   private[shard] val refreshAssignments: ZIO[Scope, Nothing, Unit] =
     for {
@@ -330,9 +345,9 @@ class Sharding private (
   private def sendToEntity[A](entityType: EntityType[?], entityId: String)(
     send: PodAddress => IO[Any, A]
   ): IO[Any, A] =
-    podOf(entityType, entityId).flatMap(
-      send(_).catchSome { case Sharding.Retry(_) =>
-        Clock.sleep(200.millis) *> sendToEntity(entityType, entityId)(send)
+    podOf(entityType, entityId).flatMap(pod =>
+      send(pod).catchSome { case Sharding.Retry(_) =>
+        refreshStaleAssignments(pod) *> Clock.sleep(200.millis) *> sendToEntity(entityType, entityId)(send)
       }
     )
 
@@ -355,8 +370,8 @@ class Sharding private (
         })
 
       send(pod).mapChunksZIO(chunk => started.set(true).when(chunk.nonEmpty).as(chunk)).catchSome {
-        case Sharding.Retry(_) => retryUnless(started.get)
-        case StreamCancelled   => retryUnless(started.get.zipWith(inputRead)(_ || _))
+        case Sharding.Retry(_) | StreamCancelled =>
+          ZStream.execute(refreshStaleAssignments(pod)) ++ retryUnless(started.get.zipWith(inputRead)(_ || _))
       }
     })
 
@@ -659,6 +674,7 @@ object Sharding {
                                        )
         cdt                       <- Clock.currentDateTime
         lastUnhealthyNodeReported <- Ref.make(cdt)
+        lastStaleRefresh          <- Clock.nanoTime.flatMap(Ref.make(_))
         shuttingDown              <- Ref.make(false)
         eventsHub                 <- Hub.unbounded[ShardingRegistrationEvent]
         sharding                   = new Sharding(
@@ -668,6 +684,7 @@ object Sharding {
                                        entityStates,
                                        singletons,
                                        lastUnhealthyNodeReported,
+                                       lastStaleRefresh,
                                        shuttingDown,
                                        shardManager,
                                        pods,
