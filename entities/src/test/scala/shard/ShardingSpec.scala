@@ -207,32 +207,71 @@ object ShardingSpec extends ZIOSpecDefault {
         } yield assertTrue(result.contains(StreamCancelled), sent == 1)
       },
       test("A pod reads the assignments from the storage again when its messages can't reach their entity") {
-        val config = Config.default.copy(refreshAssignmentsRetryInterval = 10.millis)
-        val third  = PodAddress("third", 1)
+        val config                       = Config.default.copy(refreshAssignmentsRetryInterval = 10.millis)
+        val third                        = PodAddress("third", 1)
+        def all(pod: Option[PodAddress]) = (1 to config.numberOfShards).map(_ -> pod).toMap
         for {
-          assignments <- Ref.make((1 to config.numberOfShards).map(_ -> Option(otherPod)).toMap)
-          // never completed: the subscription stays open but misses the change
+          snapshot    <- Ref.make(all(Some(otherPod)))
+          assignments <- Ref.make(all(None))
+          // never completed: the subscription stays open but misses the changes
           disconnect  <- Promise.make[Nothing, Unit]
           reconnected <- Promise.make[Nothing, Unit]
           storage     <- reconnectingStorage(assignments, disconnect, reconnected)
-          pods         = stubPods(
-                           onSend = pod =>
-                             ZIO.succeed(
-                               if (pod == otherPod) BinaryReply.EntityNotManagedByThisPod
-                               else BinaryReply.Success(Array.emptyByteArray)
-                             ),
-                           onStream = (pod, _) => ZStream.fail(PodUnavailable(pod))
-                         )
-          result      <- (assignments.set((1 to config.numberOfShards).map(_ -> Option(third)).toMap) *>
-                           Sharding.messenger(Counter).flatMap(_.sendDiscard("c1")(IncrementCounter())).either)
+          result      <- (for {
+                           send   <- Sharding.messenger(Counter).flatMap(_.sendDiscard("c1")(IncrementCounter())).fork
+                           // refused by the other pod, then the storage has no owner for the shard
+                           _      <- (Clock.sleep(10.millis) *> Sharding.getPods).repeatUntil(_.isEmpty)
+                           _      <- assignments.set(all(Some(third)))
+                           result <- send.join.either
+                         } yield result)
+                           .timeout(5.seconds)
                            .provide(
                              Sharding.live,
-                             ZLayer.succeed(pods),
-                             ZLayer.succeed(takingShardsBack(assignments)),
+                             ZLayer.succeed(refusingPods),
+                             ZLayer.succeed(takingShardsBack(snapshot)),
                              ZLayer.succeed(storage),
                              ZLayer.succeed(config)
                            )
-        } yield assertTrue(result.isRight)
+        } yield assertTrue(result.exists(_.isRight))
+      },
+      test("Assignments read again from the storage don't undo a newer notification") {
+        val config                       = Config.default.copy(refreshAssignmentsRetryInterval = 10.millis)
+        val third                        = PodAddress("third", 1)
+        def all(pod: Option[PodAddress]) = (1 to config.numberOfShards).map(_ -> pod).toMap
+        for {
+          snapshot      <- Ref.make(all(Some(otherPod)))
+          notifications <- Queue.unbounded[Map[ShardId, Option[PodAddress]]]
+          reading       <- Promise.make[Nothing, Unit]
+          read          <- Promise.make[Nothing, Unit]
+          // a read that returns an older state, after a notification
+          storage        = new Storage {
+                             def getAssignments(role: Role): Task[Map[ShardId, Option[PodAddress]]]               =
+                               reading.succeed(()) *> read.await.as(all(None))
+                             def saveAssignments(role: Role, value: Map[ShardId, Option[PodAddress]]): Task[Unit] = ZIO.unit
+                             def assignmentsStream(role: Role)                                                    =
+                               ZStream.fromQueue(notifications)
+                             def getPods: Task[Set[Pod]]                                                          = ZIO.succeed(Set.empty)
+                             def savePods(pods: Set[Pod]): Task[Unit]                                             = ZIO.unit
+                           }
+          pods          <- (for {
+                             send <- Sharding.messenger(Counter).flatMap(_.sendDiscard("c1")(IncrementCounter())).fork
+                             _    <- reading.await
+                             _    <- notifications.offer(all(Some(third)))
+                             _    <- (Clock.sleep(10.millis) *> Sharding.getPods).repeatUntil(_ == Set(third))
+                             _    <- read.succeed(())
+                             _    <- send.join
+                             _    <- Clock.sleep(200.millis)
+                             pods <- Sharding.getPods
+                           } yield pods)
+                             .timeout(5.seconds)
+                             .provide(
+                               Sharding.live,
+                               ZLayer.succeed(refusingPods),
+                               ZLayer.succeed(takingShardsBack(snapshot)),
+                               ZLayer.succeed(storage),
+                               ZLayer.succeed(config)
+                             )
+        } yield assertTrue(pods.contains(Set(third)))
       },
       test("Assigning shards that a pod already has doesn't change its shards gauge") {
         // a role of its own, since the gauge is shared by all the pods of a role in this JVM
@@ -285,6 +324,16 @@ object ShardingSpec extends ZIOSpecDefault {
         def savePods(pods: Set[Pod]): Task[Unit]                                                     = ZIO.unit
       }
     }
+
+  // the other pod refuses messages, any other pod accepts them
+  private val refusingPods: Pods =
+    stubPods(
+      onSend = pod =>
+        ZIO.succeed(
+          if (pod == otherPod) BinaryReply.EntityNotManagedByThisPod else BinaryReply.Success(Array.emptyByteArray)
+        ),
+      onStream = (pod, _) => ZStream.fail(PodUnavailable(pod))
+    )
 
   private def stubPods(
     onSend: PodAddress => Task[BinaryReply],
