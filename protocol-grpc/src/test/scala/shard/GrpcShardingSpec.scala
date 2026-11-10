@@ -119,14 +119,25 @@ object GrpcShardingSpec extends ZIOSpecDefault {
           } @@ TestAspect.timeout(10.seconds),
           test("Releasing GrpcPods closes its connections, including those opened from uninterruptible code or after") {
             for {
-              self   <- ZIO.serviceWith[Config](config => PodAddress(config.selfHost, config.shardingPort))
-              scope  <- Scope.make
-              pods   <- scope.extend((ZLayer.succeed(GrpcConfig.default) >>> GrpcPods.live).build).map(_.get[Pods])
-              _      <- pods.ping(self).uninterruptible
-              closed <- scope.close(Exit.unit).disconnect.timeout(5.seconds)
+              self     <- ZIO.serviceWith[Config](config => PodAddress(config.selfHost, config.shardingPort))
+              scope    <- Scope.make
+              pods     <- scope.extend((ZLayer.succeed(GrpcConfig.default) >>> GrpcPods.live).build).map(_.get[Pods])
+              _        <- pods.ping(self).uninterruptible
+              // the pod rejects shards of another role
+              other     = Role("other")
+              assign   <- pods.assignShards(self, other, Set.empty).exit
+              unassign <- pods.unassignShards(self, other, Set.empty).exit
+              empty    <- pods.assignShards(self, Role(""), Set.empty).exit
+              closed   <- scope.close(Exit.unit).disconnect.timeout(5.seconds)
               // the same pod under another address, so that a new connection is opened
-              late   <- pods.ping(self.copy(host = "127.0.0.1")).exit
-            } yield assertTrue(closed.isDefined, late.isFailure)
+              late     <- pods.ping(self.copy(host = "127.0.0.1")).exit
+            } yield assertTrue(
+              assign.isFailure,
+              unassign.isFailure,
+              empty.isFailure,
+              closed.isDefined,
+              late.isFailure
+            )
           }
         )
       )

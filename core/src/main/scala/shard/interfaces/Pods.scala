@@ -1,7 +1,7 @@
 package shard.interfaces
 
 import shard.interfaces.Pods.{ BinaryMessage, BinaryReply }
-import shard.{ PodAddress, ShardId }
+import shard.{ PodAddress, Role, ShardId }
 import zio.stream.ZStream
 import zio.{ Task, ULayer, ZIO, ZLayer }
 
@@ -13,14 +13,14 @@ import zio.{ Task, ULayer, ZIO, ZLayer }
 trait Pods {
 
   /**
-   * Notify a pod that it was assigned a list of shards
+   * Notify a pod that it was assigned a list of shards of the given role (to be rejected by a pod of another role)
    */
-  def assignShards(pod: PodAddress, shards: Set[ShardId]): Task[Unit]
+  def assignShards(pod: PodAddress, role: Role, shards: Set[ShardId]): Task[Unit]
 
   /**
-   * Notify a pod that it was unassigned a list of shards
+   * Notify a pod that it was unassigned a list of shards of the given role (to be rejected by a pod of another role)
    */
-  def unassignShards(pod: PodAddress, shards: Set[ShardId]): Task[Unit]
+  def unassignShards(pod: PodAddress, role: Role, shards: Set[ShardId]): Task[Unit]
 
   /**
    * Check that a pod is responsive
@@ -56,8 +56,8 @@ object Pods {
    */
   val noop: ULayer[Pods] =
     ZLayer.succeed(new Pods {
-      def assignShards(pod: PodAddress, shards: Set[ShardId]): Task[Unit]                                = ZIO.unit
-      def unassignShards(pod: PodAddress, shards: Set[ShardId]): Task[Unit]                              = ZIO.unit
+      def assignShards(pod: PodAddress, role: Role, shards: Set[ShardId]): Task[Unit]                    = ZIO.unit
+      def unassignShards(pod: PodAddress, role: Role, shards: Set[ShardId]): Task[Unit]                  = ZIO.unit
       def ping(pod: PodAddress): Task[Unit]                                                              = ZIO.unit
       def sendMessage(pod: PodAddress, message: BinaryMessage): Task[BinaryReply]                        =
         ZIO.succeed(

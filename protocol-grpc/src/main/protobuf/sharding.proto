@@ -11,12 +11,14 @@ service ShardingService {
 
 message AssignShardsRequest {
     repeated int32 shards = 1;
+    string role = 2;
 }
 
 message AssignShardsResponse {}
 
 message UnassignShardsRequest {
     repeated int32 shards = 1;
+    string role = 2;
 }
 
 message UnassignShardsResponse {}

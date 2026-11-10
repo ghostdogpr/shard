@@ -13,10 +13,14 @@ import scala.annotation.tailrec
 /**
  * A component in charge of assigning and unassigning shards to/from pods
  */
-class ShardManager(
+class ShardManager private (
   stateRef: Ref.Synchronized[Map[Role, ShardManagerState]],
-  rebalanceSemaphores: Ref.Synchronized[Map[Role, Semaphore]],
+  rebalanceSemaphores: Role => UIO[Semaphore],
   eventsHub: Hub[ShardingEvent],
+  // one write at a time per storage key, so that the last one holds the latest state
+  podsLock: Semaphore,
+  assignmentsLocks: Role => UIO[Semaphore],
+  scope: Scope,
   healthApi: PodsHealth,
   podApi: Pods,
   stateRepository: Storage,
@@ -32,41 +36,56 @@ class ShardManager(
   def register(pod: Pod): Task[Unit] =
     ZIO.ifZIO(healthApi.isAlive(pod))(
       onTrue = for {
-        _                <- ZIO.logInfo(s"Registering $pod")
-        cdt              <- ZIO.succeed(OffsetDateTime.now())
-        triggerRebalance <- stateRef.modifyZIO { states =>
-                              val existingRole = states.collectFirst {
-                                case (role, state) if state.pods.contains(pod.address) => role
-                              }
-                              if (existingRole.exists(_ != pod.role)) {
-                                ZIO.fail(new RuntimeException(s"Pod $pod is already registered with a different role"))
-                              } else {
-                                val previous =
-                                  states.getOrElse(pod.role, ShardManagerState(config.numberOfShards(pod.role)))
-                                val state    =
-                                  previous.copy(pods = previous.pods.updated(pod.address, PodWithMetadata(pod, cdt)))
-                                ZIO.succeed((state.unassignedShards.nonEmpty, states.updated(pod.role, state)))
-                              }
-                            }
-        _                <- ManagerMetrics.pods.tagged("role", pod.role.name).increment
-        _                <- eventsHub.publish(ShardingEvent.PodRegistered(pod))
-        _                <- ZIO.whenDiscard(triggerRebalance)(rebalance(pod.role, rebalanceImmediately = false).forkDaemon)
-        _                <- persistPods
+        _         <- ZIO.logInfo(s"Registering $pod")
+        cdt       <- ZIO.succeed(OffsetDateTime.now())
+        persisted <-
+          modifyStates { states =>
+            // an address hosts a single process: a pod of another role registered there is gone
+            val (replaced, others) = removePod(states, pod.address, _.pod.role != pod.role)
+            val current            = others.getOrElse(pod.role, ShardManagerState(config.numberOfShards(pod.role)))
+            val state              = current.copy(pods = current.pods.updated(pod.address, PodWithMetadata(pod, cdt)))
+            ((replaced, state.unassignedShards.nonEmpty), others.updated(pod.role, state))
+          }.flatMap { case (replaced, triggerRebalance) =>
+            ZIO.foreachDiscard(replaced)(announceUnregistered) *>
+              eventsHub.publish(ShardingEvent.PodRegistered(pod)) *>
+              ZIO.whenDiscard(triggerRebalance)(rebalance(pod.role, rebalanceImmediately = false).background) *>
+              persistPods.background
+          }.uninterruptible
+        // a client that stops waiting doesn't cancel the write
+        _         <- persisted.join
       } yield (),
       onFalse = ZIO.logWarning(s"Pod $pod requested to register but is not alive, ignoring") *>
         ZIO.fail(new RuntimeException(s"Pod $pod is not healthy, refusing to register"))
     )
 
-  private def findPod(podAddress: PodAddress): UIO[Option[Pod]] =
-    stateRef.get.map(_.values.iterator.flatMap(_.pods.get(podAddress)).map(_.pod).nextOption())
+  private def findPod(podAddress: PodAddress): UIO[Option[PodWithMetadata]] =
+    stateRef.get.map(_.values.iterator.flatMap(_.pods.get(podAddress)).nextOption())
+
+  // returns the removed pod with the shards it had
+  private def removePod(
+    states: Map[Role, ShardManagerState],
+    podAddress: PodAddress,
+    matches: PodWithMetadata => Boolean
+  ): (Option[(Pod, Set[ShardId])], Map[Role, ShardManagerState]) = {
+    val found = states.iterator.flatMap { case (role, state) =>
+      state.pods.get(podAddress).filter(matches).map(pod => (role, state, pod.pod))
+    }.nextOption()
+    found.fold((Option.empty[(Pod, Set[ShardId])], states)) { case (role, state, pod) =>
+      val shards      = state.shards.collect { case (shard, Some(p)) if p == podAddress => shard }.toSet
+      val shardsAfter = state.shards ++ shards.map(_ -> None)
+      (Some((pod, shards)), states.updated(role, state.copy(pods = state.pods - podAddress, shards = shardsAfter)))
+    }
+  }
 
   def notifyUnhealthyPod(podAddress: PodAddress, ignoreMetric: Boolean = false): UIO[Unit] =
     ZIO
-      .whenCaseZIODiscard(findPod(podAddress)) { case Some(pod) =>
+      .whenCaseZIODiscard(findPod(podAddress)) { case Some(registered) =>
         ManagerMetrics.podHealthChecked.tagged("pod_address", podAddress.toString).increment.unless(ignoreMetric) *>
-          eventsHub.publish(ShardingEvent.PodHealthChecked(pod)) *>
-          ZIO.unlessZIO(healthApi.isAlive(pod))(
-            ZIO.logWarning(s"Pod $podAddress is not alive, unregistering") *> unregister(podAddress)
+          eventsHub.publish(ShardingEvent.PodHealthChecked(registered.pod)) *>
+          ZIO.unlessZIO(healthApi.isAlive(registered.pod))(
+            ZIO.logWarning(s"Pod $podAddress is not alive, unregistering") *>
+              // a pod that registered again at this address in the meantime stays
+              unregisterIf(podAddress)(_ == registered)
           )
       }
 
@@ -77,138 +96,99 @@ class ShardManager(
     } yield ()
 
   def unregister(podAddress: PodAddress): UIO[Unit] =
-    ZIO.whenCaseZIODiscard(findPod(podAddress)) { case Some(pod) =>
-      for {
-        _             <- ZIO.logInfo(s"Unregistering $podAddress")
-        unassignments <- stateRef.modify { states =>
-                           val stateOpt = states.get(pod.role)
-                           (
-                             stateOpt
-                               .map(_.shards.collect { case (shard, Some(p)) if p == podAddress => shard }.toSet)
-                               .getOrElse(Set.empty),
-                             stateOpt.fold(states)(state =>
-                               states.updated(
-                                 pod.role,
-                                 state.copy(
-                                   pods = state.pods - podAddress,
-                                   shards = state.shards.map { case (k, v) =>
-                                     k -> (if (v.contains(podAddress)) None else v)
-                                   }
-                                 )
-                               )
-                             )
-                           )
-                         }
-        _             <- ManagerMetrics.pods.tagged("role", pod.role.name).decrement
-        _             <- ManagerMetrics.assignedShards
-                           .tagged("role", pod.role.name)
-                           .tagged("pod_address", podAddress.toString)
-                           .decrementBy(unassignments.size)
-        _             <- ManagerMetrics.unassignedShards.tagged("role", pod.role.name).incrementBy(unassignments.size)
-        _             <- eventsHub.publish(ShardingEvent.PodUnregistered(pod))
-        _             <- eventsHub
-                           .publish(ShardingEvent.ShardsUnassigned(pod.address, pod.role, unassignments))
-                           .when(unassignments.nonEmpty)
-        _             <- persistPods.forkDaemon
-        _             <- rebalance(pod.role, rebalanceImmediately = true).forkDaemon
-      } yield ()
-    }
+    unregisterIf(podAddress)(_ => true)
 
-  private def getSemaphore(role: Role): UIO[Semaphore] =
-    rebalanceSemaphores.modifyZIO(map =>
-      map.get(role) match {
-        case Some(s) => ZIO.succeed((s, map))
-        case None    => Semaphore.make(1).map(s => (s, map.updated(role, s)))
-      }
-    )
+  // check and remove in one update, so that concurrent calls unregister the pod once
+  private def unregisterIf(podAddress: PodAddress)(matches: PodWithMetadata => Boolean): UIO[Unit] =
+    modifyStates(removePod(_, podAddress, matches))
+      .flatMap(ZIO.foreachDiscard(_)((pod, shards) => announceUnregistered(pod, shards) *> persistPods.background))
+      .uninterruptible
+
+  // all state changes go through here, so that the gauges always match the state
+  private def modifyStates[A](f: Map[Role, ShardManagerState] => (A, Map[Role, ShardManagerState])): UIO[A] =
+    stateRef.modifyZIO { before =>
+      val (result, after) = f(before)
+      ZIO
+        .foreachDiscard(after)((role, state) =>
+          ZIO.unlessDiscard(before.get(role).exists(_ eq state))(recordGauges(role, before.get(role), state))
+        )
+        .as((result, after))
+    }.uninterruptible
+
+  private def announceUnregistered(pod: Pod, unassignments: Set[ShardId]): UIO[Unit] =
+    for {
+      _ <- ZIO.logInfo(s"Unregistered ${pod.address}")
+      _ <- eventsHub.publish(ShardingEvent.PodUnregistered(pod))
+      _ <- eventsHub
+             .publish(ShardingEvent.ShardsUnassigned(pod.address, pod.role, unassignments))
+             .when(unassignments.nonEmpty)
+      // the rebalance doesn't persist when no pod of the role is left
+      _ <- persistAssignments(pod.role).background.when(unassignments.nonEmpty)
+      _ <- rebalance(pod.role, rebalanceImmediately = true).background
+    } yield ()
+
+  extension [A](effect: UIO[A]) {
+    // stopped when the Shard Manager is released, even when forked from uninterruptible code
+    private def background: UIO[Fiber.Runtime[Nothing, A]] = effect.interruptible.forkIn(scope)
+  }
 
   private def rebalance(role: Role, rebalanceImmediately: Boolean): UIO[Unit] =
-    getSemaphore(role).flatMap(_.withPermit {
-      for {
-        state                                         <- stateRef.get.map(_.getOrElse(role, ShardManagerState(config.numberOfShards(role))))
-        // find which shards to assign and unassign
-        (assignments, unassignments)                   = if (rebalanceImmediately || state.unassignedShards.nonEmpty)
-                                                           decideAssignmentsForUnassignedShards(state)
-                                                         else decideAssignmentsForUnbalancedShards(state, config.rebalanceRate)
-        areChanges                                     = assignments.nonEmpty || unassignments.nonEmpty
-        _                                             <- (ZIO.logDebug(s"Rebalancing role ${role.name} (rebalanceImmediately=$rebalanceImmediately)") *>
-                                                           ManagerMetrics.rebalances.tagged("role", role.name).increment).when(areChanges)
-        // ping pods first to make sure they are ready and remove those who aren't
-        failedPingedPods                              <- ZIO
-                                                           .foreachPar(assignments.keySet ++ unassignments.keySet)(podAddress =>
-                                                             podApi
-                                                               .ping(podAddress)
-                                                               .timeout(config.pingTimeout)
-                                                               .someOrFailException
-                                                               .fold(_ => Set(podAddress), _ => Set.empty[PodAddress])
-                                                           )
-                                                           .map(_.flatten)
-        shardsToRemove                                 = assignments.collect {
-                                                           case (podAddress, shards) if failedPingedPods.contains(podAddress) => shards
-                                                         }.toSet.flatten ++
-                                                           unassignments.collect {
-                                                             case (podAddress, shards) if failedPingedPods.contains(podAddress) => shards
-                                                           }.toSet.flatten
-        readyAssignments                               = assignments.view.mapValues(_ diff shardsToRemove).filterNot(_._2.isEmpty).toMap
-        readyUnassignments                             = unassignments.view.mapValues(_ diff shardsToRemove).filterNot(_._2.isEmpty).toMap
-        // do the unassignments first
-        failed                                        <- ZIO
-                                                           .foreachPar(readyUnassignments.toList) { case (podAddress, shards) =>
-                                                             (podApi.unassignShards(podAddress, shards) *>
-                                                               updateShardsState(role, shards, None)).foldZIO(
-                                                               _ => ZIO.succeed((Set(podAddress), shards)),
-                                                               _ =>
-                                                                 ManagerMetrics.assignedShards
-                                                                   .tagged("role", role.name)
-                                                                   .tagged("pod_address", podAddress.toString)
-                                                                   .decrementBy(shards.size) *>
-                                                                   ManagerMetrics.unassignedShards
-                                                                     .tagged("role", role.name)
-                                                                     .incrementBy(shards.size) *>
-                                                                   eventsHub
-                                                                     .publish(ShardingEvent.ShardsUnassigned(podAddress, role, shards))
-                                                                     .as((Set.empty, Set.empty))
-                                                             )
-                                                           }
-                                                           .map(_.unzip)
-                                                           .map { case (pods, shards) => (pods.flatten[PodAddress].toSet, shards.flatten[ShardId].toSet) }
-        (failedUnassignedPods, failedUnassignedShards) = failed
-        // remove assignments of shards that couldn't be unassigned, as well as faulty pods
-        filteredAssignments                            = (readyAssignments -- failedUnassignedPods).map { case (podAddress, shards) =>
-                                                           podAddress -> (shards diff failedUnassignedShards)
-                                                         }
-        // then do the assignments
-        failedAssignedPods                            <- ZIO
-                                                           .foreachPar(filteredAssignments.toList) { case (podAddress, shards) =>
-                                                             (podApi.assignShards(podAddress, shards) *>
-                                                               updateShardsState(role, shards, Some(podAddress)))
-                                                               .foldZIO(
-                                                                 _ => ZIO.succeed(Set(podAddress)),
-                                                                 _ =>
-                                                                   ManagerMetrics.assignedShards
-                                                                     .tagged("role", role.name)
-                                                                     .tagged("pod_address", podAddress.toString)
-                                                                     .incrementBy(shards.size) *>
-                                                                     ManagerMetrics.unassignedShards
-                                                                       .tagged("role", role.name)
-                                                                       .decrementBy(shards.size) *>
-                                                                     eventsHub
-                                                                       .publish(ShardingEvent.ShardsAssigned(podAddress, role, shards))
-                                                                       .as(Set.empty)
-                                                               )
-                                                           }
-                                                           .map(_.flatten[PodAddress].toSet)
-        failedPods                                     = failedPingedPods ++ failedUnassignedPods ++ failedAssignedPods
-        // check if failing pods are still up
-        _                                             <- ZIO.foreachDiscard(failedPods)(notifyUnhealthyPod(_)).forkDaemon
-        _                                             <- ZIO.logWarning(s"Failed to rebalance pods for role ${role.name}: $failedPods").when(failedPods.nonEmpty)
-        // retry rebalancing later if there was any failure
-        _                                             <- (Clock.sleep(config.rebalanceRetryInterval) *> rebalance(role, rebalanceImmediately)).forkDaemon
-                                                           .when(failedPods.nonEmpty && rebalanceImmediately)
-        // persist state changes to Redis
-        _                                             <- persistAssignments(role).when(areChanges)
-      } yield ()
-    })
+    rebalanceSemaphores(role).flatMap(_.withPermit(rebalanceWithPermit(role, rebalanceImmediately)))
+
+  // skips the role while another of its rebalances is running
+  private def rebalanceIfIdle(role: Role): UIO[Unit] =
+    rebalanceSemaphores(role)
+      .flatMap(_.tryWithPermit(rebalanceWithPermit(role, rebalanceImmediately = false)))
+      .unit
+
+  private def rebalanceWithPermit(role: Role, rebalanceImmediately: Boolean): UIO[Unit] =
+    for {
+      state                       <- stateRef.get.map(_.getOrElse(role, ShardManagerState(config.numberOfShards(role))))
+      // find which shards to assign and unassign
+      (assignments, unassignments) = if (rebalanceImmediately || state.unassignedShards.nonEmpty)
+                                       decideAssignmentsForUnassignedShards(state)
+                                     else decideAssignmentsForUnbalancedShards(state, config.rebalanceRate)
+      areChanges                   = assignments.nonEmpty || unassignments.nonEmpty
+      _                           <- (ZIO.logDebug(s"Rebalancing role ${role.name} (rebalanceImmediately=$rebalanceImmediately)") *>
+                                       ManagerMetrics.rebalances.tagged("role", role.name).increment).when(areChanges)
+      // ping pods first to make sure they are ready and remove those who aren't
+      failedPingedPods            <- ZIO
+                                       .foreachPar(assignments.keySet ++ unassignments.keySet)(podAddress =>
+                                         podApi
+                                           .ping(podAddress)
+                                           .timeout(config.pingTimeout)
+                                           .someOrFailException
+                                           .fold(_ => Set(podAddress), _ => Set.empty[PodAddress])
+                                       )
+                                       .map(_.flatten)
+      shardsToRemove               = assignments.collect {
+                                       case (podAddress, shards) if failedPingedPods.contains(podAddress) => shards
+                                     }.toSet.flatten ++
+                                       unassignments.collect {
+                                         case (podAddress, shards) if failedPingedPods.contains(podAddress) => shards
+                                       }.toSet.flatten
+      readyAssignments             = assignments.view.mapValues(_ diff shardsToRemove).filterNot(_._2.isEmpty).toMap
+      readyUnassignments           = unassignments.view.mapValues(_ diff shardsToRemove).filterNot(_._2.isEmpty).toMap
+      // do the unassignments first
+      failedUnassignments         <- moveShards(role, readyUnassignments, assign = false)
+      failedUnassignedPods         = failedUnassignments.map(_._1)
+      failedUnassignedShards       = failedUnassignments.flatMap(_._2).toSet
+      // remove assignments of shards that couldn't be unassigned, as well as faulty pods
+      filteredAssignments          = (readyAssignments -- failedUnassignedPods).map { case (podAddress, shards) =>
+                                       podAddress -> (shards diff failedUnassignedShards)
+                                     }
+      // then do the assignments
+      failedAssignments           <- moveShards(role, filteredAssignments, assign = true)
+      failedPods                   = failedPingedPods ++ failedUnassignedPods ++ failedAssignments.map(_._1)
+      // check if failing pods are still up
+      _                           <- ZIO.foreachDiscard(failedPods)(notifyUnhealthyPod(_)).background.when(failedPods.nonEmpty)
+      _                           <- ZIO.logWarning(s"Failed to rebalance pods for role ${role.name}: $failedPods").when(failedPods.nonEmpty)
+      // retry rebalancing later if there was any failure
+      _                           <- (Clock.sleep(config.rebalanceRetryInterval) *> rebalance(role, rebalanceImmediately)).background
+                                       .when(failedPods.nonEmpty && rebalanceImmediately)
+      // persist state changes to Redis
+      _                           <- persistAssignments(role).when(areChanges)
+    } yield ()
 
   private def withRetry[A](zio: Task[A]): UIO[Unit] =
     zio
@@ -217,39 +197,64 @@ class ShardManager(
       .unit
 
   private def persistAssignments(role: Role): UIO[Unit] =
-    withRetry(
-      stateRef.get.flatMap(states =>
-        stateRepository.saveAssignments(role, states.get(role).map(_.shards).getOrElse(Map.empty))
+    assignmentsLocks(role).flatMap(
+      _.withPermit(withRetry(getAssignments(role).flatMap(stateRepository.saveAssignments(role, _))))
+    )
+
+  // keys are written independently so that a failing or stuck write doesn't block the others,
+  // and `disconnect` lets the timeout end the release even if a write ignores interruption
+  private def persistAll: UIO[Unit] =
+    stateRef.get
+      .flatMap(states =>
+        ZIO.foreachParDiscard(states.keys)(role =>
+          persistAssignments(role).catchAllCause(
+            ZIO.logWarningCause(s"Failed to persist assignments for role ${role.name} on shutdown", _)
+          )
+        ) <&> persistPods.catchAllCause(ZIO.logWarningCause("Failed to persist pods on shutdown", _))
+      )
+      .disconnect
+      .interruptible
+      .timeout(config.shutdownPersistTimeout)
+      .someOrElseZIO(ZIO.logWarning(s"Persisting on shutdown timed out after ${config.shutdownPersistTimeout.render}"))
+
+  private def persistPods: UIO[Unit] =
+    podsLock.withPermit(
+      withRetry(
+        stateRef.get.flatMap(states => stateRepository.savePods(states.values.flatMap(_.pods.values.map(_.pod)).toSet))
       )
     )
 
-  private def persistAllAssignments: UIO[Unit] =
-    stateRef.get.flatMap(states => ZIO.foreachDiscard(states.keys)(persistAssignments))
-
-  private def persistPods: UIO[Unit] =
-    withRetry(
-      stateRef.get.flatMap(states => stateRepository.savePods(states.values.flatMap(_.pods.values.map(_.pod)).toSet))
-    )
-
-  private def updateShardsState(role: Role, shards: Set[ShardId], podAddress: Option[PodAddress]): Task[Unit] =
-    stateRef.updateZIO { states =>
-      val previous = states.get(role)
-      ZIO
-        .whenCase((previous, podAddress)) {
-          case (Some(state), Some(podAddress)) if !state.pods.contains(podAddress) =>
-            ZIO.fail(new Exception(s"Pod $podAddress is not registered"))
-        }
-        .as(
-          previous.fold(states)(state =>
-            states.updated(
-              role,
-              state.copy(shards = state.shards.map { case (shard, assignment) =>
-                shard -> (if (shards.contains(shard)) podAddress else assignment)
-              })
+  // once the pod has been called, the state is updated even on shutdown (unless an assigned pod left meanwhile)
+  // and only the shards that actually moved are announced; returns the failed moves
+  private def moveShards(
+    role: Role,
+    moves: Map[PodAddress, Set[ShardId]],
+    assign: Boolean
+  ): UIO[List[(PodAddress, Set[ShardId])]] = {
+    val call  = if (assign) podApi.assignShards else podApi.unassignShards
+    val event = if (assign) ShardingEvent.ShardsAssigned.apply else ShardingEvent.ShardsUnassigned.apply
+    ZIO.filterNotPar(moves.toList) { (podAddress, shards) =>
+      val target = Option.when(assign)(podAddress)
+      ZIO.uninterruptibleMask(restore =>
+        restore(call(podAddress, role, shards)).foldZIO(
+          _ => ZIO.succeed(false),
+          _ =>
+            modifyStates(states =>
+              states.get(role).filter(state => target.forall(state.pods.contains)) match {
+                case Some(state) =>
+                  val changed = shards.filter(shard => state.shards.get(shard).exists(_ != target))
+                  (Some(changed), states.updated(role, state.copy(shards = state.shards ++ changed.map(_ -> target))))
+                case None        => (None, states)
+              }
+            ).flatMap(
+              ZIO
+                .foreach(_)(changed => eventsHub.publish(event(podAddress, role, changed)).when(changed.nonEmpty))
+                .map(_.isDefined)
             )
-          )
         )
+      )
     }
+  }
 }
 
 object ShardManager {
@@ -266,29 +271,20 @@ object ShardManager {
         podApi              <- ZIO.service[Pods]
         oldPods             <- stateRepository.getPods
         // remove unhealthy pods on startup
-        aliveStatuses       <- ZIO.foreachPar(oldPods)(pod => healthApi.isAlive(pod).map(pod -> _))
-        (failedPods, pods)   = aliveStatuses.partitionMap {
-                                 case (pod, false) => Left(pod)
-                                 case (pod, true)  => Right(pod)
-                               }
+        pods                <- ZIO.filterPar(oldPods)(healthApi.isAlive)
+        failedPods           = oldPods -- pods
         _                   <- ZIO.whenDiscard(failedPods.nonEmpty)(
                                  ZIO.logInfo(s"Ignoring pods that are no longer alive ${failedPods.mkString("[", ", ", "]")}")
                                )
-        _                   <- ZIO.whenDiscard(pods.nonEmpty)(
-                                 ZIO.logInfo(s"Recovered pods ${pods.mkString("[", ", ", "]")}")
-                               )
-        podsByAddress        = pods.map(p => p.address -> p).toMap
-        podsByRole           = pods.groupBy(_.role)
-        assignments         <- ZIO
-                                 .foreach(podsByRole.keySet) { role =>
+        _                   <- ZIO.logInfo(s"Recovered pods ${pods.mkString("[", ", ", "]")}")
+        cdt                 <- ZIO.succeed(OffsetDateTime.now())
+        // the roles of dead pods too, whose shards are then all unassigned
+        initialStates       <- ZIO
+                                 .foreach(oldPods.groupBy(_.role)) { (role, stored) =>
+                                   val rolePods = stored.filter(pods).map(p => p.address -> PodWithMetadata(p, cdt)).toMap
                                    for {
                                      oldAssignments       <- stateRepository.getAssignments(role)
-                                     (failed, assignments) = partitionMap(oldAssignments) {
-                                                               case assignment @ (_, Some(address))
-                                                                   if podsByAddress.contains(address) =>
-                                                                 Right(assignment)
-                                                               case assignment => Left(assignment)
-                                                             }
+                                     (assignments, failed) = oldAssignments.partition(_._2.exists(rolePods.contains))
                                      failedAssignments     = failed.collect { case (shard, Some(addr)) => shard -> addr }
                                      _                    <-
                                        ZIO.whenDiscard(failedAssignments.nonEmpty)(
@@ -298,91 +294,65 @@ object ShardManager {
                                          )
                                        )
                                      _                    <-
-                                       ZIO.whenDiscard(assignments.nonEmpty)(
-                                         ZIO.logInfo(
-                                           s"Recovered assignments for role ${role.name}: ${assignments.mkString("[", ", ", "]")}"
-                                         )
+                                       ZIO.logInfo(
+                                         s"Recovered assignments for role ${role.name}: ${assignments.mkString("[", ", ", "]")}"
                                        )
-                                   } yield role -> assignments
+                                   } yield role -> ShardManagerState(
+                                     rolePods,
+                                     ShardManagerState(config.numberOfShards(role)).shards ++ assignments
+                                   )
                                  }
-                                 .map(_.toMap)
-        cdt                 <- ZIO.succeed(OffsetDateTime.now())
-        initialStates        = podsByRole.map { case (role, pods) =>
-                                 role -> ShardManagerState(
-                                   pods.map(pod => pod.address -> PodWithMetadata(pod, cdt)).toMap,
-                                   (1 to config.numberOfShards(role)).map(_ -> None).toMap ++
-                                     assignments.getOrElse(role, Map.empty),
-                                   config.numberOfShards(role)
-                                 )
-                               }
-        _                   <- ZIO
-                                 .foreachDiscard(initialStates) { case (role, state) =>
-                                   ManagerMetrics.pods.tagged("role", role.name).incrementBy(state.pods.size) *>
-                                     ZIO.foreachDiscard(state.shards) { case (_, podAddressOpt) =>
-                                       podAddressOpt match {
-                                         case Some(podAddress) =>
-                                           ManagerMetrics.assignedShards
-                                             .tagged("role", role.name)
-                                             .tagged("pod_address", podAddress.toString)
-                                             .increment
-                                         case None             =>
-                                           ManagerMetrics.unassignedShards
-                                             .tagged("role", role.name)
-                                             .increment
-                                       }
-                                     }
-                                 }
+        _                   <- ZIO.foreachDiscard(initialStates)(recordGauges(_, None, _))
         state               <- Ref.Synchronized.make(initialStates)
-        rebalanceSemaphores <- Ref.Synchronized.make(Map.empty[Role, Semaphore])
+        rebalanceSemaphores <- semaphorePerRole
         eventsHub           <- Hub.unbounded[ShardingEvent]
+        podsLock            <- Semaphore.make(1)
+        assignmentsLocks    <- semaphorePerRole
+        scope               <- ZIO.scope
         shardManager         = new ShardManager(
                                  stateRef = state,
                                  rebalanceSemaphores = rebalanceSemaphores,
                                  eventsHub = eventsHub,
+                                 podsLock = podsLock,
+                                 assignmentsLocks = assignmentsLocks,
+                                 scope = scope,
                                  healthApi = healthApi,
                                  podApi = podApi,
                                  stateRepository = stateRepository,
                                  config = config
                                )
-        _                   <- ZIO.addFinalizer {
-                                 shardManager.persistAllAssignments.catchAllCause(cause =>
-                                   ZIO.logWarningCause("Failed to persist assignments on shutdown", cause)
-                                 ) *>
-                                   shardManager.persistPods.catchAllCause(cause =>
-                                     ZIO.logWarningCause("Failed to persist pods on shutdown", cause)
-                                   )
-                               }
+        _                   <- ZIO.addFinalizer(shardManager.persistAll)
         _                   <- shardManager.persistPods
         // rebalance immediately if there are unassigned shards
         _                   <- ZIO.foreachDiscard(initialStates) { case (role, state) =>
-                                 shardManager.rebalance(role, rebalanceImmediately = state.unassignedShards.nonEmpty).forkDaemon
+                                 shardManager.rebalance(role, rebalanceImmediately = state.unassignedShards.nonEmpty).forkScoped
                                }
-        // start a regular rebalance at the given interval
+        // start a regular rebalance at the given interval, per role so that a slow one doesn't delay the others
         _                   <- state.get
-                                 .flatMap(states =>
-                                   ZIO.foreachParDiscard(states.keySet)(shardManager.rebalance(_, rebalanceImmediately = false))
-                                 )
+                                 .flatMap(states => ZIO.foreachDiscard(states.keySet)(shardManager.rebalanceIfIdle(_).fork))
                                  .repeat(Schedule.spaced(config.rebalanceInterval))
-                                 .forkDaemon
-        _                   <- shardManager.getShardingEvents.mapZIO(event => ZIO.logInfo(event.toString)).runDrain.forkDaemon
-        _                   <- shardManager.checkAllPodsHealth.repeat(Schedule.spaced(config.podHealthCheckInterval)).forkDaemon
+                                 .forkScoped
+        _                   <- shardManager.getShardingEvents.mapZIO(event => ZIO.logInfo(event.toString)).runDrain.forkScoped
+        _                   <- shardManager.checkAllPodsHealth.repeat(Schedule.spaced(config.podHealthCheckInterval)).forkScoped
         _                   <- ZIO.logInfo("Shard Manager loaded")
       } yield shardManager
     }
 
-  // reimplement Map.partitionMap because it does not exist in 2.12
-  private def partitionMap[K, V, VL <: V, VR <: V](map: Map[K, V])(partition: ((K, V)) => Either[(K, VL), (K, VR)]) = {
-    val left  = Map.newBuilder[K, VL]
-    val right = Map.newBuilder[K, VR]
+  // uninterruptible: memoize never completes a role's entry if its first caller is interrupted before creating it
+  private val semaphorePerRole: UIO[Role => UIO[Semaphore]] =
+    ZIO.memoize((_: Role) => Semaphore.make(1)).map(semaphore => semaphore(_).uninterruptible)
 
-    map.iterator.foreach { kv =>
-      partition(kv) match {
-        case Left(kvl)  => left += kvl
-        case Right(kvr) => right += kvr
+  private def recordGauges(role: Role, before: Option[ShardManagerState], after: ShardManagerState): UIO[Unit] = {
+    val previous = before.fold(Map.empty[PodAddress, Set[ShardId]])(_.shardsPerPod)
+    ManagerMetrics.pods.tagged("role", role.name).set(after.pods.size) *>
+      ManagerMetrics.unassignedShards.tagged("role", role.name).set(after.unassignedShards.size) *>
+      ZIO.foreachDiscard(previous.keySet ++ after.shardsPerPod.keySet) { podAddress =>
+        val count = after.shardsPerPod.get(podAddress).fold(0)(_.size)
+        // only changed counts, so a pod that never had shards has no series
+        ZIO.unlessDiscard(previous.get(podAddress).fold(0)(_.size) == count)(
+          ManagerMetrics.assignedShards.tagged("role", role.name).tagged("pod_address", podAddress.toString).set(count)
+        )
       }
-    }
-
-    (left.result(), right.result())
   }
 
   implicit def listOrder[A](implicit ev: Ordering[A]): Ordering[List[A]] = (xs: List[A], ys: List[A]) => {
@@ -402,11 +372,7 @@ object ShardManager {
     if (xs eq ys) 0 else loop(xs, ys)
   }
 
-  case class ShardManagerState(
-    pods: Map[PodAddress, PodWithMetadata],
-    shards: Map[ShardId, Option[PodAddress]],
-    numberOfShards: Int
-  ) {
+  case class ShardManagerState(pods: Map[PodAddress, PodWithMetadata], shards: Map[ShardId, Option[PodAddress]]) {
     lazy val unassignedShards: Set[ShardId]    = shards.collect { case (k, None) => k }.toSet
     lazy val averageShardsPerPod: ShardId      = if (pods.nonEmpty) shards.size / pods.size else 0
     private lazy val podVersions               = pods.values.toList.map(extractVersion)
@@ -417,9 +383,10 @@ object ShardManager {
       pods.map { case (k, _) => k -> Set.empty[ShardId] } ++
         shards.groupBy(_._2).collect { case (Some(address), shards) => address -> shards.keySet }
   }
+
   object ShardManagerState {
     def apply(numberOfShards: Int): ShardManagerState =
-      ShardManagerState(Map.empty, (1 to numberOfShards).map(_ -> None).toMap, numberOfShards)
+      ShardManagerState(Map.empty, (1 to numberOfShards).map(_ -> None).toMap)
   }
 
   case class PodWithMetadata(pod: Pod, registeredAt: OffsetDateTime)
