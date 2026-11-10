@@ -241,19 +241,21 @@ object ShardManagerSpec extends ZIOSpecDefault {
           }.provide(Storage.memory)
         },
         test("Recover stored assignments by role") {
-          val role1      = Role("recovered-1")
-          val pod1       = Pod(PodAddress("server", 1), "1", role1)
-          val pod2       = Pod(PodAddress("server", 2), "1", Role("recovered-2"))
-          val deadPod    = Pod(PodAddress("server", 3), "1", Role("recovered-3"))
-          val podsHealth = ZLayer.succeed(new PodsHealth {
-            def isAlive(pod: Pod): UIO[Boolean] = ZIO.succeed(pod != deadPod)
-          })
-          val manager    = ZIO.serviceWithZIO[ShardManager]
+          val role1   = Role("recovered-1")
+          val pod1    = Pod(PodAddress("server", 1), "1", role1)
+          val pod2    = Pod(PodAddress("server", 2), "1", Role("recovered-2"))
+          val deadPod = Pod(PodAddress("server", 3), "1", Role("recovered-3"))
+          val pod4    = Pod(PodAddress("server", 4), "1", Role("recovered-4"))
+          val manager = ZIO.serviceWithZIO[ShardManager]
           for {
+            checks    <- Ref.make(0)
+            podsHealth = ZLayer.succeed(new PodsHealth {
+                           def isAlive(pod: Pod): UIO[Boolean] = checks.update(_ + 1).as(pod != deadPod)
+                         })
             blocked   <- Ref.make(false)
             closing   <- Ref.make(false)
             shutdown  <- Ref.make(Set.empty[Role])
-            // the first write of pod2's assignments never returns, even interrupted, which must not block the others,
+            // the first write of pod4's assignments never returns, even interrupted, which must not block the others,
             // role1's write on shutdown fails, which must not keep the other roles from being written,
             // and the pods write on shutdown never returns, even interrupted, which must not hold back the release
             storage    = Storage.memory >>> ZLayer.fromFunction((memory: Storage) =>
@@ -267,7 +269,7 @@ object ShardManagerSpec extends ZIOSpecDefault {
                                  case true                  => shutdown.update(_ + role) *> memory.saveAssignments(role, assignments)
                                  case false                 =>
                                    blocked
-                                     .modify(done => (role == pod2.role && !done, done || role == pod2.role))
+                                     .modify(done => (role == pod4.role && !done, done || role == pod4.role))
                                      .flatMap(block =>
                                        if (block) ZIO.never.uninterruptible else memory.saveAssignments(role, assignments)
                                      )
@@ -283,6 +285,7 @@ object ShardManagerSpec extends ZIOSpecDefault {
                                      )
                            result <- (for {
                                        _           <- TestClock.adjust(1 minute)
+                                       _           <- manager(_.register(pod4))
                                        assignments <- manager(_.getAssignments(role1))
                                        // a role whose stored pods are all dead still has its shards, all unassigned
                                        deadRole    <- manager(_.getAssignments(deadPod.role))
@@ -312,7 +315,11 @@ object ShardManagerSpec extends ZIOSpecDefault {
             _         <- (ZIO.whenZIO(closing.get)(TestClock.adjust(1.second)) *> Live.live(ZIO.sleep(10.millis))).forever.fork
             result    <- Live.live(run.join.timeoutFail(new Exception("release not finished"))(10.seconds))
             persisted <- shutdown.get
-          } yield result && assertTrue(persisted == Set(deadPod.role))
+            // the health checks stopped with the Shard Manager
+            released  <- checks.get
+            _         <- Live.live(ZIO.sleep(1.second))
+            after     <- checks.get
+          } yield result && assertTrue(persisted == Set(pod2.role, deadPod.role), after == released)
         }
       )
     )

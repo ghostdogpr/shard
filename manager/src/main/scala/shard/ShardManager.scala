@@ -48,8 +48,8 @@ class ShardManager private (
           }.flatMap { case (replaced, triggerRebalance) =>
             ZIO.foreachDiscard(replaced)(announceUnregistered) *>
               eventsHub.publish(ShardingEvent.PodRegistered(pod)) *>
-              ZIO.whenDiscard(triggerRebalance)(rebalance(pod.role, rebalanceImmediately = false).background) *>
-              persistPods.background
+              ZIO.whenDiscard(triggerRebalance)(rebalance(pod.role, rebalanceImmediately = false).background(scope)) *>
+              persistPods.background(scope)
           }.uninterruptible
         // a client that stops waiting doesn't cancel the write
         _         <- persisted.join
@@ -101,7 +101,9 @@ class ShardManager private (
   // check and remove in one update, so that concurrent calls unregister the pod once
   private def unregisterIf(podAddress: PodAddress)(matches: PodWithMetadata => Boolean): UIO[Unit] =
     modifyStates(removePod(_, podAddress, matches))
-      .flatMap(ZIO.foreachDiscard(_)((pod, shards) => announceUnregistered(pod, shards) *> persistPods.background))
+      .flatMap(
+        ZIO.foreachDiscard(_)((pod, shards) => announceUnregistered(pod, shards) *> persistPods.background(scope))
+      )
       .uninterruptible
 
   // all state changes go through here, so that the gauges always match the state
@@ -123,14 +125,9 @@ class ShardManager private (
              .publish(ShardingEvent.ShardsUnassigned(pod.address, pod.role, unassignments))
              .when(unassignments.nonEmpty)
       // the rebalance doesn't persist when no pod of the role is left
-      _ <- persistAssignments(pod.role).background.when(unassignments.nonEmpty)
-      _ <- rebalance(pod.role, rebalanceImmediately = true).background
+      _ <- persistAssignments(pod.role).background(scope).when(unassignments.nonEmpty)
+      _ <- rebalance(pod.role, rebalanceImmediately = true).background(scope)
     } yield ()
-
-  extension [A](effect: UIO[A]) {
-    // stopped when the Shard Manager is released, even when forked from uninterruptible code
-    private def background: UIO[Fiber.Runtime[Nothing, A]] = effect.interruptible.forkIn(scope)
-  }
 
   private def rebalance(role: Role, rebalanceImmediately: Boolean): UIO[Unit] =
     rebalanceSemaphores(role).flatMap(_.withPermit(rebalanceWithPermit(role, rebalanceImmediately)))
@@ -181,10 +178,11 @@ class ShardManager private (
       failedAssignments           <- moveShards(role, filteredAssignments, assign = true)
       failedPods                   = failedPingedPods ++ failedUnassignedPods ++ failedAssignments.map(_._1)
       // check if failing pods are still up
-      _                           <- ZIO.foreachDiscard(failedPods)(notifyUnhealthyPod(_)).background.when(failedPods.nonEmpty)
+      _                           <- ZIO.foreachDiscard(failedPods)(notifyUnhealthyPod(_)).background(scope).when(failedPods.nonEmpty)
       _                           <- ZIO.logWarning(s"Failed to rebalance pods for role ${role.name}: $failedPods").when(failedPods.nonEmpty)
       // retry rebalancing later if there was any failure
-      _                           <- (Clock.sleep(config.rebalanceRetryInterval) *> rebalance(role, rebalanceImmediately)).background
+      _                           <- (Clock.sleep(config.rebalanceRetryInterval) *> rebalance(role, rebalanceImmediately))
+                                       .background(scope)
                                        .when(failedPods.nonEmpty && rebalanceImmediately)
       // persist state changes to Redis
       _                           <- persistAssignments(role).when(areChanges)
@@ -308,8 +306,7 @@ object ShardManager {
         eventsHub           <- Hub.unbounded[ShardingEvent]
         podsLock            <- Semaphore.make(1)
         assignmentsLocks    <- semaphorePerRole
-        // not the layer scope, so that its closing can be bounded
-        scope               <- Scope.make
+        scope               <- ZIO.scope
         shardManager         = new ShardManager(
                                  stateRef = state,
                                  rebalanceSemaphores = rebalanceSemaphores,
@@ -322,30 +319,27 @@ object ShardManager {
                                  stateRepository = stateRepository,
                                  config = config
                                )
-        _                   <- ZIO.addFinalizer(
-                                 scope
-                                   .close(Exit.unit)
-                                   .disconnect
-                                   .interruptible
-                                   .timeout(config.shutdownPersistTimeout)
-                                   .someOrElseZIO(ZIO.logWarning("Background tasks did not stop on shutdown")) *>
-                                   shardManager.persistAll
-                               )
+        _                   <- ZIO.addFinalizer(shardManager.persistAll)
         _                   <- shardManager.persistPods
         // rebalance immediately if there are unassigned shards
         _                   <- ZIO.foreachDiscard(initialStates) { case (role, state) =>
-                                 shardManager.rebalance(role, rebalanceImmediately = state.unassignedShards.nonEmpty).forkIn(scope)
+                                 shardManager.rebalance(role, rebalanceImmediately = state.unassignedShards.nonEmpty).background(scope)
                                }
         // start a regular rebalance at the given interval, per role so that a slow one doesn't delay the others
         _                   <- state.get
                                  .flatMap(states => ZIO.foreachDiscard(states.keySet)(shardManager.rebalanceIfIdle(_).fork))
                                  .repeat(Schedule.spaced(config.rebalanceInterval))
-                                 .forkIn(scope)
-        _                   <- shardManager.getShardingEvents.mapZIO(event => ZIO.logInfo(event.toString)).runDrain.forkIn(scope)
-        _                   <- shardManager.checkAllPodsHealth.repeat(Schedule.spaced(config.podHealthCheckInterval)).forkIn(scope)
+                                 .background(scope)
+        _                   <- shardManager.getShardingEvents.mapZIO(event => ZIO.logInfo(event.toString)).runDrain.background(scope)
+        _                   <- shardManager.checkAllPodsHealth.repeat(Schedule.spaced(config.podHealthCheckInterval)).background(scope)
         _                   <- ZIO.logInfo("Shard Manager loaded")
       } yield shardManager
     }
+
+  extension [A](effect: UIO[A]) {
+    // interrupted when the scope closes, without waiting for an uninterruptible part such as a stuck storage write
+    private def background(scope: Scope): UIO[Fiber.Runtime[Nothing, A]] = effect.disconnect.interruptible.forkIn(scope)
+  }
 
   // uninterruptible: memoize never completes a role's entry if its first caller is interrupted before creating it
   private val semaphorePerRole: UIO[Role => UIO[Semaphore]] =
