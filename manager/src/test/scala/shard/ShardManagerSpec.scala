@@ -253,7 +253,8 @@ object ShardManagerSpec extends ZIOSpecDefault {
             blocked   <- Ref.make(false)
             closing   <- Ref.make(false)
             shutdown  <- Ref.make(Set.empty[Role])
-            // the first write of pod2's assignments never returns, which must not block the other roles' writes,
+            // the first write of pod2's assignments never returns, even interrupted, which must not block the other
+            // roles' writes nor the release,
             // role1's write on shutdown fails, which must not keep the other roles from being written,
             // and the pods write on shutdown never returns, even interrupted, which must not hold back the release
             storage    = Storage.memory >>> ZLayer.fromFunction((memory: Storage) =>
@@ -268,7 +269,9 @@ object ShardManagerSpec extends ZIOSpecDefault {
                                  case false                 =>
                                    blocked
                                      .modify(done => (role == pod2.role && !done, done || role == pod2.role))
-                                     .flatMap(block => if (block) ZIO.never else memory.saveAssignments(role, assignments))
+                                     .flatMap(block =>
+                                       if (block) ZIO.never.uninterruptible else memory.saveAssignments(role, assignments)
+                                     )
                                }
                            }
                          )
@@ -306,11 +309,11 @@ object ShardManagerSpec extends ZIOSpecDefault {
                                        !stored.values.exists(_.contains(pod1.address))
                                      )).provideSome[Storage](config, Pods.noop, podsHealth, ShardManager.live)
                          } yield result).provide(storage).forkDaemon
-            // the release waits for the shutdown timeout
+            // the release waits for the shutdown timeouts
             _         <- (ZIO.whenZIO(closing.get)(TestClock.adjust(1.second)) *> Live.live(ZIO.sleep(10.millis))).forever.fork
             result    <- Live.live(run.join.timeoutFail(new Exception("release not finished"))(10.seconds))
             persisted <- shutdown.get
-          } yield result && assertTrue(persisted == Set(pod2.role, deadPod.role))
+          } yield result && assertTrue(persisted == Set(deadPod.role))
         }
       )
     )

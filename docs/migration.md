@@ -179,7 +179,7 @@ Config.default.copy(shardManagerHost = "shard-manager", shardManagerPort = 8080)
 - The Shard Manager no longer depends on zio-http and Caliban. `Server.run` doesn't take a zio-http `HandlerAspect` anymore: use `GrpcConfig.serverInterceptors` to wrap the API calls instead.
 - Tools that called the GraphQL API can use the gRPC API instead, or `Sharding.getAssignments` and `Sharding.getRegisteredPods` from a pod.
 - The `ShardManager` constructor is private: build it with `ShardManager.live`.
-- New `ManagerConfig.shutdownPersistTimeout` (10 seconds by default): the maximum time the Shard Manager waits on shutdown to persist pods and assignments. Shardcake could wait forever.
+- New `ManagerConfig.shutdownPersistTimeout` (10 seconds by default): the maximum time the Shard Manager waits on shutdown for background tasks to stop, then to persist pods and assignments. Shardcake could wait forever.
 
 ## Storage
 

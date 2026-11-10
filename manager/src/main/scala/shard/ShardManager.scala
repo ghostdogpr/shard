@@ -308,7 +308,8 @@ object ShardManager {
         eventsHub           <- Hub.unbounded[ShardingEvent]
         podsLock            <- Semaphore.make(1)
         assignmentsLocks    <- semaphorePerRole
-        scope               <- ZIO.scope
+        // closed with a bound on shutdown, since a background write may be stuck in uninterruptible code
+        scope               <- Scope.make
         shardManager         = new ShardManager(
                                  stateRef = state,
                                  rebalanceSemaphores = rebalanceSemaphores,
@@ -321,19 +322,27 @@ object ShardManager {
                                  stateRepository = stateRepository,
                                  config = config
                                )
-        _                   <- ZIO.addFinalizer(shardManager.persistAll)
+        _                   <- ZIO.addFinalizer(
+                                 scope
+                                   .close(Exit.unit)
+                                   .disconnect
+                                   .interruptible
+                                   .timeout(config.shutdownPersistTimeout)
+                                   .someOrElseZIO(ZIO.logWarning("Background tasks did not stop on shutdown")) *>
+                                   shardManager.persistAll
+                               )
         _                   <- shardManager.persistPods
         // rebalance immediately if there are unassigned shards
         _                   <- ZIO.foreachDiscard(initialStates) { case (role, state) =>
-                                 shardManager.rebalance(role, rebalanceImmediately = state.unassignedShards.nonEmpty).forkScoped
+                                 shardManager.rebalance(role, rebalanceImmediately = state.unassignedShards.nonEmpty).forkIn(scope)
                                }
         // start a regular rebalance at the given interval, per role so that a slow one doesn't delay the others
         _                   <- state.get
                                  .flatMap(states => ZIO.foreachDiscard(states.keySet)(shardManager.rebalanceIfIdle(_).fork))
                                  .repeat(Schedule.spaced(config.rebalanceInterval))
-                                 .forkScoped
-        _                   <- shardManager.getShardingEvents.mapZIO(event => ZIO.logInfo(event.toString)).runDrain.forkScoped
-        _                   <- shardManager.checkAllPodsHealth.repeat(Schedule.spaced(config.podHealthCheckInterval)).forkScoped
+                                 .forkIn(scope)
+        _                   <- shardManager.getShardingEvents.mapZIO(event => ZIO.logInfo(event.toString)).runDrain.forkIn(scope)
+        _                   <- shardManager.checkAllPodsHealth.repeat(Schedule.spaced(config.podHealthCheckInterval)).forkIn(scope)
         _                   <- ZIO.logInfo("Shard Manager loaded")
       } yield shardManager
     }
