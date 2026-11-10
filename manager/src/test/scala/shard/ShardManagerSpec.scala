@@ -253,8 +253,7 @@ object ShardManagerSpec extends ZIOSpecDefault {
             blocked   <- Ref.make(false)
             closing   <- Ref.make(false)
             shutdown  <- Ref.make(Set.empty[Role])
-            // the first write of pod2's assignments never returns, even interrupted, which must not block the other
-            // roles' writes nor the release,
+            // the first write of pod2's assignments never returns, even interrupted, which must not block the others,
             // role1's write on shutdown fails, which must not keep the other roles from being written,
             // and the pods write on shutdown never returns, even interrupted, which must not hold back the release
             storage    = Storage.memory >>> ZLayer.fromFunction((memory: Storage) =>

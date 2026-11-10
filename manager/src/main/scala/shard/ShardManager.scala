@@ -308,7 +308,7 @@ object ShardManager {
         eventsHub           <- Hub.unbounded[ShardingEvent]
         podsLock            <- Semaphore.make(1)
         assignmentsLocks    <- semaphorePerRole
-        // closed with a bound on shutdown, since a background write may be stuck in uninterruptible code
+        // not the layer scope, so that its closing can be bounded
         scope               <- Scope.make
         shardManager         = new ShardManager(
                                  stateRef = state,

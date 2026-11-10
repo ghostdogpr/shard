@@ -62,7 +62,7 @@ If you only use the `default` role (or want the same number of shards everywhere
 - `persistRetryCount`: max retry count for persistence of pods and shard assignments
 - `rebalanceRate`: max ratio of shards to rebalance in a single iteration
 - `podHealthCheckInterval`: interval for checking pod health
-- `shutdownPersistTimeout`: max time to wait on shutdown for background tasks to stop, then for pods and shard assignments to be persisted (10 seconds by default)
+- `shutdownPersistTimeout`: max time to wait for pods and shard assignments to be persisted on shutdown (10 seconds by default)
 ::: tip Rebalance Rate
 The rebalance rate is there to prevent too many shards being assigned immediately to new pods.
 Instead of reaching a perfect spread right away, we can use several iterations to make sure new pods are able to handle the new shards. 
