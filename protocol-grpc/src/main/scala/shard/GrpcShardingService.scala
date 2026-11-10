@@ -11,39 +11,6 @@ import zio.{ Config => _, _ }
 
 import java.util.concurrent.TimeUnit
 
-abstract class GrpcShardingService(sharding: Sharding) {
-  def assignShards(request: AssignShardsRequest): ZIO[Any, StatusException, AssignShardsResponse] =
-    sharding.assign(request.shards.toSet).as(AssignShardsResponse())
-
-  def unassignShards(request: UnassignShardsRequest): ZIO[Any, StatusException, UnassignShardsResponse] =
-    sharding.unassign(request.shards.toSet).as(UnassignShardsResponse())
-
-  def send(request: BinaryMessage): ZIO[Any, StatusException, SendResponse] =
-    sharding
-      .sendToLocalEntity(request)
-      .map(SendResponse(_))
-      .mapError(GrpcShardingService.mapErrorToStatus)
-
-  def sendStream(
-    requests: ZStream[Any, StatusException, BinaryMessage]
-  ): ZIO[Any, StatusException, SendResponse] =
-    sharding
-      .sendStreamToLocalEntity(requests)
-      .map(SendResponse(_))
-      .mapError(GrpcShardingService.mapErrorToStatus)
-
-  def sendStreamAndReceiveStream(
-    requests: ZStream[Any, StatusException, BinaryMessage]
-  ): ZStream[Any, StatusException, SendResponse] =
-    sharding
-      .sendStreamToLocalEntityAndReceiveStream(requests)
-      .map(SendResponse(_))
-      .mapError(GrpcShardingService.mapErrorToStatus)
-
-  def pingShards(request: PingShardsRequest): ZIO[Any, StatusException, PingShardsResponse] =
-    ZIO.succeed(PingShardsResponse())
-}
-
 object GrpcShardingService {
 
   private[shard] val mapErrorToStatus: Throwable => StatusException = {
@@ -53,16 +20,33 @@ object GrpcShardingService {
   }
 
   private def buildServiceDefinition(
-    service: GrpcShardingService,
+    sharding: Sharding,
     backend: ZioServerBackend[Any, StatusException, GrpcContext]
   ): ServerServiceDefinition =
     ServerService(using backend)
-      .rpc(Sharding.assignShards, service.assignShards)
-      .rpc(Sharding.unassignShards, service.unassignShards)
-      .rpc(Sharding.send, service.send)
-      .rpc(Sharding.sendStream, service.sendStream)
-      .rpc(Sharding.sendStreamAndReceiveStream, service.sendStreamAndReceiveStream)
-      .rpc(Sharding.pingShards, service.pingShards)
+      .rpc(
+        Sharding.assignShards,
+        (request: AssignShardsRequest) => sharding.assign(request.shards.toSet).as(AssignShardsResponse())
+      )
+      .rpc(
+        Sharding.unassignShards,
+        (request: UnassignShardsRequest) => sharding.unassign(request.shards.toSet).as(UnassignShardsResponse())
+      )
+      .rpc(
+        Sharding.send,
+        (request: BinaryMessage) => sharding.sendToLocalEntity(request).mapBoth(mapErrorToStatus, SendResponse(_))
+      )
+      .rpc(
+        Sharding.sendStream,
+        (requests: ZStream[Any, StatusException, BinaryMessage]) =>
+          sharding.sendStreamToLocalEntity(requests).mapBoth(mapErrorToStatus, SendResponse(_))
+      )
+      .rpc(
+        Sharding.sendStreamAndReceiveStream,
+        (requests: ZStream[Any, StatusException, BinaryMessage]) =>
+          sharding.sendStreamToLocalEntityAndReceiveStream(requests).mapBoth(mapErrorToStatus, SendResponse(_))
+      )
+      .rpc(Sharding.pingShards, (_: PingShardsRequest) => ZIO.succeed(PingShardsResponse()))
       .build(Sharding.service)
 
   /**
@@ -102,8 +86,7 @@ object GrpcShardingService {
         config     <- ZIO.service[Config]
         grpcConfig <- ZIO.service[GrpcConfig]
         sharding   <- ZIO.service[Sharding]
-        service     = new GrpcShardingService(sharding) {}
-        _          <- serve(config.shardingPort, grpcConfig)(backend => List(buildServiceDefinition(service, backend)))
+        _          <- serve(config.shardingPort, grpcConfig)(backend => List(buildServiceDefinition(sharding, backend)))
       } yield ()
     }
 }

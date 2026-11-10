@@ -4,8 +4,12 @@ import shard.BroadcastingSpec.IncrementerActor
 import shard.BroadcastingSpec.IncrementerActor.{ Incrementer, IncrementerMessage }
 import shard.Messenger.MessengerTimeout
 import shard.errors._
-import shard.interfaces.{ MessageCodec, Storage }
+import shard.interfaces.{ MessageCodec, Pods, Storage }
 import shard.interfaces.MessageCodec.Codec
+import shard.protocol.{ Sharding => ProtocolSharding }
+import shard.protocol.Sharding.{ PingShardsRequest, PingShardsResponse }
+import io.grpc.{ Attributes, Metadata }
+import proteus.server.GrpcContext
 import zio.stream.{ SubscriptionRef, ZStream }
 import zio.test.TestAspect.{ sequential, withLiveClock }
 import zio.test._
@@ -60,6 +64,32 @@ object GrpcShardingSpec extends ZIOSpecDefault {
               )
             )
           } @@ TestAspect.timeout(10.seconds),
+          test("Composed server interceptors run in sequence order") {
+            type Ping = PingShardsRequest
+            type Pong = PingShardsResponse
+            val pong: UIO[Pong]                   = ZIO.succeed(PingShardsResponse())
+            val ctx                               = GrpcContext(
+              new Metadata(),
+              new Metadata(),
+              None,
+              ProtocolSharding.pingShards.toMethodDescriptor(ProtocolSharding.service),
+              Attributes.EMPTY
+            )
+            def run(i: ShardingServerInterceptor) =
+              i.unary[Ping, Pong](_ => pong).apply(PingShardsRequest())(ctx) *>
+                i.clientStreaming[Ping, Pong](_ => _ => pong).apply(ZStream.empty)(ctx) *>
+                i.serverStreaming[Ping, Pong](_ => ZStream.fromZIO(pong)).apply(PingShardsRequest())(ctx).runDrain *>
+                i.bidiStreaming[Ping, Pong](_ => _ => ZStream.fromZIO(pong)).apply(ZStream.empty)(ctx).runDrain
+            for {
+              seen    <- Ref.make(Chunk.empty[String])
+              composed =
+                ShardingServerInterceptor.compose(
+                  Seq("a", "b", "c").map(name => ShardingServerInterceptor.beforeEach(_ => seen.update(_ :+ name)))
+                )
+              _       <- run(composed)
+              order   <- seen.get
+            } yield assertTrue(order == Chunk.fill(4)(Chunk("a", "b", "c")).flatten)
+          },
           test("A messenger without timeout waits for slow messages") {
             for {
               _       <- register
@@ -86,7 +116,18 @@ object GrpcShardingSpec extends ZIOSpecDefault {
                 unavailable -> Exit.fail(SendTimeout(Incrementer.name, "t1"))
               )
             )
-          } @@ TestAspect.timeout(10.seconds)
+          } @@ TestAspect.timeout(10.seconds),
+          test("Releasing GrpcPods closes its connections, including those opened from uninterruptible code or after") {
+            for {
+              self   <- ZIO.serviceWith[Config](config => PodAddress(config.selfHost, config.shardingPort))
+              scope  <- Scope.make
+              pods   <- scope.extend((ZLayer.succeed(GrpcConfig.default) >>> GrpcPods.live).build).map(_.get[Pods])
+              _      <- pods.ping(self).uninterruptible
+              closed <- scope.close(Exit.unit).disconnect.timeout(5.seconds)
+              // the same pod under another address, so that a new connection is opened
+              late   <- pods.ping(self.copy(host = "127.0.0.1")).exit
+            } yield assertTrue(closed.isDefined, late.isFailure)
+          }
         )
       )
     ) @@ sequential @@ withLiveClock @@ TestAspect.timeout(60.seconds)

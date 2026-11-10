@@ -77,5 +77,5 @@ When using `shard-protocol-grpc`, both pods and the Shard Manager require a `Grp
 - `executor`: a custom executor given to grpc-java for its clients and servers (none by default)
 - `shutdownTimeout`: time to wait for the gRPC server and channels to stop before forcing them (3 seconds by default)
 - `streamingPrefetch`: number of messages fetched ahead of the consumer in streaming calls (16 by default)
-- `clientInterceptors`: grpc-java `ClientInterceptor`s applied to the calls made by pods and by the Shard Manager, e.g. to add headers for tracing. `ShardingClientInterceptor.headersUpdater` builds one that updates the headers of each call.
-- `serverInterceptors`: `ShardingServerInterceptor`s applied to the calls received by pods and by the Shard Manager, e.g. for logging or authentication. `ShardingServerInterceptor.beforeEach` builds one that runs an effect before each call.
+- `clientInterceptors`: grpc-java `ClientInterceptor`s applied to the calls made by pods and by the Shard Manager, e.g. to add headers for tracing. `ShardingClientInterceptor.headersUpdater` builds one that updates the headers of each call. The last one runs first.
+- `serverInterceptors`: `ShardingServerInterceptor`s applied to the calls received by pods and by the Shard Manager, e.g. for logging or authentication. `ShardingServerInterceptor.beforeEach` builds one that runs an effect before each call. The first one runs first.
