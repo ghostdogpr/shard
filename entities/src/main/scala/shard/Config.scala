@@ -15,7 +15,7 @@ import zio._
  * @param entityMaxIdleTime time of inactivity (without processing any message) after which an entity will be stopped
  * @param entityTerminationTimeout time we give to an entity to finish processing its messages when it is stopped
  * @param sendTimeout default timeout when sending a message
- * @param refreshAssignmentsRetryInterval retry interval in case of failure getting shard assignments from storage
+ * @param refreshAssignmentsRetryInterval retry interval in case of failure getting shard assignments from storage, and minimum interval between the reads of the assignments when messages can't reach their entity
  * @param unhealthyPodReportInterval interval to report unhealthy pods to the Shard Manager (this exists to prevent calling the Shard Manager for each failed message)
  * @param simulateRemotePods disable optimizations when sending a message to an entity hosted on the local shards (this will force serialization of all messages)
  * @param unregisterRetrySchedule retry schedule for unregistering the pod from the Shard Manager

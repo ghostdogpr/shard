@@ -7,6 +7,7 @@ import shard.WorkerActor.WorkerMessage._
 import shard.WorkerActor._
 import shard.errors._
 import shard.interfaces.{ Pods, ShardManagerClient, Storage }
+import shard.interfaces.Pods.{ BinaryMessage, BinaryReply }
 import shard.internal.LocalShardManagerClient
 import shard.javaSerialization.given
 import zio.stream.{ SubscriptionRef, ZChannel, ZStream }
@@ -179,6 +180,114 @@ object ShardingSpec extends ZIOSpecDefault {
                            ZLayer.succeed(config)
                          )
         } yield assertTrue(result == (true, false))
+      },
+      test("A duplex whose inputs were read is not sent again when its pod becomes unavailable") {
+        for {
+          attempts <- Ref.make(0)
+          snapshot <- Ref.make(Map.empty[ShardId, Option[PodAddress]])
+          // reads the request and the first input, then fails like an unreachable pod
+          pods      = stubPods(
+                        onSend = pod => ZIO.fail(PodUnavailable(pod)),
+                        onStream = (pod, messages) =>
+                          ZStream.fromZIO(attempts.update(_ + 1) *> messages.take(2).runDrain) *>
+                            ZStream.fail(PodUnavailable(pod))
+                      )
+          result   <- (giveAllShardsTo(otherPod) *>
+                        (Clock.sleep(10.millis) *> Sharding.getPods).repeatUntil(_ == Set(otherPod)) *>
+                        Sharding.messenger(Counter).flatMap(_.duplex("c1")(Doubled(), ZStream(1, 2, 3)).runDrain.flip))
+                        .timeout(5.seconds)
+                        .provide(
+                          Sharding.live,
+                          ZLayer.succeed(pods),
+                          ZLayer.succeed(takingShardsBack(snapshot)),
+                          Storage.memory,
+                          ZLayer.succeed(Config.default)
+                        )
+          sent     <- attempts.get
+        } yield assertTrue(result.contains(StreamCancelled), sent == 1)
+      },
+      test("A pod reads the assignments from the storage again when its messages can't reach their entity") {
+        val config                       = Config.default.copy(refreshAssignmentsRetryInterval = 10.millis)
+        val third                        = PodAddress("third", 1)
+        def all(pod: Option[PodAddress]) = (1 to config.numberOfShards).map(_ -> pod).toMap
+        for {
+          snapshot    <- Ref.make(all(Some(otherPod)))
+          assignments <- Ref.make(all(None))
+          // never completed: the subscription stays open but misses the changes
+          disconnect  <- Promise.make[Nothing, Unit]
+          reconnected <- Promise.make[Nothing, Unit]
+          storage     <- reconnectingStorage(assignments, disconnect, reconnected)
+          result      <- (for {
+                           send   <- Sharding.messenger(Counter).flatMap(_.sendDiscard("c1")(IncrementCounter())).fork
+                           // refused by the other pod, then the storage has no owner for the shard
+                           _      <- (Clock.sleep(10.millis) *> Sharding.getPods).repeatUntil(_.isEmpty)
+                           _      <- assignments.set(all(Some(third)))
+                           result <- send.join.either
+                         } yield result)
+                           .timeout(5.seconds)
+                           .provide(
+                             Sharding.live,
+                             ZLayer.succeed(refusingPods),
+                             ZLayer.succeed(takingShardsBack(snapshot)),
+                             ZLayer.succeed(storage),
+                             ZLayer.succeed(config)
+                           )
+        } yield assertTrue(result.exists(_.isRight))
+      },
+      test("Assignments read again from the storage don't undo a newer notification") {
+        val config                       = Config.default.copy(refreshAssignmentsRetryInterval = 10.millis)
+        val third                        = PodAddress("third", 1)
+        def all(pod: Option[PodAddress]) = (1 to config.numberOfShards).map(_ -> pod).toMap
+        for {
+          snapshot      <- Ref.make(all(Some(otherPod)))
+          notifications <- Queue.unbounded[Map[ShardId, Option[PodAddress]]]
+          reading       <- Promise.make[Nothing, Unit]
+          read          <- Promise.make[Nothing, Unit]
+          // a read that returns an older state, after a notification
+          storage        = new Storage {
+                             def getAssignments(role: Role): Task[Map[ShardId, Option[PodAddress]]]               =
+                               reading.succeed(()) *> read.await.as(all(None))
+                             def saveAssignments(role: Role, value: Map[ShardId, Option[PodAddress]]): Task[Unit] = ZIO.unit
+                             def assignmentsStream(role: Role)                                                    =
+                               ZStream.fromQueue(notifications)
+                             def getPods: Task[Set[Pod]]                                                          = ZIO.succeed(Set.empty)
+                             def savePods(pods: Set[Pod]): Task[Unit]                                             = ZIO.unit
+                           }
+          pods          <- (for {
+                             send <- Sharding.messenger(Counter).flatMap(_.sendDiscard("c1")(IncrementCounter())).fork
+                             _    <- reading.await
+                             _    <- notifications.offer(all(Some(third)))
+                             _    <- (Clock.sleep(10.millis) *> Sharding.getPods).repeatUntil(_ == Set(third))
+                             _    <- read.succeed(())
+                             _    <- send.join
+                             _    <- Clock.sleep(200.millis)
+                             pods <- Sharding.getPods
+                           } yield pods)
+                             .timeout(5.seconds)
+                             .provide(
+                               Sharding.live,
+                               ZLayer.succeed(refusingPods),
+                               ZLayer.succeed(takingShardsBack(snapshot)),
+                               ZLayer.succeed(storage),
+                               ZLayer.succeed(config)
+                             )
+        } yield assertTrue(pods.contains(Set(third)))
+      },
+      test("Assigning shards that a pod already has doesn't change its shards gauge") {
+        // a role of its own, since the gauge is shared by all the pods of a role in this JVM
+        val config = Config.default.copy(role = Role("gauge"))
+        (for {
+          sharding <- ZIO.service[Sharding]
+          _        <- sharding.assign(Set(1, 2))
+          _        <- sharding.unassign(Set(3))
+          _        <- sharding.assign(Set(3))
+          shards   <- Metrics.shards.tagged("role", "gauge").value
+        } yield assertTrue(shards.value == 300.0)).provide(
+          LocalSharding.live,
+          LocalShardManagerClient.live,
+          Storage.memory,
+          ZLayer.succeed(config)
+        )
       }
     ) @@ sequential @@ withLiveClock @@ TestAspect.timeout(60.seconds)
 
@@ -214,6 +323,34 @@ object ShardingSpec extends ZIOSpecDefault {
         def getPods: Task[Set[Pod]]                                                                  = ZIO.succeed(Set.empty)
         def savePods(pods: Set[Pod]): Task[Unit]                                                     = ZIO.unit
       }
+    }
+
+  // the other pod refuses messages, any other pod accepts them
+  private val refusingPods: Pods =
+    stubPods(
+      onSend = pod =>
+        ZIO.succeed(
+          if (pod == otherPod) BinaryReply.EntityNotManagedByThisPod else BinaryReply.Success(Array.emptyByteArray)
+        ),
+      onStream = (pod, _) => ZStream.fail(PodUnavailable(pod))
+    )
+
+  private def stubPods(
+    onSend: PodAddress => Task[BinaryReply],
+    onStream: (PodAddress, ZStream[Any, Nothing, BinaryMessage]) => ZStream[Any, Throwable, BinaryReply]
+  ): Pods =
+    new Pods {
+      def assignShards(pod: PodAddress, role: Role, shards: Set[ShardId]): Task[Unit]                    = ZIO.unit
+      def unassignShards(pod: PodAddress, role: Role, shards: Set[ShardId]): Task[Unit]                  = ZIO.unit
+      def ping(pod: PodAddress): Task[Unit]                                                              = ZIO.unit
+      def sendMessage(pod: PodAddress, message: BinaryMessage): Task[BinaryReply]                        = onSend(pod)
+      def sendStream(pod: PodAddress, messages: ZStream[Any, Nothing, BinaryMessage]): Task[BinaryReply] =
+        ZIO.fail(PodUnavailable(pod))
+      def sendStreamAndReceiveStream(
+        pod: PodAddress,
+        messages: ZStream[Any, Nothing, BinaryMessage]
+      ): ZStream[Any, Throwable, BinaryReply]                                                            =
+        onStream(pod, messages)
     }
 
   // what the Shard Manager does when it moves shards
