@@ -153,6 +153,7 @@ If you only have one group of pods, they all have the `default` role and behave 
 - `RedisConfig.assignmentsKey` is a function `Role => String` (`shard_assignments:<role>` by default).
 - `K8sConfig.namespace` and `K8sConfig.labelSelector` are functions of the role.
 - Metrics that depend on a role are tagged with `role`.
+- On a first deployment, the metrics and assignments of a role only appear once its first pod registers.
 
 ## Configuration
 
@@ -177,6 +178,8 @@ Config.default.copy(shardManagerHost = "shard-manager", shardManagerPort = 8080)
 - `Server.run()` becomes `Server.run`, and requires a `GrpcConfig`. It serves a gRPC API on `apiPort` instead of a GraphQL API over HTTP, along with the standard gRPC health service. Kubernetes probes should use `grpc` instead of `httpGet` on `/health`.
 - The Shard Manager no longer depends on zio-http and Caliban. `Server.run` doesn't take a zio-http `HandlerAspect` anymore: use `GrpcConfig.serverInterceptors` to wrap the API calls instead.
 - Tools that called the GraphQL API can use the gRPC API instead, or `Sharding.getAssignments` and `Sharding.getRegisteredPods` from a pod.
+- The `ShardManager` constructor is private: build it with `ShardManager.live`.
+- New `ManagerConfig.shutdownPersistTimeout` (10 seconds by default): the maximum time the Shard Manager waits on shutdown to persist pods and assignments. Shardcake could wait forever.
 
 ## Storage
 
@@ -190,6 +193,7 @@ If you implemented the pluggable interfaces yourself:
 - `Storage` methods for assignments take a `Role`, and `Pod` has a `role` (see [Roles](#roles)).
 - `Storage.getPods` and `savePods` use a `Set[Pod]` instead of a `Map[PodAddress, Pod]`, since each `Pod` holds its address.
 - `Pods` sends `BinaryMessage` and receives `BinaryReply`, which carries the outcome of the message (success, typed failure, defect, interruption, etc.) instead of optional bytes.
+- `Pods.assignShards` and `unassignShards` take the `Role` of the shards, and a pod must reject a role other than its own (see [Messaging Protocol](customization.md#messaging-protocol)).
 - `Serialization` is replaced by `MessageCodec[Msg]`, which also encodes the replies and errors of each message.
 
 ## Metrics

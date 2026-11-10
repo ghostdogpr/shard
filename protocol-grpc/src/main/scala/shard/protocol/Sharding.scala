@@ -7,10 +7,10 @@ object Sharding {
   given ProtobufDeriver =
     ProtobufDeriver.modifier[BinaryReply](Modifiers.oneOf(Modifiers.OneOfFlag.Inline, Modifiers.OneOfFlag.Nested))
 
-  case class AssignShardsRequest(shards: List[Int]) derives ProtobufCodec
+  case class AssignShardsRequest(shards: List[Int], role: String) derives ProtobufCodec
   case class AssignShardsResponse() derives ProtobufCodec
 
-  case class UnassignShardsRequest(shards: List[Int]) derives ProtobufCodec
+  case class UnassignShardsRequest(shards: List[Int], role: String) derives ProtobufCodec
   case class UnassignShardsResponse() derives ProtobufCodec
 
   given ProtobufCodec[BinaryMessage] = ProtobufCodec.derived

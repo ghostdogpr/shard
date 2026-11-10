@@ -19,18 +19,32 @@ object GrpcShardingService {
     case e                         => Status.INTERNAL.withCause(e).withDescription(e.getMessage).asException()
   }
 
+  // the address may have belonged to a pod of another role
+  private def checkRole(role: String, expected: Role): IO[StatusException, Unit] =
+    ZIO
+      .fail(
+        Status.FAILED_PRECONDITION
+          .withDescription(s"Shards of role $role sent to a pod of role ${expected.name}")
+          .asException()
+      )
+      .when(role != expected.name)
+      .unit
+
   private def buildServiceDefinition(
     sharding: Sharding,
+    role: Role,
     backend: ZioServerBackend[Any, StatusException, GrpcContext]
   ): ServerServiceDefinition =
     ServerService(using backend)
       .rpc(
         Sharding.assignShards,
-        (request: AssignShardsRequest) => sharding.assign(request.shards.toSet).as(AssignShardsResponse())
+        (request: AssignShardsRequest) =>
+          checkRole(request.role, role) *> sharding.assign(request.shards.toSet).as(AssignShardsResponse())
       )
       .rpc(
         Sharding.unassignShards,
-        (request: UnassignShardsRequest) => sharding.unassign(request.shards.toSet).as(UnassignShardsResponse())
+        (request: UnassignShardsRequest) =>
+          checkRole(request.role, role) *> sharding.unassign(request.shards.toSet).as(UnassignShardsResponse())
       )
       .rpc(
         Sharding.send,
@@ -86,7 +100,9 @@ object GrpcShardingService {
         config     <- ZIO.service[Config]
         grpcConfig <- ZIO.service[GrpcConfig]
         sharding   <- ZIO.service[Sharding]
-        _          <- serve(config.shardingPort, grpcConfig)(backend => List(buildServiceDefinition(sharding, backend)))
+        _          <- serve(config.shardingPort, grpcConfig)(backend =>
+                        List(buildServiceDefinition(sharding, config.role, backend))
+                      )
       } yield ()
     }
 }

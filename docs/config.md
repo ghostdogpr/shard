@@ -11,7 +11,7 @@ This is useful when you want to dedicate certain pods to certain entity types (e
 
 If you don't need this, just leave the default value: all pods will share the `default` role.
 
-Note: a pod can only have one role, and a pod can't change its role while it's registered. Trying to re-register an existing pod with a different role will be rejected by the Shard Manager.
+Note: a pod can only have one role. If a pod registers at an address already registered with another role, the Shard Manager considers the previous pod gone and unregisters it first.
 :::
 - `numberOfShards`: number of shards (for the pod's role)
 ::: tip How to choose the number of shards?
@@ -62,6 +62,7 @@ If you only use the `default` role (or want the same number of shards everywhere
 - `persistRetryCount`: max retry count for persistence of pods and shard assignments
 - `rebalanceRate`: max ratio of shards to rebalance in a single iteration
 - `podHealthCheckInterval`: interval for checking pod health
+- `shutdownPersistTimeout`: max time to wait for pods and shard assignments to be persisted on shutdown (10 seconds by default)
 ::: tip Rebalance Rate
 The rebalance rate is there to prevent too many shards being assigned immediately to new pods.
 Instead of reaching a perfect spread right away, we can use several iterations to make sure new pods are able to handle the new shards. 

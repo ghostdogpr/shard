@@ -49,11 +49,11 @@ class GrpcPods(
       case _                                               => ex
     }
 
-  def assignShards(pod: PodAddress, shards: Set[ShardId]): Task[Unit] =
-    getConnection(pod).flatMap(_.assignShards(AssignShardsRequest(shards.toList)).unit)
+  def assignShards(pod: PodAddress, role: Role, shards: Set[ShardId]): Task[Unit] =
+    getConnection(pod).flatMap(_.assignShards(AssignShardsRequest(shards.toList, role.name)).unit)
 
-  def unassignShards(pod: PodAddress, shards: Set[ShardId]): Task[Unit] =
-    getConnection(pod).flatMap(_.unassignShards(UnassignShardsRequest(shards.toList)).unit)
+  def unassignShards(pod: PodAddress, role: Role, shards: Set[ShardId]): Task[Unit] =
+    getConnection(pod).flatMap(_.unassignShards(UnassignShardsRequest(shards.toList, role.name)).unit)
 
   def ping(pod: PodAddress): Task[Unit] =
     getConnection(pod).flatMap(_.pingShards(PingShardsRequest()).unit)

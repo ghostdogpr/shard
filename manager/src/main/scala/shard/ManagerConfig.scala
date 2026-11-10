@@ -4,7 +4,7 @@ import zio._
 
 /**
  * Shard Manager configuration
- * @param numberOfShards number of shards (see documentation on how to choose this), should be same on all pods
+ * @param numberOfShards number of shards of a role (see documentation on how to choose this), should be same on all pods of that role
  * @param apiPort port to expose the gRPC API
  * @param rebalanceInterval interval for regular rebalancing of shards
  * @param rebalanceRetryInterval retry interval for rebalancing when some shards failed to be rebalanced
@@ -13,6 +13,7 @@ import zio._
  * @param persistRetryCount max retry count for persistence of pods and shard assignments
  * @param rebalanceRate max ratio of shards to rebalance at once
  * @param podHealthCheckInterval interval for checking pod health
+ * @param shutdownPersistTimeout max time to wait for pods and shard assignments to be persisted on shutdown
  */
 case class ManagerConfig(
   numberOfShards: Role => Int,
@@ -23,7 +24,8 @@ case class ManagerConfig(
   persistRetryInterval: Duration,
   persistRetryCount: Int,
   rebalanceRate: Double,
-  podHealthCheckInterval: Duration
+  podHealthCheckInterval: Duration,
+  shutdownPersistTimeout: Duration
 )
 
 object ManagerConfig {
@@ -37,6 +39,7 @@ object ManagerConfig {
       persistRetryInterval = 3 seconds,
       persistRetryCount = 100,
       rebalanceRate = 2 / 100d,
-      podHealthCheckInterval = 1 minute
+      podHealthCheckInterval = 1 minute,
+      shutdownPersistTimeout = 10 seconds
     )
 }
