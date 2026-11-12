@@ -21,11 +21,19 @@ private[shard] object Streams {
     )
 
   /**
-   * Like `stream.run(sink)`, for the failures of the stream.
+   * Like `stream.run(sink)`, though a failure of the sink is still logged.
    */
   def run[E, A, Z](stream: ZStream[Any, E, A], sink: ZSink[Any, E, A, Any, Z]): IO[E, Z] =
-    Promise.make[E, Nothing].flatMap { failure =>
-      stream.catchAllCause(cause => ZStream.execute(failure.failCause(cause))).run(sink) <*
-        ZIO.whenZIODiscard(failure.isDone)(failure.await)
-    }
+    Promise
+      .make[E, Nothing]
+      .flatMap(failure => failInto(stream, failure).run(sink) <* ZIO.whenZIODiscard(failure.isDone)(failure.await))
+
+  /**
+   * End the stream instead of failing, and fail `failure` with its cause.
+   * When the stream fails and its finalizer dies, the cause is the defect, as a defect wins over a failure.
+   */
+  def failInto[E, A](stream: ZStream[Any, E, A], failure: Promise[E, ?]): ZStream[Any, Nothing, A] =
+    ZStream
+      .unwrapScoped(stream.toPull.map(ZStream.repeatZIOChunkOption(_)))
+      .catchAllCause(cause => ZStream.execute(failure.failCause(cause)))
 }

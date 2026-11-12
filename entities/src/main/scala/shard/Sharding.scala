@@ -483,12 +483,13 @@ class Sharding private (
     else
       Promise.make[Any, Nothing].flatMap { inputFailure =>
         val failIfInputFailed = ZIO.whenZIODiscard(inputFailure.isDone)(inputFailure.await)
-        val requests          = Replies
-          .mapElements(messages, "encode a message")(msg =>
+        // a message that fails to encode ends the messages, like a failure of the stream
+        val requests          = Streams.failInto(
+          Replies.mapElements(messages, "encode a message")(msg =>
             BinaryMessage(entityId, entityType.name, entityType.codec.encodeMessage(msg), expectsReply = false)
-          )
-          // a message that fails to encode ends the messages, like a failure of the stream
-          .catchAllCause(cause => ZStream.execute(inputFailure.failCause(cause)))
+          ),
+          inputFailure
+        )
         pods
           .sendStream(pod, requests)
           .catchAll(error => failIfInputFailed *> fromTransport(error))
@@ -536,8 +537,7 @@ class Sharding private (
         ZStream
           .unwrap((Promise.make[Any, Nothing] <*> Ref.make(false)).map { case (inputFailure, inputRead) =>
             // set before the first pull, since the input may consume elements while buffering a chunk
-            val safeInput = (ZStream.execute(inputRead.set(true)) ++ input)
-              .catchAllCause(cause => ZStream.execute(inputFailure.failCause(cause)))
+            val safeInput = Streams.failInto(ZStream.execute(inputRead.set(true)) ++ input, inputFailure)
             Streams.interruptWhen(
               streamFromEntity(entityType, entityId, inputRead.get)(
                 deliverStream(entityType, entityId, _, message, safeInput, inputFailure.fail(_))

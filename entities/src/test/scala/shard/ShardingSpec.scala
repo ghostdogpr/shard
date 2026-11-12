@@ -1015,11 +1015,18 @@ object ShardingSpec extends ZIOSpecDefault {
           c0      <- counter.send("c1")(GetCounter())
           died    <-
             counter.sendStream("c1")(ZStream(IncrementCounter()) ++ ZStream.die(new RuntimeException("boom"))).exit
+          cleanup <-
+            counter
+              .sendStream("c1")(
+                (ZStream(IncrementCounter()) ++ ZStream.fail("oops")).ensuring(ZIO.die(new Exception("cleanup")))
+              )
+              .exit
           logged  <- unhandledFailures
         } yield assertTrue(
           error == "oops",
           c0 == 2,
           died.causeOption.flatMap(_.dieOption).exists(_.getMessage == "boom"),
+          cleanup.causeOption.flatMap(_.dieOption).exists(_.getMessage == "cleanup"),
           logged.isEmpty
         )
       },
