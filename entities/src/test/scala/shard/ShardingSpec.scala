@@ -384,7 +384,8 @@ object ShardingSpec extends ZIOSpecDefault {
           _       <- counter.send("c1")(IncrementCounter())
           error   <- counter.send("c1")(Fail()).flip
           c1      <- counter.send("c1")(GetCounter()) // the entity is still running
-        } yield assertTrue(error == CounterError("failed"), c1 == 1)
+          logged  <- unhandledFailures
+        } yield assertTrue(error == CounterError("failed"), c1 == 1, logged.isEmpty)
       },
       test("Defect stops the entity") {
         for {
@@ -521,7 +522,8 @@ object ShardingSpec extends ZIOSpecDefault {
           _       <- Clock.sleep(100.millis) // the message reaches the mailbox right after the entity starts
           _       <- Sharding.terminateLocalEntity(Counter, "c2")
           summed  <- summing.join.timeout(10.seconds)
-        } yield assertTrue(error == StreamCancelled, summed.contains(StreamCancelled))
+          logged  <- unhandledFailures
+        } yield assertTrue(error == StreamCancelled, summed.contains(StreamCancelled), logged.isEmpty)
       },
       test("A stream message whose entity stops before its first element is sent again") {
         for {
@@ -1013,10 +1015,19 @@ object ShardingSpec extends ZIOSpecDefault {
           c0      <- counter.send("c1")(GetCounter())
           died    <-
             counter.sendStream("c1")(ZStream(IncrementCounter()) ++ ZStream.die(new RuntimeException("boom"))).exit
+          cleanup <-
+            counter
+              .sendStream("c1")(
+                (ZStream(IncrementCounter()) ++ ZStream.fail("oops")).ensuring(ZIO.die(new Exception("cleanup")))
+              )
+              .exit
+          logged  <- unhandledFailures
         } yield assertTrue(
           error == "oops",
           c0 == 2,
-          died.causeOption.flatMap(_.dieOption).exists(_.getMessage == "boom")
+          died.causeOption.flatMap(_.dieOption).exists(_.getMessage == "boom"),
+          cleanup.causeOption.flatMap(_.dieOption).exists(_.getMessage == "cleanup"),
+          logged.isEmpty
         )
       },
       test("Duplex: send a stream and receive a stream") {
@@ -1038,9 +1049,11 @@ object ShardingSpec extends ZIOSpecDefault {
                        counter.duplex("c1")(Doubled(), ZStream(1, 2, 3) ++ ZStream.fail("boom")).runCollect.either
                      )
           died    <- counter.duplex("c1")(Doubled(), ZStream(1) ++ ZStream.die(new Exception("boom"))).runCollect.exit
+          logged  <- unhandledFailures
         } yield assertTrue(
           results.forall(_ == Left("boom")),
-          died.causeOption.flatMap(_.dieOption).exists(_.getMessage == "boom")
+          died.causeOption.flatMap(_.dieOption).exists(_.getMessage == "boom"),
+          logged.isEmpty
         )
       },
       test("Duplex: a reply that throws instead of returning a stream ends it with EntityDefect") {
@@ -1347,6 +1360,15 @@ object ShardingSpec extends ZIOSpecDefault {
       ): IO[E, A] =
         ZIO.log("default before") *> effect <* ZIO.log("default after")
     }
+
+  // failures other than defects that ZIO logged as unhandled in the fibers of Shard, not in those of the tests
+  private val unhandledFailures: UIO[Chunk[String]] =
+    ZTestLogger.logOutput.map(_.collect {
+      case log
+          if log.message().contains("did not handle an error") && log.cause.dieOption.isEmpty &&
+            !log.trace.toString.contains("Spec.scala") =>
+        s"${log.trace}: ${log.cause.failures.mkString(", ")}"
+    })
 
   private val defaultInterceptor: Spec[Sharding & Scope, Any] =
     test("The interceptor of Config wraps the one of EntityOptions") {

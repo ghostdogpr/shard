@@ -6,7 +6,7 @@ import shard.errors._
 import shard.interfaces.MessageCodec.{ Codec, ReplyCodec }
 import shard.interfaces.Pods.{ BinaryMessage, BinaryReply }
 import shard.interfaces.{ Pods, ShardManagerClient, Storage }
-import shard.internal.{ EntityManager, Replies }
+import shard.internal.{ EntityManager, Replies, Streams }
 import shard.internal.EntityManager.StreamReply
 import zio.{ Config => _, _ }
 import zio.stream.{ ZSink, ZStream }
@@ -286,7 +286,10 @@ class Sharding private (
    * Stops at the first rejected message and returns its reply.
    */
   private[shard] def sendStreamToLocalEntity(messages: ZStream[Any, Throwable, BinaryMessage]): Task[BinaryReply] =
-    messages.runFoldWhileZIO(Sharding.ack)(_.isInstanceOf[BinaryReply.Success])((_, msg) => sendToLocalEntity(msg))
+    Streams.run(
+      messages,
+      ZSink.foldZIO(Sharding.ack)(_.isInstanceOf[BinaryReply.Success])((_, msg) => sendToLocalEntity(msg))
+    )
 
   /**
    * Deliver a message with its stream of inputs to a local entity and return the stream of replies.
@@ -305,7 +308,7 @@ class Sharding private (
               val decodedInput = Replies
                 .mapElements(input.orDie, "decode a stream input")(msg => codec.streamInput.decode(msg.body))
                 .catchAll(error => ZStream.execute(inputFailure.fail(error)))
-              reply.run(decodedInput).interruptWhen(inputFailure) ++
+              Streams.interruptWhen(reply.run(decodedInput), inputFailure.await) ++
                 ZStream.execute(ZIO.whenZIODiscard(inputFailure.isDone)(inputFailure.await))
             })
           ZStream.unwrap(receive(request)(ZStream.succeed(_)) {
@@ -465,22 +468,28 @@ class Sharding private (
   ): IO[Any, Unit] =
     if (isLocal(pod))
       // an empty stream never looks up the entity type, like on a remote pod
-      messages.runForeachChunk(chunk =>
-        ZIO.when(chunk.nonEmpty)(
-          entityManager(entityType, entityId)
-            .flatMap(manager => ZIO.foreachDiscard(chunk)(manager.enqueue(entityId, _)))
-            .catchAll(fromTransport)
-        )
+      Streams.run(
+        messages.mapChunksZIO(chunk =>
+          ZIO
+            .when(chunk.nonEmpty)(
+              entityManager(entityType, entityId)
+                .flatMap(manager => ZIO.foreachDiscard(chunk)(manager.enqueue(entityId, _)))
+                .catchAll(fromTransport)
+            )
+            .as(Chunk.empty)
+        ),
+        ZSink.drain
       )
     else
       Promise.make[Any, Nothing].flatMap { inputFailure =>
         val failIfInputFailed = ZIO.whenZIODiscard(inputFailure.isDone)(inputFailure.await)
-        val requests          = Replies
-          .mapElements(messages, "encode a message")(msg =>
+        // a message that fails to encode ends the messages, like a failure of the stream
+        val requests          = Streams.failInto(
+          Replies.mapElements(messages, "encode a message")(msg =>
             BinaryMessage(entityId, entityType.name, entityType.codec.encodeMessage(msg), expectsReply = false)
-          )
-          // a message that fails to encode ends the messages, like a failure of the stream
-          .catchAllCause(cause => ZStream.execute(inputFailure.failCause(cause)))
+          ),
+          inputFailure
+        )
         pods
           .sendStream(pod, requests)
           .catchAll(error => failIfInputFailed *> fromTransport(error))
@@ -528,12 +537,13 @@ class Sharding private (
         ZStream
           .unwrap((Promise.make[Any, Nothing] <*> Ref.make(false)).map { case (inputFailure, inputRead) =>
             // set before the first pull, since the input may consume elements while buffering a chunk
-            val safeInput = (ZStream.execute(inputRead.set(true)) ++ input)
-              .catchAllCause(cause => ZStream.execute(inputFailure.failCause(cause)))
-            streamFromEntity(entityType, entityId, inputRead.get)(
-              deliverStream(entityType, entityId, _, message, safeInput, inputFailure.fail(_))
-            )
-              .interruptWhen(inputFailure) ++
+            val safeInput = Streams.failInto(ZStream.execute(inputRead.set(true)) ++ input, inputFailure)
+            Streams.interruptWhen(
+              streamFromEntity(entityType, entityId, inputRead.get)(
+                deliverStream(entityType, entityId, _, message, safeInput, inputFailure.fail(_))
+              ),
+              inputFailure.await
+            ) ++
               // the replies may end because the inputs failed
               ZStream.execute(ZIO.whenZIODiscard(inputFailure.isDone)(inputFailure.await))
           })
@@ -594,7 +604,10 @@ class Sharding private (
     effect: IO[Any, A]
   ): IO[Any, A] =
     // interruptible so that the timeout works in an uninterruptible region
-    timeout.fold(effect)(t => effect.interruptible.timeoutFail(SendTimeout(recipientType.name, entityId))(t))
+    // exit so that a failure doesn't fail the timeout's child fiber, which ZIO would log as unhandled
+    timeout.fold(effect)(t =>
+      effect.exit.interruptible.timeoutFail(SendTimeout(recipientType.name, entityId))(t).flatten
+    )
 
   def registerEntity[R, Msg[_, _]](entityType: EntityType[Msg], options: EntityOptions[Msg] = EntityOptions[Msg]())(
     behavior: String => ZIO[R & Scope, Throwable, EntityHandler[Msg]]
