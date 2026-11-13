@@ -64,8 +64,8 @@ It is used both by the Shard Manager for assigning and unassigning shards, and b
 
 ```scala
 trait Pods {
-  def assignShards(pod: PodAddress, role: Role, shards: Set[ShardId]): Task[Unit]
-  def unassignShards(pod: PodAddress, role: Role, shards: Set[ShardId]): Task[Unit]
+  def assignShards(pod: PodAddress, role: Role, registration: String, shards: Set[ShardId]): Task[Unit]
+  def unassignShards(pod: PodAddress, role: Role, registration: String, shards: Set[ShardId]): Task[Unit]
   def ping(pod: PodAddress): Task[Unit]
 
   def sendMessage(pod: PodAddress, message: BinaryMessage): Task[BinaryReply]
@@ -76,7 +76,7 @@ trait Pods {
   ): ZStream[Any, Throwable, BinaryReply]
 }
 ```
-A pod must reject `assignShards` and `unassignShards` for a role other than its own, since its address may have previously belonged to a pod of another role.
+A pod must reject `assignShards` and `unassignShards` for a role other than its own, since its address may have previously belonged to a pod of another role, and for a registration other than its current one, since the call may have been made for a previous registration of the pod or a previous process at its address.
 
 For testing, you can use the `Pods.noop` layer that does nothing.
 

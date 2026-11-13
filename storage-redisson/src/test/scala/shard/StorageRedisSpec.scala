@@ -43,7 +43,7 @@ object StorageRedisSpec extends ZIOSpecDefault {
     suite("StorageRedisSpec")(
       (StorageSuite.tests :+
         test("stores plain strings like the other backends") {
-          val pod                                                         = Pod(PodAddress("host1", 1), "1.0.0", role)
+          val pod                                                         = Pod(PodAddress("host1", 1), "1.0.0", role, "r1")
           def read(key: String): RIO[RedissonClient, Map[String, String]] =
             ZIO
               .serviceWithZIO[RedissonClient](client =>

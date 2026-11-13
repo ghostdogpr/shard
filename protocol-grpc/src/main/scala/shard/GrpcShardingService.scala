@@ -30,6 +30,12 @@ object GrpcShardingService {
       .when(role != expected.name)
       .unit
 
+  private def checkRegistration(accepted: Boolean): IO[StatusException, Unit] =
+    ZIO
+      .fail(Status.FAILED_PRECONDITION.withDescription("Shards sent to another registration of the pod").asException())
+      .unless(accepted)
+      .unit
+
   private def buildServiceDefinition(
     sharding: Sharding,
     role: Role,
@@ -39,12 +45,20 @@ object GrpcShardingService {
       .rpc(
         Sharding.assignShards,
         (request: AssignShardsRequest) =>
-          checkRole(request.role, role) *> sharding.assign(request.shards.toSet).as(AssignShardsResponse())
+          checkRole(request.role, role) *>
+            sharding
+              .assign(request.registration, request.shards.toSet)
+              .flatMap(checkRegistration)
+              .as(AssignShardsResponse())
       )
       .rpc(
         Sharding.unassignShards,
         (request: UnassignShardsRequest) =>
-          checkRole(request.role, role) *> sharding.unassign(request.shards.toSet).as(UnassignShardsResponse())
+          checkRole(request.role, role) *>
+            sharding
+              .unassign(request.registration, request.shards.toSet)
+              .flatMap(checkRegistration)
+              .as(UnassignShardsResponse())
       )
       .rpc(
         Sharding.send,

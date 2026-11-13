@@ -24,7 +24,7 @@ object BroadcastingSpec extends ZIOSpecDefault {
           // a topic instance is not tied to the shard of its name, so it survives its unassignment
           sharding    <- ZIO.service[Sharding]
           shard        = sharding.getShardId(IncrementerActor.Incrementer, "c1")
-          _           <- sharding.unassign(Set(shard)).ensuring(sharding.assign(Set(shard)))
+          _           <- sharding.unassignShards(Set(shard)).ensuring(sharding.assignShards(Set(shard)))
           c1          <- incrementer.broadcast("c1")(IncrementerActor.IncrementerMessage.GetIncrement())
         } yield assertTrue(
           // Here we have just one pod, so there will be just one incrementer

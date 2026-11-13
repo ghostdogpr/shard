@@ -40,8 +40,9 @@ class ShardManager private (
         cdt       <- ZIO.succeed(OffsetDateTime.now())
         persisted <-
           modifyStates { states =>
-            // an address hosts a single process: a pod of another role registered there is gone
-            val (replaced, others) = removePod(states, pod.address, _.pod.role != pod.role)
+            // an address hosts a single registration: an earlier one, or one of another role, is gone
+            val (replaced, others) =
+              removePod(states, pod.address, p => p.pod.role != pod.role || p.pod.registration != pod.registration)
             val current            = others.getOrElse(pod.role, ShardManagerState(config.numberOfShards(pod.role)))
             val state              = current.copy(pods = current.pods.updated(pod.address, PodWithMetadata(pod, cdt)))
             ((replaced, state.unassignedShards.nonEmpty), others.updated(pod.role, state))
@@ -95,8 +96,8 @@ class ShardManager private (
       _    <- ZIO.foreachParDiscard(pods)(notifyUnhealthyPod(_, ignoreMetric = true)).withParallelism(4)
     } yield ()
 
-  def unregister(podAddress: PodAddress): UIO[Unit] =
-    unregisterIf(podAddress)(_ => true)
+  def unregister(podAddress: PodAddress, registration: String): UIO[Unit] =
+    unregisterIf(podAddress)(_.pod.registration == registration)
 
   // check and remove in one update, so that concurrent calls unregister the pod once
   private def unregisterIf(podAddress: PodAddress)(matches: PodWithMetadata => Boolean): UIO[Unit] =
@@ -139,10 +140,14 @@ class ShardManager private (
         getAssignments(role).flatMap(assignments =>
           ZIO.foreachParDiscard(assignments.values.flatten.toSet)(podAddress =>
             stateRef.get.flatMap(states =>
-              ZIO.foreachDiscard(states.get(role).filter(_.pods.contains(podAddress)).map(_.shardsPerPod(podAddress)))(
-                shards =>
-                  callPod(role, podAddress)(podApi.assignShards(podAddress, role, shards)).ignore.when(shards.nonEmpty)
-              )
+              ZIO.foreachDiscard(states.get(role).flatMap(state => state.pods.get(podAddress).map(state -> _))) {
+                (state, registered) =>
+                  val (shards, registration) = (state.shardsPerPod(podAddress), registered.pod.registration)
+                  callPod(role, podAddress, registration)(
+                    podApi.assignShards(podAddress, role, registration, shards)
+                  ).ignore
+                    .when(shards.nonEmpty)
+              }
             )
           )
         )
@@ -183,8 +188,9 @@ class ShardManager private (
                                        }.toSet.flatten
       readyAssignments             = assignments.view.mapValues(_ diff shardsToRemove).filterNot(_._2.isEmpty).toMap
       readyUnassignments           = unassignments.view.mapValues(_ diff shardsToRemove).filterNot(_._2.isEmpty).toMap
+      registrations                = state.pods.view.mapValues(_.pod.registration).toMap
       // do the unassignments first
-      failedUnassignments         <- moveShards(role, readyUnassignments, assign = false)
+      failedUnassignments         <- unassignShards(role, readyUnassignments, registrations)
       failedUnassignedPods         = failedUnassignments.map(_._1)
       failedUnassignedShards       = failedUnassignments.flatMap(_._2).toSet
       // remove assignments of shards that couldn't be unassigned, as well as faulty pods
@@ -192,7 +198,7 @@ class ShardManager private (
                                        podAddress -> (shards diff failedUnassignedShards)
                                      }
       // then do the assignments
-      failedAssignments           <- moveShards(role, filteredAssignments, assign = true)
+      failedAssignments           <- assignShards(role, filteredAssignments, registrations)
       failedPods                   = failedPingedPods ++ failedUnassignedPods ++ failedAssignments.map(_._1)
       // check if failing pods are still up
       _                           <- ZIO.foreachDiscard(failedPods)(notifyUnhealthyPod(_)).background(scope).when(failedPods.nonEmpty)
@@ -239,19 +245,18 @@ class ShardManager private (
       )
     )
 
-  private def moveShards(
+  // a failed call may have reached the pod, so it's undone; returns the failed moves
+  private def unassignShards(
     role: Role,
     moves: Map[PodAddress, Set[ShardId]],
-    assign: Boolean
+    registrations: Map[PodAddress, String]
   ): UIO[List[(PodAddress, Set[ShardId])]] =
-    if (assign) assignShards(role, moves) else unassignShards(role, moves)
-
-  // a failed call may have reached the pod, so it's undone; returns the failed moves
-  private def unassignShards(role: Role, moves: Map[PodAddress, Set[ShardId]]): UIO[List[(PodAddress, Set[ShardId])]] =
     ZIO.filterNotPar(moves.toList) { (podAddress, shards) =>
+      val registration = registrations(podAddress)
+      val call         = callPod(role, podAddress, registration)
       ZIO.uninterruptibleMask(restore =>
-        restore(callPod(role, podAddress)(podApi.unassignShards(podAddress, role, shards))).foldZIO(
-          _ => restore(callPod(role, podAddress)(podApi.assignShards(podAddress, role, shards))).ignore.as(false),
+        restore(call(podApi.unassignShards(podAddress, role, registration, shards))).foldZIO(
+          _ => restore(call(podApi.assignShards(podAddress, role, registration, shards))).ignore.as(false),
           _ =>
             setShards(role, shards, None).flatMap(
               ZIO
@@ -266,18 +271,24 @@ class ShardManager private (
 
   // persisted before the calls, so that shards a pod received stay on it if the Shard Manager stops;
   // a failed call may have reached the pod, so it's undone; returns the failed moves
-  private def assignShards(role: Role, moves: Map[PodAddress, Set[ShardId]]): UIO[List[(PodAddress, Set[ShardId])]] =
+  private def assignShards(
+    role: Role,
+    moves: Map[PodAddress, Set[ShardId]],
+    registrations: Map[PodAddress, String]
+  ): UIO[List[(PodAddress, Set[ShardId])]] =
     for {
       reserved <- ZIO.foreach(moves.toList)((podAddress, shards) =>
-                    setShards(role, shards, Some(podAddress)).map(podAddress -> _)
+                    setShards(role, shards, Some(podAddress -> registrations(podAddress)))
+                      .map(podAddress -> _)
                   )
       _        <- persistAssignments(role).when(reserved.exists(_._2.exists(_.nonEmpty)))
       failed   <- ZIO.filterNotPar(reserved) {
                     case (_, None)                          => ZIO.succeed(false)
                     case (podAddress, Some(reservedShards)) =>
-                      val shards = moves(podAddress)
-                      // a pod that registered again during the call lost its shards
-                      val keep   = setShards(role, shards, Some(podAddress)).flatMap(
+                      val shards       = moves(podAddress)
+                      val registration = registrations(podAddress)
+                      val call         = callPod(role, podAddress, registration)
+                      val keep         = setShards(role, shards, Some(podAddress -> registration)).flatMap(
                         ZIO
                           .foreach(_)(changed =>
                             eventsHub
@@ -287,9 +298,9 @@ class ShardManager private (
                           .map(_.isDefined)
                       )
                       ZIO.uninterruptibleMask(restore =>
-                        restore(callPod(role, podAddress)(podApi.assignShards(podAddress, role, shards))).foldZIO(
+                        restore(call(podApi.assignShards(podAddress, role, registration, shards))).foldZIO(
                           _ =>
-                            restore(callPod(role, podAddress)(podApi.unassignShards(podAddress, role, shards)))
+                            restore(call(podApi.unassignShards(podAddress, role, registration, shards)))
                               .foldZIO(_ => keep, _ => releaseShards(role, podAddress, shards))
                               .as(false),
                           _ => keep
@@ -298,16 +309,17 @@ class ShardManager private (
                   }
     } yield failed.map { case (podAddress, _) => podAddress -> moves(podAddress) }
 
-  // fails once the pod left, so that a hung call doesn't block the role
-  private def callPod(role: Role, podAddress: PodAddress)(call: Task[Unit]): Task[Unit] = {
-    val left = new RuntimeException(s"Pod $podAddress left")
+  // fails once the registration left, so that a hung call doesn't block the role
+  private def callPod(role: Role, podAddress: PodAddress, registration: String)(call: Task[Unit]): Task[Unit] = {
+    val left              = new RuntimeException(s"Pod $podAddress left")
+    def matches(pod: Pod) = pod.address == podAddress && pod.role == role && pod.registration == registration
     ZIO.scoped(
       eventsHub.subscribe.flatMap(events =>
         stateRef.get.flatMap(states =>
-          if (states.get(role).exists(_.pods.contains(podAddress)))
+          if (states.get(role).exists(_.pods.get(podAddress).exists(registered => matches(registered.pod))))
             call.raceFirst(
               events.take.repeatUntil {
-                case ShardingEvent.PodUnregistered(pod) => pod.address == podAddress && pod.role == role
+                case ShardingEvent.PodUnregistered(pod) => matches(pod)
                 case _                                  => false
               } *> ZIO.fail(left)
             )
@@ -317,13 +329,23 @@ class ShardManager private (
     )
   }
 
-  // returns the shards that changed, or None if the target isn't registered
-  private def setShards(role: Role, shards: Set[ShardId], target: Option[PodAddress]): UIO[Option[Set[ShardId]]] =
+  // returns the shards that changed, or None if the target registration isn't registered
+  private def setShards(
+    role: Role,
+    shards: Set[ShardId],
+    target: Option[(PodAddress, String)]
+  ): UIO[Option[Set[ShardId]]] =
     modifyStates(states =>
-      states.get(role).filter(state => target.forall(state.pods.contains)) match {
+      states
+        .get(role)
+        .filter(state =>
+          target
+            .forall((podAddress, registration) => state.pods.get(podAddress).exists(_.pod.registration == registration))
+        ) match {
         case Some(state) =>
-          val changed = shards.filter(shard => state.shards.get(shard).exists(_ != target))
-          (Some(changed), states.updated(role, state.copy(shards = state.shards ++ changed.map(_ -> target))))
+          val owner   = target.map(_._1)
+          val changed = shards.filter(shard => state.shards.get(shard).exists(_ != owner))
+          (Some(changed), states.updated(role, state.copy(shards = state.shards ++ changed.map(_ -> owner))))
         case None        => (None, states)
       }
     )

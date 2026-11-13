@@ -16,10 +16,10 @@ object StorageSuite {
     List(
       test("save and get pods") {
         val expected = Set(
-          Pod(PodAddress("host1", 1), "1.0.0", role),
-          Pod(PodAddress("host2", 2), "2.0.0", role),
+          Pod(PodAddress("host1", 1), "1.0.0", role, "r1"),
+          Pod(PodAddress("host2", 2), "2.0.0", role, "r2"),
           // escaped characters, a role name with spaces and a host with colons
-          Pod(PodAddress("fd00::1", 3), "3.0 %20 beta%", Role(" a b "))
+          Pod(PodAddress("fd00::1", 3), "3.0 %20 beta%", Role(" a b "), "id %20 x%")
         )
         for {
           _      <- ZIO.serviceWithZIO[Storage](_.savePods(expected))
@@ -27,8 +27,8 @@ object StorageSuite {
         } yield assertTrue(expected == actual)
       },
       test("saving pods forgets the pods left out") {
-        val kept    = Pod(PodAddress("host1", 1), "1.0.0", role)
-        val removed = Pod(PodAddress("host2", 2), "2.0.0", role)
+        val kept    = Pod(PodAddress("host1", 1), "1.0.0", role, "r1")
+        val removed = Pod(PodAddress("host2", 2), "2.0.0", role, "r2")
         for {
           _     <- ZIO.serviceWithZIO[Storage](_.savePods(Set(kept, removed)))
           // the same effect runs twice, as a retry would run it

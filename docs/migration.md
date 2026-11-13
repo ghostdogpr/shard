@@ -193,7 +193,8 @@ If you implemented the pluggable interfaces yourself:
 - `Storage` methods for assignments take a `Role`, and `Pod` has a `role` (see [Roles](#roles)).
 - `Storage.getPods` and `savePods` use a `Set[Pod]` instead of a `Map[PodAddress, Pod]`, since each `Pod` holds its address.
 - `Pods` sends `BinaryMessage` and receives `BinaryReply`, which carries the outcome of the message (success, typed failure, defect, interruption, etc.) instead of optional bytes.
-- `Pods.assignShards` and `unassignShards` take the `Role` of the shards, and a pod must reject a role other than its own (see [Messaging Protocol](customization.md#messaging-protocol)).
+- `Pods.assignShards` and `unassignShards` take the `Role` of the shards and the registration of the pod, and a pod must reject a role other than its own and a registration other than its current one (see [Messaging Protocol](customization.md#messaging-protocol)).
+- `Pod` has a `registration`. `ShardManagerClient.register` takes it and returns the shards the registration starts with, and `unregister` takes it.
 - `Serialization` is replaced by `MessageCodec[Msg]`, which also encodes the replies and errors of each message.
 
 ## Metrics

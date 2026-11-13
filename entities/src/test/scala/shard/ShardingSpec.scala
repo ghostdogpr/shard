@@ -38,8 +38,8 @@ object ShardingSpec extends ZIOSpecDefault {
       ),
       suite("registered pods")(
         test("Registered pods are read from the storage") {
-          val pod1 = Pod(PodAddress("host1", 1), "1.0", Role.default)
-          val pod2 = Pod(PodAddress("host2", 2), "2.0", Role("other"))
+          val pod1 = Pod(PodAddress("host1", 1), "1.0", Role.default, "r1")
+          val pod2 = Pod(PodAddress("host2", 2), "2.0", Role("other"), "r2")
           for {
             _    <- ZIO.serviceWithZIO[Storage](_.savePods(Set(pod1, pod2)))
             pods <- Sharding.getRegisteredPods
@@ -151,11 +151,13 @@ object ShardingSpec extends ZIOSpecDefault {
           reconnected <- Promise.make[Nothing, Unit]
           stopped     <- Promise.make[Nothing, Unit]
           manager      = new ShardManagerClient {
-                           def register(podAddress: PodAddress, role: Role): Task[Unit]           = ZIO.unit
-                           def unregister(podAddress: PodAddress): Task[Unit]                     = ZIO.unit
-                           def notifyUnhealthyPod(podAddress: PodAddress): Task[Unit]             = ZIO.unit
+                           def register(podAddress: PodAddress, role: Role, registration: String): Task[Set[ShardId]] =
+                             ZIO.succeed(Set.empty)
+                           def unregister(podAddress: PodAddress, registration: String): Task[Unit]                   =
+                             ZIO.unit
+                           def notifyUnhealthyPod(podAddress: PodAddress): Task[Unit]                                 = ZIO.unit
                            // the reply to the first call after reconnecting arrives late, with the old assignments
-                           def getAssignments(role: Role): Task[Map[ShardId, Option[PodAddress]]] =
+                           def getAssignments(role: Role): Task[Map[ShardId, Option[PodAddress]]]                     =
                              assignments.get <* fetches
                                .updateAndGet(_ + 1)
                                .flatMap(n => (fetched.succeed(()) *> late.await).when(n == 2))
@@ -163,11 +165,12 @@ object ShardingSpec extends ZIOSpecDefault {
           storage     <- reconnectingStorage(assignments, disconnect, reconnected)
           result      <- (for {
                            sharding  <- ZIO.service[Sharding]
+                           _         <- Sharding.register
                            _         <- Sharding.registerSingleton("singleton", ZIO.never.onInterrupt(stopped.succeed(())))
                            _         <- disconnect.succeed(())
                            _         <- fetched.await
                            _         <- assignments.set(Map(1 -> Some(self)))
-                           _         <- sharding.assign(Set(1))
+                           _         <- sharding.assignShards(Set(1))
                            _         <- late.succeed(())
                            _         <- reconnected.await
                            singleton <- Sharding.isSingletonNode
@@ -191,8 +194,9 @@ object ShardingSpec extends ZIOSpecDefault {
           storage     <- reconnectingStorage(assignments, disconnect, reconnected)
           own         <- (for {
                            sharding <- ZIO.service[Sharding]
-                           _        <- sharding.unassign(Set(1))
-                           _        <- sharding.assign(Set(2))
+                           _        <- Sharding.register
+                           _        <- sharding.unassignShards(Set(1))
+                           _        <- sharding.assignShards(Set(2))
                            _        <- disconnect.succeed(())
                            _        <- reconnected.await
                            _        <- assignments.set(Map(1 -> Some(otherPod), 2 -> Some(self)))
@@ -205,6 +209,36 @@ object ShardingSpec extends ZIOSpecDefault {
                            ZLayer.succeed(config)
                          )
         } yield assertTrue(own == Chunk(2))
+      },
+      test("A pod only hosts the shards of its current registration") {
+        val config  = Config.default
+        val self    = PodAddress(config.selfHost, config.shardingPort)
+        val manager = new ShardManagerClient {
+          def register(podAddress: PodAddress, role: Role, registration: String): Task[Set[ShardId]] =
+            ZIO.succeed(Set.empty)
+          def unregister(podAddress: PodAddress, registration: String): Task[Unit]                   = ZIO.unit
+          def notifyUnhealthyPod(podAddress: PodAddress): Task[Unit]                                 = ZIO.unit
+          def getAssignments(role: Role): Task[Map[ShardId, Option[PodAddress]]]                     =
+            ZIO.succeed(Map(1 -> Some(self)))
+        }
+        (for {
+          sharding <- ZIO.service[Sharding]
+          _        <- Sharding.register
+          started  <- sharding.thisPodAssignments
+          first    <- sharding.registration.someOrFailException
+          _        <- sharding.assignShards(Set(2))
+          _        <- Sharding.unregister
+          _        <- Sharding.register
+          again    <- sharding.thisPodAssignments
+          stale    <- sharding.assign(first, Set(3))
+          after    <- sharding.thisPodAssignments
+        } yield assertTrue(started.isEmpty, again.isEmpty, !stale, after.isEmpty)).provide(
+          Sharding.live,
+          Pods.noop,
+          ZLayer.succeed(manager),
+          Storage.memory,
+          ZLayer.succeed(config)
+        )
       },
       test("A duplex whose inputs were read is not sent again when its pod becomes unavailable") {
         for {
@@ -303,9 +337,10 @@ object ShardingSpec extends ZIOSpecDefault {
         val config = Config.default.copy(role = Role("gauge"))
         (for {
           sharding <- ZIO.service[Sharding]
-          _        <- sharding.assign(Set(1, 2))
-          _        <- sharding.unassign(Set(3))
-          _        <- sharding.assign(Set(3))
+          _        <- Sharding.register
+          _        <- sharding.assignShards(Set(1, 2))
+          _        <- sharding.unassignShards(Set(3))
+          _        <- sharding.assignShards(Set(3))
           shards   <- Metrics.shards.tagged("role", "gauge").value
         } yield assertTrue(shards.value == 300.0)).provide(
           LocalSharding.live,
@@ -321,10 +356,12 @@ object ShardingSpec extends ZIOSpecDefault {
   // a Shard Manager that gives the shards of a pod that unregisters to another pod
   private def takingShardsBack(assignments: Ref[Map[ShardId, Option[PodAddress]]]): ShardManagerClient =
     new ShardManagerClient {
-      def register(podAddress: PodAddress, role: Role): Task[Unit]           = ZIO.unit
-      def unregister(podAddress: PodAddress): Task[Unit]                     = assignments.set(Map(1 -> Some(otherPod)))
-      def notifyUnhealthyPod(podAddress: PodAddress): Task[Unit]             = ZIO.unit
-      def getAssignments(role: Role): Task[Map[ShardId, Option[PodAddress]]] = assignments.get
+      def register(podAddress: PodAddress, role: Role, registration: String): Task[Set[ShardId]] =
+        assignments.get.map(_.collect { case (shard, Some(`podAddress`)) => shard }.toSet)
+      def unregister(podAddress: PodAddress, registration: String): Task[Unit]                   =
+        assignments.set(Map(1 -> Some(otherPod)))
+      def notifyUnhealthyPod(podAddress: PodAddress): Task[Unit]                                 = ZIO.unit
+      def getAssignments(role: Role): Task[Map[ShardId, Option[PodAddress]]]                     = assignments.get
     }
 
   // a storage whose first subscription fails when `disconnect` completes, so that the new assignments are only received
@@ -365,16 +402,16 @@ object ShardingSpec extends ZIOSpecDefault {
     onStream: (PodAddress, ZStream[Any, Nothing, BinaryMessage]) => ZStream[Any, Throwable, BinaryReply]
   ): Pods =
     new Pods {
-      def assignShards(pod: PodAddress, role: Role, shards: Set[ShardId]): Task[Unit]                    = ZIO.unit
-      def unassignShards(pod: PodAddress, role: Role, shards: Set[ShardId]): Task[Unit]                  = ZIO.unit
-      def ping(pod: PodAddress): Task[Unit]                                                              = ZIO.unit
-      def sendMessage(pod: PodAddress, message: BinaryMessage): Task[BinaryReply]                        = onSend(pod)
-      def sendStream(pod: PodAddress, messages: ZStream[Any, Nothing, BinaryMessage]): Task[BinaryReply] =
+      def assignShards(pod: PodAddress, role: Role, registration: String, shards: Set[ShardId]): Task[Unit]   = ZIO.unit
+      def unassignShards(pod: PodAddress, role: Role, registration: String, shards: Set[ShardId]): Task[Unit] = ZIO.unit
+      def ping(pod: PodAddress): Task[Unit]                                                                   = ZIO.unit
+      def sendMessage(pod: PodAddress, message: BinaryMessage): Task[BinaryReply]                             = onSend(pod)
+      def sendStream(pod: PodAddress, messages: ZStream[Any, Nothing, BinaryMessage]): Task[BinaryReply]      =
         ZIO.fail(PodUnavailable(pod))
       def sendStreamAndReceiveStream(
         pod: PodAddress,
         messages: ZStream[Any, Nothing, BinaryMessage]
-      ): ZStream[Any, Throwable, BinaryReply]                                                            =
+      ): ZStream[Any, Throwable, BinaryReply]                                                                 =
         onStream(pod, messages)
     }
 
@@ -640,7 +677,7 @@ object ShardingSpec extends ZIOSpecDefault {
           sharding <- ZIO.service[Sharding]
           _        <- worker.send("w1")(Ping())
           shard     = sharding.getShardId(Worker, "w1")
-          moved    <- sharding.unassign(Set(shard)).ensuring(sharding.assign(Set(shard))).timeout(10.seconds)
+          moved    <- sharding.unassignShards(Set(shard)).ensuring(sharding.assignShards(Set(shard))).timeout(10.seconds)
           ping     <- worker.send("w1")(Ping()).exit
         } yield assertTrue(moved.isDefined, ping.isSuccess)
       },
@@ -663,7 +700,7 @@ object ShardingSpec extends ZIOSpecDefault {
           _        <- workers.send("w1")(Ping())
           _        <- counters.send("w1")(GetCounter())
           shard     = sharding.getShardId(Worker, "w1")
-          moved    <- sharding.unassign(Set(shard)).timed.ensuring(sharding.assign(Set(shard)))
+          moved    <- sharding.unassignShards(Set(shard)).timed.ensuring(sharding.assignShards(Set(shard)))
         } yield assertTrue(moved._1 < Config.default.entityTerminationTimeout)
       },
       test("A message stuck in uninterruptible code doesn't block the shard's rebalance") {
@@ -683,9 +720,9 @@ object ShardingSpec extends ZIOSpecDefault {
           _        <- state.running.changes.takeUntil(_ == 1).runDrain
           shard     = sharding.getShardId(Worker, "w1")
           moved    <- sharding
-                        .unassign(Set(shard))
+                        .unassignShards(Set(shard))
                         .timeout(10.seconds)
-                        .ensuring(state.gate.succeed(()) *> sharding.assign(Set(shard)))
+                        .ensuring(state.gate.succeed(()) *> sharding.assignShards(Set(shard)))
         } yield assertTrue(moved.isDefined)
       },
       test("An interceptor dying after the end of the entity doesn't delay the shard's rebalance") {
@@ -701,7 +738,7 @@ object ShardingSpec extends ZIOSpecDefault {
           sharding <- ZIO.service[Sharding]
           _        <- worker.send("w1")(Ping())
           shard     = sharding.getShardId(Worker, "w1")
-          moved    <- sharding.unassign(Set(shard)).timed.ensuring(sharding.assign(Set(shard)))
+          moved    <- sharding.unassignShards(Set(shard)).timed.ensuring(sharding.assignShards(Set(shard)))
           entities <- Sharding.localEntities(Worker)
           ping     <- worker.send("w1")(Ping()).exit
         } yield assertTrue(moved._1 < Config.default.entityTerminationTimeout, !entities.contains("w1"), ping.isSuccess)
@@ -715,7 +752,7 @@ object ShardingSpec extends ZIOSpecDefault {
           _        <- Sharding.localEntities(Worker).repeatUntil(_.contains("w1"))
           _        <- Clock.sleep(100.millis) // the message reaches the mailbox right after the entity starts
           shard     = sharding.getShardId(Worker, "w1")
-          moved    <- sharding.unassign(Set(shard)).timeout(10.seconds).ensuring(sharding.assign(Set(shard)))
+          moved    <- sharding.unassignShards(Set(shard)).timeout(10.seconds).ensuring(sharding.assignShards(Set(shard)))
           exit     <- sent.join.timeout(1.second)
         } yield assertTrue(moved.isDefined, exit.contains(Exit.fail(EntityInterrupted(Worker.name, "w1"))))
       },
@@ -746,7 +783,7 @@ object ShardingSpec extends ZIOSpecDefault {
           _          <- worker.sendDiscard("w1")(Ping())
           _          <- Sharding.localEntities(Worker).repeatUntil(_.contains("w1"))
           shard       = sharding.getShardId(Worker, "w1")
-          _          <- sharding.unassign(Set(shard)).ensuring(sharding.assign(Set(shard)))
+          _          <- sharding.unassignShards(Set(shard)).ensuring(sharding.assignShards(Set(shard)))
           _          <- gate.succeed(())
           _          <- ended.await
           started    <- state.started.get
@@ -1010,19 +1047,19 @@ object ShardingSpec extends ZIOSpecDefault {
           p        <- Promise.make[Nothing, Unit]
           stopping <- Promise.make[Nothing, Unit]
           release  <- Promise.make[Nothing, Unit]
+          _        <- Sharding.registerScoped
           _        <- Sharding.registerSingleton(
                         "singleton",
                         (p.succeed(()) *> ZIO.never).onInterrupt(stopping.succeed(()) *> release.await)
                       )
-          _        <- Sharding.registerScoped
           res      <- p.await
           // assigning another shard doesn't wait for a singleton that is stopping
           sharding <- ZIO.service[Sharding]
-          _        <- sharding.unassign(Set(2))
-          moving   <- sharding.unassign(Set(1)).fork
+          _        <- sharding.unassignShards(Set(2))
+          moving   <- sharding.unassignShards(Set(1)).fork
           _        <- stopping.await
-          assigned <- sharding.assign(Set(2)).timeout(1.second).ensuring(release.succeed(()))
-          _        <- moving.join *> sharding.assign(Set(1))
+          assigned <- sharding.assignShards(Set(2)).timeout(1.second).ensuring(release.succeed(()))
+          _        <- moving.join *> sharding.assignShards(Set(1))
         } yield assertTrue(() == res, assigned.isDefined)
       },
       test("Send stream") {
@@ -1346,8 +1383,8 @@ object ShardingSpec extends ZIOSpecDefault {
           _        <- worker.send("w1")(Ping()) *> worker.send("w2")(Ping())
           shard     = sharding.getShardId(Worker, "w1")
           // the shard of w1 moves to another pod, which returns once its entities have stopped
-          moved    <- (sharding.unassign(Set(shard)) *> Sharding.localEntities(Worker))
-                        .ensuring(sharding.assign(Set(shard)))
+          moved    <- (sharding.unassignShards(Set(shard)) *> Sharding.localEntities(Worker))
+                        .ensuring(sharding.assignShards(Set(shard)))
         } yield assertTrue(sharding.getShardId(Worker, "w2") != shard, moved == Set("w2"))
       },
       test("Messages replying with a value that a stream could inhabit can't be sent with send") {

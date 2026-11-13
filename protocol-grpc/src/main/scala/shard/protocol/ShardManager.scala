@@ -20,7 +20,7 @@ object ShardManager {
   case class RegisterRequest(pod: Pod) derives ProtobufCodec
   case class RegisterResponse() derives ProtobufCodec
 
-  case class UnregisterRequest(podAddress: PodAddress) derives ProtobufCodec
+  case class UnregisterRequest(podAddress: PodAddress, registration: String) derives ProtobufCodec
   case class UnregisterResponse() derives ProtobufCodec
 
   case class NotifyUnhealthyPodRequest(podAddress: PodAddress) derives ProtobufCodec

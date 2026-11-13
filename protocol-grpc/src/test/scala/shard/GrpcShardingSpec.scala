@@ -123,11 +123,12 @@ object GrpcShardingSpec extends ZIOSpecDefault {
               scope    <- Scope.make
               pods     <- scope.extend((ZLayer.succeed(GrpcConfig.default) >>> GrpcPods.live).build).map(_.get[Pods])
               _        <- pods.ping(self).uninterruptible
-              // the pod rejects shards of another role
+              // the pod rejects shards of another role or registration
               other     = Role("other")
-              assign   <- pods.assignShards(self, other, Set.empty).exit
-              unassign <- pods.unassignShards(self, other, Set.empty).exit
-              empty    <- pods.assignShards(self, Role(""), Set.empty).exit
+              assign   <- pods.assignShards(self, other, "r", Set.empty).exit
+              unassign <- pods.unassignShards(self, other, "r", Set.empty).exit
+              empty    <- pods.assignShards(self, Role(""), "r", Set.empty).exit
+              stale    <- pods.assignShards(self, Role.default, "stale", Set.empty).exit
               closed   <- scope.close(Exit.unit).disconnect.timeout(5.seconds)
               // the same pod under another address, so that a new connection is opened
               late     <- pods.ping(self.copy(host = "127.0.0.1")).exit
@@ -135,6 +136,7 @@ object GrpcShardingSpec extends ZIOSpecDefault {
               assign.isFailure,
               unassign.isFailure,
               empty.isFailure,
+              stale.isFailure,
               closed.isDefined,
               late.isFailure
             )

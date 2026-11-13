@@ -13,9 +13,11 @@ object LocalSharding {
    */
   private def localPods(sharding: Promise[Nothing, Sharding]): Pods =
     new Pods {
-      def assignShards(pod: PodAddress, role: Role, shards: Set[ShardId]): Task[Unit]   = ZIO.unit
-      def unassignShards(pod: PodAddress, role: Role, shards: Set[ShardId]): Task[Unit] = ZIO.unit
-      def ping(pod: PodAddress): Task[Unit]                                             = ZIO.unit
+      def assignShards(pod: PodAddress, role: Role, registration: String, shards: Set[ShardId]): Task[Unit]   =
+        ZIO.unit
+      def unassignShards(pod: PodAddress, role: Role, registration: String, shards: Set[ShardId]): Task[Unit] =
+        ZIO.unit
+      def ping(pod: PodAddress): Task[Unit]                                                                   = ZIO.unit
 
       def sendMessage(pod: PodAddress, message: BinaryMessage): Task[BinaryReply] =
         sharding.await.flatMap(_.sendToLocalEntity(message))

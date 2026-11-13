@@ -10,9 +10,9 @@ import java.time.OffsetDateTime
 
 object ShardManagerSpec extends ZIOSpecDefault {
   private val role = Role.default
-  private val pod1 = PodWithMetadata(Pod(PodAddress("1", 1), "1.0.0", role), OffsetDateTime.MIN)
-  private val pod2 = PodWithMetadata(Pod(PodAddress("2", 2), "1.0.0", role), OffsetDateTime.MIN)
-  private val pod3 = PodWithMetadata(Pod(PodAddress("3", 3), "1.0.0", role), OffsetDateTime.MIN)
+  private val pod1 = PodWithMetadata(Pod(PodAddress("1", 1), "1.0.0", role, "r"), OffsetDateTime.MIN)
+  private val pod2 = PodWithMetadata(Pod(PodAddress("2", 2), "1.0.0", role, "r"), OffsetDateTime.MIN)
+  private val pod3 = PodWithMetadata(Pod(PodAddress("3", 3), "1.0.0", role, "r"), OffsetDateTime.MIN)
 
   override def spec: Spec[Any, Throwable] =
     suite("ShardManagerSpec")(
@@ -114,7 +114,7 @@ object ShardManagerSpec extends ZIOSpecDefault {
             (1 to 30).foldLeft(state) { case (state, podNumber) =>
               val podAddress                   = PodAddress("", podNumber)
               val s1                           = state.copy(pods =
-                state.pods.updated(podAddress, PodWithMetadata(Pod(podAddress, "v1", role), OffsetDateTime.now()))
+                state.pods.updated(podAddress, PodWithMetadata(Pod(podAddress, "v1", role, "r"), OffsetDateTime.now()))
               )
               val (assignments, unassignments) = ShardManager.decideAssignmentsForUnbalancedShards(s1, 1d)
               val s2                           = unassignments.foldLeft(s1) { case (state, (_, shards)) =>
@@ -143,7 +143,7 @@ object ShardManagerSpec extends ZIOSpecDefault {
             _           <- simulate(List(SimulationEvent.PodRegister(stuckPod), SimulationEvent.PodRegister(stuckPod)))
             // setup 20 pods first
             _           <- simulate(
-                             (1 to 20).toList.map(i => SimulationEvent.PodRegister(Pod(PodAddress("server", i), "1", role)))
+                             (1 to 20).toList.map(i => SimulationEvent.PodRegister(Pod(PodAddress("server", i), "1", role, "r")))
                            )
             _           <- TestClock.adjust(10 minutes)
             assignments <- ZIO.serviceWithZIO[ShardManager](_.getAssignments(role))
@@ -162,7 +162,7 @@ object ShardManagerSpec extends ZIOSpecDefault {
 
             // bring 5 new pods
             _           <- simulate(
-                             (21 to 25).toList.map(i => SimulationEvent.PodRegister(Pod(PodAddress("server", i), "1", role)))
+                             (21 to 25).toList.map(i => SimulationEvent.PodRegister(Pod(PodAddress("server", i), "1", role, "r")))
                            )
             _           <- TestClock.adjust(20 seconds)
             assignments <- ZIO.serviceWithZIO[ShardManager](_.getAssignments(role))
@@ -197,7 +197,12 @@ object ShardManagerSpec extends ZIOSpecDefault {
             pods    = Pods.noop.project(noop =>
                         new Pods {
                           export noop.{ ping, sendMessage, sendStream, sendStreamAndReceiveStream, unassignShards }
-                          def assignShards(pod: PodAddress, role: Role, shards: Set[ShardId]): Task[Unit] =
+                          def assignShards(
+                            pod: PodAddress,
+                            role: Role,
+                            registration: String,
+                            shards: Set[ShardId]
+                          ): Task[Unit] =
                             hosted.update(m => m.updated(pod, m.getOrElse(pod, Set.empty) ++ shards))
                         }
                       )
@@ -220,7 +225,12 @@ object ShardManagerSpec extends ZIOSpecDefault {
             pods     = Pods.noop.project(noop =>
                          new Pods {
                            export noop.{ ping, sendMessage, sendStream, sendStreamAndReceiveStream, unassignShards }
-                           def assignShards(pod: PodAddress, role: Role, shards: Set[ShardId]): Task[Unit] =
+                           def assignShards(
+                             pod: PodAddress,
+                             role: Role,
+                             registration: String,
+                             shards: Set[ShardId]
+                           ): Task[Unit] =
                              if (pod == pod1.pod.address) started.succeed(()) *> ZIO.never
                              else hosted.update(m => m.updated(pod, m.getOrElse(pod, Set.empty) ++ shards))
                          }
@@ -233,17 +243,43 @@ object ShardManagerSpec extends ZIOSpecDefault {
               ) *>
                 (ZIO.service[ShardManager] *>
                   started.await *>
-                  ZIO.serviceWithZIO[ShardManager](_.unregister(pod1.pod.address)) *>
+                  ZIO.serviceWithZIO[ShardManager](_.unregister(pod1.pod.address, pod1.pod.registration)) *>
                   hosted.changes.filter(_.get(pod2.pod.address).contains(shards)).runHead)
                   .provideSome[Storage](config, pods, PodsHealth.local, ShardManager.live))
                 .provide(Storage.memory)
           } yield assertTrue(held.contains(Map(pod2.pod.address -> shards)))
         } @@ TestAspect.timeout(10.seconds),
+        test("A pod that registers again replaces its previous registration") {
+          for {
+            calls  <- SubscriptionRef.make(List.empty[(String, Set[ShardId])])
+            pods    = Pods.noop.project(noop =>
+                        new Pods {
+                          export noop.{ ping, sendMessage, sendStream, sendStreamAndReceiveStream, unassignShards }
+                          def assignShards(pod: PodAddress, role: Role, registration: String, shards: Set[ShardId]) =
+                            calls.update(_ :+ (registration -> shards))
+                        }
+                      )
+            shards  = (1 to ManagerConfig.default.numberOfShards(role)).toSet
+            again   = pod1.pod.copy(registration = "r2")
+            routed <- (for {
+                        manager <- ZIO.service[ShardManager]
+                        assigned =
+                          (registration: String) =>
+                            calls.changes.filter(_.filter(_._1 == registration).flatMap(_._2).toSet == shards).runHead
+                        _       <- manager.register(pod1.pod) *> assigned(pod1.pod.registration)
+                        _       <- manager.register(again) *> assigned(again.registration)
+                        _       <- manager.unregister(pod1.pod.address, pod1.pod.registration)
+                        routed  <- manager.getAssignments(role)
+                      } yield routed).provide(
+                        ZLayer.make[ShardManager](config, storage, pods, PodsHealth.local, ShardManager.live)
+                      )
+          } yield assertTrue(routed.values.forall(_.contains(pod1.pod.address)))
+        } @@ TestAspect.timeout(10.seconds),
         test("Simulate scaling down scenario") {
           (for {
             // setup 25 pods first
             _           <- simulate(
-                             (1 to 25).toList.map(i => SimulationEvent.PodRegister(Pod(PodAddress("server", i), "1", role)))
+                             (1 to 25).toList.map(i => SimulationEvent.PodRegister(Pod(PodAddress("server", i), "1", role, "r")))
                            )
             _           <- TestClock.adjust(10 minutes)
             assignments <- ZIO.serviceWithZIO[ShardManager](_.getAssignments(role))
@@ -254,7 +290,10 @@ object ShardManagerSpec extends ZIOSpecDefault {
                            )
 
             // remove 5 pods
-            _           <- simulate((21 to 25).toList.map(i => SimulationEvent.PodUnregister(PodAddress("server", i))))
+            _           <-
+              simulate(
+                (21 to 25).toList.map(i => SimulationEvent.PodUnregister(Pod(PodAddress("server", i), "1", role, "r")))
+              )
             _           <- TestClock.adjust(1 second)
             assignments <- ZIO.serviceWithZIO[ShardManager](_.getAssignments(role))
             // check that all shards have been rebalanced already
@@ -264,7 +303,7 @@ object ShardManagerSpec extends ZIOSpecDefault {
                            )
 
             // a pod of another role at the address of pod 1 replaces it
-            replacing    = Pod(PodAddress("server", 1), "1", Role("replacing"))
+            replacing    = Pod(PodAddress("server", 1), "1", Role("replacing"), "r")
             _           <- simulate(List(SimulationEvent.PodRegister(replacing)))
             _           <- TestClock.adjust(1 second)
             assignments <- ZIO.serviceWithZIO[ShardManager](_.getAssignments(role))
@@ -279,9 +318,10 @@ object ShardManagerSpec extends ZIOSpecDefault {
         test("Simulate temporary storage restart followed by manager restart") {
           {
             val setup = (for {
-              _ <- simulate {
-                     (1 to 10).toList.map(i => SimulationEvent.PodRegister(Pod(PodAddress("server", i), "1", role)))
-                   }
+              _ <-
+                simulate {
+                  (1 to 10).toList.map(i => SimulationEvent.PodRegister(Pod(PodAddress("server", i), "1", role, "r")))
+                }
               _ <- TestClock.adjust(10 minutes)
               // busy wait for the forked daemon fibers to do their job
               _ <- ZIO.iterate(Map.empty[ShardId, Option[PodAddress]])(_.isEmpty)(_ =>
@@ -306,10 +346,10 @@ object ShardManagerSpec extends ZIOSpecDefault {
         },
         test("Recover stored assignments by role") {
           val role1   = Role("recovered-1")
-          val pod1    = Pod(PodAddress("server", 1), "1", role1)
-          val pod2    = Pod(PodAddress("server", 2), "1", Role("recovered-2"))
-          val deadPod = Pod(PodAddress("server", 3), "1", Role("recovered-3"))
-          val pod4    = Pod(PodAddress("server", 4), "1", Role("recovered-4"))
+          val pod1    = Pod(PodAddress("server", 1), "1", role1, "r")
+          val pod2    = Pod(PodAddress("server", 2), "1", Role("recovered-2"), "r")
+          val deadPod = Pod(PodAddress("server", 3), "1", Role("recovered-3"), "r")
+          val pod4    = Pod(PodAddress("server", 4), "1", Role("recovered-4"), "r")
           val manager = ZIO.serviceWithZIO[ShardManager]
           for {
             checks    <- Ref.make(0)
@@ -356,7 +396,7 @@ object ShardManagerSpec extends ZIOSpecDefault {
                                        // a role whose stored pods are all dead still has its shards, all unassigned
                                        deadRole    <- manager(_.getAssignments(deadPod.role))
                                        // the last pod of a role leaving clears its assignments in storage
-                                       _           <- manager(_.unregister(pod1.address))
+                                       _           <- manager(_.unregister(pod1.address, pod1.registration))
                                        stored      <- ZStream
                                                         .serviceWithStream[Storage](_.assignmentsStream(role1))
                                                         .filter(stored =>
@@ -390,20 +430,20 @@ object ShardManagerSpec extends ZIOSpecDefault {
 
   sealed trait SimulationEvent
   object SimulationEvent {
-    case class PodRegister(pod: Pod)                 extends SimulationEvent
-    case class PodUnregister(podAddress: PodAddress) extends SimulationEvent
+    case class PodRegister(pod: Pod)   extends SimulationEvent
+    case class PodUnregister(pod: Pod) extends SimulationEvent
   }
 
   val config: ULayer[ManagerConfig] = ZLayer.succeed(ManagerConfig.default)
 
-  private val stuckPod = Pod(PodAddress("stuck", 1), "1", Role("stuck"))
+  private val stuckPod = Pod(PodAddress("stuck", 1), "1", Role("stuck"), "r")
 
   // assigning shards to stuckPod never completes
   val stuckPods: ULayer[Pods] = Pods.noop.project(noop =>
     new Pods {
       export noop.{ ping, sendMessage, sendStream, sendStreamAndReceiveStream, unassignShards }
-      def assignShards(pod: PodAddress, role: Role, shards: Set[ShardId]): Task[Unit] =
-        if (pod == stuckPod.address) ZIO.never else noop.assignShards(pod, role, shards)
+      def assignShards(pod: PodAddress, role: Role, registration: String, shards: Set[ShardId]): Task[Unit] =
+        if (pod == stuckPod.address) ZIO.never else noop.assignShards(pod, role, registration, shards)
     }
   )
 
@@ -442,12 +482,17 @@ object ShardManagerSpec extends ZIOSpecDefault {
       pods       = Pods.noop.project(noop =>
                      new Pods {
                        export noop.{ ping, sendMessage, sendStream, sendStreamAndReceiveStream }
-                       def assignShards(pod: PodAddress, role: Role, shards: Set[ShardId]): Task[Unit]   =
+                       def assignShards(pod: PodAddress, role: Role, registration: String, shards: Set[ShardId]): Task[Unit] =
                          call(
                            hosted.update(m => m.updated(pod, m.getOrElse(pod, Set.empty) ++ shards)) *>
                              ZIO.whenZIO(lost.getAndSet(false))(ZIO.fail(new Exception("reply lost"))).unit
                          )
-                       def unassignShards(pod: PodAddress, role: Role, shards: Set[ShardId]): Task[Unit] =
+                       def unassignShards(
+                         pod: PodAddress,
+                         role: Role,
+                         registration: String,
+                         shards: Set[ShardId]
+                       ): Task[Unit]                                                                                         =
                          call(
                            firstUndo.getAndSet(None).flatMap(ZIO.foreachDiscard(_)(changed *> _)) *>
                              hosted.update(m => m.updated(pod, m.getOrElse(pod, Set.empty) -- shards))
@@ -485,8 +530,8 @@ object ShardManagerSpec extends ZIOSpecDefault {
     for {
       shardManager <- ZIO.service[ShardManager]
       _            <- ZIO.foreachDiscard(events) {
-                        case SimulationEvent.PodRegister(pod)          => shardManager.register(pod)
-                        case SimulationEvent.PodUnregister(podAddress) => shardManager.unregister(podAddress)
+                        case SimulationEvent.PodRegister(pod)   => shardManager.register(pod)
+                        case SimulationEvent.PodUnregister(pod) => shardManager.unregister(pod.address, pod.registration)
                       }
     } yield ()
 }

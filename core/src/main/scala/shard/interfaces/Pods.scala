@@ -13,14 +13,16 @@ import zio.{ Task, ULayer, ZIO, ZLayer }
 trait Pods {
 
   /**
-   * Notify a pod that it was assigned a list of shards of the given role (to be rejected by a pod of another role)
+   * Notify a pod that its given registration was assigned a list of shards of the given role
+   * (to be rejected by a pod of another role or registration)
    */
-  def assignShards(pod: PodAddress, role: Role, shards: Set[ShardId]): Task[Unit]
+  def assignShards(pod: PodAddress, role: Role, registration: String, shards: Set[ShardId]): Task[Unit]
 
   /**
-   * Notify a pod that it was unassigned a list of shards of the given role (to be rejected by a pod of another role)
+   * Notify a pod that its given registration was unassigned a list of shards of the given role
+   * (to be rejected by a pod of another role or registration)
    */
-  def unassignShards(pod: PodAddress, role: Role, shards: Set[ShardId]): Task[Unit]
+  def unassignShards(pod: PodAddress, role: Role, registration: String, shards: Set[ShardId]): Task[Unit]
 
   /**
    * Check that a pod is responsive
@@ -56,20 +58,22 @@ object Pods {
    */
   val noop: ULayer[Pods] =
     ZLayer.succeed(new Pods {
-      def assignShards(pod: PodAddress, role: Role, shards: Set[ShardId]): Task[Unit]                    = ZIO.unit
-      def unassignShards(pod: PodAddress, role: Role, shards: Set[ShardId]): Task[Unit]                  = ZIO.unit
-      def ping(pod: PodAddress): Task[Unit]                                                              = ZIO.unit
-      def sendMessage(pod: PodAddress, message: BinaryMessage): Task[BinaryReply]                        =
+      def assignShards(pod: PodAddress, role: Role, registration: String, shards: Set[ShardId]): Task[Unit]   =
+        ZIO.unit
+      def unassignShards(pod: PodAddress, role: Role, registration: String, shards: Set[ShardId]): Task[Unit] =
+        ZIO.unit
+      def ping(pod: PodAddress): Task[Unit]                                                                   = ZIO.unit
+      def sendMessage(pod: PodAddress, message: BinaryMessage): Task[BinaryReply]                             =
         ZIO.succeed(
           if (message.expectsReply) BinaryReply.Defect("Pods.noop sends no messages")
           else BinaryReply.Success(Array.emptyByteArray)
         )
-      def sendStream(pod: PodAddress, messages: ZStream[Any, Nothing, BinaryMessage]): Task[BinaryReply] =
+      def sendStream(pod: PodAddress, messages: ZStream[Any, Nothing, BinaryMessage]): Task[BinaryReply]      =
         ZIO.succeed(BinaryReply.Success(Array.emptyByteArray))
       def sendStreamAndReceiveStream(
         pod: PodAddress,
         messages: ZStream[Any, Nothing, BinaryMessage]
-      ): ZStream[Any, Throwable, BinaryReply]                                                            =
+      ): ZStream[Any, Throwable, BinaryReply]                                                                 =
         ZStream.empty
     })
 

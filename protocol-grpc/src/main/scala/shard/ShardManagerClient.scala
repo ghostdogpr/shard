@@ -41,11 +41,11 @@ object ShardManagerClient {
       backend.client(ShardManager.notifyUnhealthyPod, ShardManager.service, withDeadline)
     private val getAssignmentsCall     = backend.client(ShardManager.getAssignments, ShardManager.service, withDeadline)
 
-    def register(podAddress: PodAddress, role: Role): Task[Unit] =
-      registerCall(RegisterRequest(Pod(podAddress, serverVersion, role))).unit
+    def register(podAddress: PodAddress, role: Role, registration: String): Task[Set[ShardId]] =
+      registerCall(RegisterRequest(Pod(podAddress, serverVersion, role, registration))).as(Set.empty)
 
-    def unregister(podAddress: PodAddress): Task[Unit] =
-      unregisterCall(UnregisterRequest(podAddress)).unit
+    def unregister(podAddress: PodAddress, registration: String): Task[Unit] =
+      unregisterCall(UnregisterRequest(podAddress, registration)).unit
 
     def notifyUnhealthyPod(podAddress: PodAddress): Task[Unit] =
       ZIO.logWarning(s"Notifying Shard Manager about unhealthy pod $podAddress") *>

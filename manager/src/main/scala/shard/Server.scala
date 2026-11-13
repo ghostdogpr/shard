@@ -45,7 +45,8 @@ object Server {
       )
       .rpc(
         Protocol.unregister,
-        (request: UnregisterRequest) => shardManager.unregister(request.podAddress).as(UnregisterResponse())
+        (request: UnregisterRequest) =>
+          shardManager.unregister(request.podAddress, request.registration).as(UnregisterResponse())
       )
       .rpc(
         Protocol.notifyUnhealthyPod,
