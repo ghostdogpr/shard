@@ -270,43 +270,6 @@ object ShardingSpec extends ZIOSpecDefault {
           ZLayer.succeed(config)
         )
       } @@ TestAspect.timeout(10.seconds),
-      test("An unregister that failed is sent again by the next one") {
-        val config = Config.default.copy(unregisterRetrySchedule = Schedule.stop)
-        for {
-          failing         <- Ref.make(false)
-          unregistered    <- Ref.make(List.empty[String])
-          manager          = new ShardManagerClient {
-                               private val unavailable                                                                    =
-                                 ZIO.whenZIO(failing.get)(ZIO.fail(new Exception("unavailable")))
-                               def register(podAddress: PodAddress, role: Role, registration: String): Task[Set[ShardId]] =
-                                 unavailable.as(Set.empty)
-                               def unregister(podAddress: PodAddress, registration: String): Task[Unit]                   =
-                                 unavailable *> unregistered.update(_ :+ registration)
-                               def notifyUnhealthyPod(podAddress: PodAddress): Task[Unit]                                 = ZIO.unit
-                               def getAssignments(role: Role): Task[Map[ShardId, Option[PodAddress]]]                     =
-                                 ZIO.succeed(Map.empty)
-                             }
-          (first, second) <-
-            (for {
-              sharding <- ZIO.service[Sharding]
-              _        <- Sharding.register
-              first    <- sharding.registration
-              _        <- failing.set(true)
-              _        <- Sharding.unregister
-              _        <- Sharding.register.exit
-              second   <- sharding.registration
-              _        <- failing.set(false)
-              _        <- Sharding.unregister *> Sharding.unregister
-            } yield (first, second)).provide(
-              Sharding.live,
-              Pods.noop,
-              ZLayer.succeed(manager),
-              Storage.memory,
-              ZLayer.succeed(config)
-            )
-          sent            <- unregistered.get
-        } yield assertTrue(first.isDefined, second.isDefined, sent.toSet == (first.toSet ++ second), sent.size == 2)
-      },
       test("A registration starts once the previous one stopped its entities") {
         val config = Config.default
         for {

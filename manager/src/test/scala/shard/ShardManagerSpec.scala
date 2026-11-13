@@ -251,20 +251,20 @@ object ShardManagerSpec extends ZIOSpecDefault {
         } @@ TestAspect.timeout(10.seconds),
         test("A pod that registers again replaces its previous registration") {
           for {
-            calls                   <- SubscriptionRef.make(List.empty[(String, Set[ShardId])])
-            current                 <- Ref.make(Option(pod1.pod.registration))
-            pods                     = confirmingPods.project(noop =>
-                                         new Pods {
-                                           export noop.{ sendMessage, sendStream, sendStreamAndReceiveStream, unassignShards }
-                                           def assignShards(pod: PodAddress, role: Role, registration: String, shards: Set[ShardId]) =
-                                             calls.update(_ :+ (registration -> shards))
-                                           def ping(pod: PodAddress)                                                                 =
-                                             current.get
-                                         }
-                                       )
-            shards                   = (1 to ManagerConfig.default.numberOfShards(role)).toSet
-            again                    = pod1.pod.copy(registration = "r2")
-            (late, stopped, routed) <-
+            calls                            <- SubscriptionRef.make(List.empty[(String, Set[ShardId])])
+            current                          <- Ref.make(Option(pod1.pod.registration))
+            pods                              = confirmingPods.project(noop =>
+                                                  new Pods {
+                                                    export noop.{ sendMessage, sendStream, sendStreamAndReceiveStream, unassignShards }
+                                                    def assignShards(pod: PodAddress, role: Role, registration: String, shards: Set[ShardId]) =
+                                                      calls.update(_ :+ (registration -> shards))
+                                                    def ping(pod: PodAddress)                                                                 =
+                                                      current.get
+                                                  }
+                                                )
+            shards                            = (1 to ManagerConfig.default.numberOfShards(role)).toSet
+            again                             = pod1.pod.copy(registration = "r2")
+            (late, stopped, routed, checked) <-
               (for {
                 manager <- ZIO.service[ShardManager]
                 assigned =
@@ -276,12 +276,18 @@ object ShardManagerSpec extends ZIOSpecDefault {
                 late    <- manager.register(pod1.pod).exit
                 _       <- manager.unregister(pod1.pod.address, pod1.pod.registration)
                 routed  <- manager.getAssignments(role)
-                _       <- current.set(None) *> manager.unregister(again.address, again.registration)
+                _       <- current.set(None) *> manager.checkAllPodsHealth
+                checked <- manager.getAssignments(role)
                 stopped <- manager.register(again).exit
-              } yield (late, stopped, routed)).provide(
+              } yield (late, stopped, routed, checked)).provide(
                 ZLayer.make[ShardManager](config, storage, pods, PodsHealth.local, ShardManager.live)
               )
-          } yield assertTrue(late.isFailure, stopped.isFailure, routed.values.forall(_.contains(pod1.pod.address)))
+          } yield assertTrue(
+            late.isFailure,
+            stopped.isFailure,
+            routed.values.forall(_.contains(pod1.pod.address)),
+            checked.values.forall(_.isEmpty)
+          )
         } @@ TestAspect.timeout(10.seconds),
         test("Simulate scaling down scenario") {
           (for {

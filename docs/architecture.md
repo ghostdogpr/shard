@@ -62,7 +62,7 @@ When that happens, the Shard Manager will call the `assign` API of this pod with
 
 ::: tip Unresponsive Pod
 If Pod2 is not responsive, Pod1 will call the `notifyUnhealthyPod` endpoint of the Shard Manager.
-The Shard Manager will check with the Health API (e.g. Kubernetes) if the pod is still alive and unregister it if not.
+The Shard Manager will check with the Health API (e.g. Kubernetes) if the pod is still alive and unregister it if not. It also unregisters it if the pod answers its ping with another registration, or none.
 Pod1 will keep retrying and hopefully a new pod will be assigned very soon.
 :::
 

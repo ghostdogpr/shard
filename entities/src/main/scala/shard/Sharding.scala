@@ -27,10 +27,6 @@ class Sharding private (
   lastStaleRefresh: Ref[Long],
   isShuttingDownRef: Ref[Boolean],
   registrationRef: Ref.Synchronized[Option[String]],
-  // stopped by unregister, until the Shard Manager acknowledges them, so that a later unregister sends them again
-  retiredRef: Ref[Set[String]],
-  // one register or unregister at a time, so that a registration starts once the previous one stopped its entities
-  lifecycle: Semaphore,
   shardManager: ShardManagerClient,
   pods: Pods,
   storage: Storage,
@@ -40,65 +36,60 @@ class Sharding private (
     recipientType.getShardId(entityId, config.numberOfShards)
 
   val register: Task[Unit] =
-    lifecycle
-      .withPermit(
-        for {
-          _            <- ZIO.logDebug(s"Registering pod $address to Shard Manager")
-          current      <- registrationRef.get
-          shuttingDown <- isShuttingDownRef.get
-          registration <- current match {
-                            case Some(registration) if !shuttingDown => ZIO.succeed(registration)
-                            case _                                   =>
-                              for {
-                                _       <- terminateAllEntities.when(shuttingDown)
-                                fresh   <- Random.nextUUID.map(_.toString)
-                                // entities start without the lock: the old shards are dropped before hosting resumes
-                                dropped <-
-                                  registrationRef.modifyZIO(_ =>
-                                    shardAssignments
-                                      .modify(map => (ownAssignments(map).keySet, map -- ownAssignments(map).keySet))
-                                      .zipLeft(isShuttingDownRef.set(false))
-                                      .map(_ -> Some(fresh))
-                                  )
-                                // a singleton's finalizer may call unregister, which waits for this registration
-                                _       <- (terminateShards(dropped, dropped.size) *> stopSingletonsInBackground)
-                                             .when(dropped.nonEmpty)
-                              } yield fresh
-                          }
-          shards       <- shardManager.register(address, config.role, registration)
-          _            <- retiredRef.set(Set.empty)
-        } yield (registration, shards)
-      )
-      .flatMap { case (registration, shards) =>
-        // without the permit: starting a singleton may wait for one stopping, whose finalizer may call unregister
-        assign(registration, shards).when(shards.nonEmpty).unit
-      }
+    for {
+      _            <- ZIO.logDebug(s"Registering pod $address to Shard Manager")
+      registration <- startRegistration
+      shards       <- shardManager.register(address, config.role, registration)
+      _            <- assign(registration, shards).when(shards.nonEmpty)
+    } yield ()
+
+  // the current registration, or a new one once the entities of the previous one stopped
+  private def startRegistration: UIO[String] =
+    (registrationRef.get <*> isShuttingDownRef.get).flatMap {
+      case (Some(registration), false) => ZIO.succeed(registration)
+      case (read, shuttingDown)        =>
+        terminateAllEntities.when(shuttingDown) *> Random.nextUUID.map(_.toString).flatMap { fresh =>
+          registrationRef
+            .modifyZIO(current =>
+              isShuttingDownRef.get.flatMap {
+                case `shuttingDown` if current == read =>
+                  // entities start without the lock: the old shards are dropped before hosting resumes
+                  shardAssignments
+                    .modify(map => (ownAssignments(map).keySet, map -- ownAssignments(map).keySet))
+                    .zipLeft(isShuttingDownRef.set(false))
+                    .map(dropped => Some(dropped) -> Some(fresh))
+                case _                                 => ZIO.succeed(None -> current)
+              }
+            )
+            .flatMap {
+              case Some(dropped) => release(dropped, dropped.size).when(dropped.nonEmpty).as(fresh)
+              case None          => startRegistration
+            }
+        }
+    }
 
   val unregister: UIO[Unit] =
-    lifecycle.withPermit(
-      (registrationRef.get <*> retiredRef.get).flatMap { case (current, retired) =>
-        (
-          // ping the shard manager first to stop if it's not available
-          shardManager.getAssignments(config.role) *>
-            ZIO.foreachDiscard(current)(registration =>
-              ZIO.logDebug(s"Stopping local entities") *>
-                isShuttingDownRef.set(true) *>
-                terminateAllEntities *>
-                retiredRef.update(_ + registration) *>
-                registrationRef.set(None)
-            ) *>
-            ZIO.logDebug(s"Unregistering pod $address to Shard Manager") *>
-            retiredRef.get.flatMap(
-              ZIO.foreachDiscard(_)(registration =>
-                shardManager.unregister(address, registration) *> retiredRef.update(_ - registration)
-              )
+    registrationRef.get.flatMap(ZIO.foreachDiscard(_) { registration =>
+      (
+        // ping the shard manager first to stop if it's not available
+        shardManager.getAssignments(config.role) *>
+          // unless the pod registered again since
+          registrationRef
+            .modifyZIO(current =>
+              ZIO
+                .when(current.contains(registration))(isShuttingDownRef.set(true))
+                .as(current.forall(_ == registration) -> current)
             )
-        ).retry(config.unregisterRetrySchedule)
-          .catchAllCause(ZIO.logWarningCause("Error while unregistering from Shard Manager", _))
-          .when(current.isDefined || retired.nonEmpty)
-          .unit
-      }
-    )
+            .flatMap(stopping =>
+              (ZIO.logDebug(s"Stopping local entities") *>
+                terminateAllEntities *>
+                registrationRef.update(_.filterNot(_ == registration)) *>
+                ZIO.logDebug(s"Unregistering pod $address to Shard Manager") *>
+                shardManager.unregister(address, registration)).when(stopping)
+            )
+      ).retry(config.unregisterRetrySchedule)
+        .catchAllCause(ZIO.logWarningCause("Error while unregistering from Shard Manager", _))
+    })
 
   private def terminateAllEntities: UIO[Unit] =
     entityManagers.flatMap(
@@ -192,15 +183,13 @@ class Sharding private (
     }
 
   private def release(shards: Set[ShardId], removed: Int): UIO[Unit] =
-    terminateShards(shards, removed) *> stopSingletonsIfNeeded
-
-  private def terminateShards(shards: Set[ShardId], removed: Int): UIO[Unit] =
     entityManagers.flatMap(state =>
       ZIO.foreachParDiscard(state.values)(
         _.terminateEntitiesOnShards(shards) // this will return once all shards are terminated
       )
     ) *>
-      Metrics.shards.tagged("role", config.role.name).decrementBy(removed)
+      Metrics.shards.tagged("role", config.role.name).decrementBy(removed) *>
+      stopSingletonsIfNeeded
 
   def getPodAddress(recipientType: RecipientType[?], entityId: String): UIO[Option[PodAddress]] =
     for {
@@ -765,8 +754,6 @@ object Sharding {
         lastStaleRefresh          <- Clock.nanoTime.flatMap(Ref.make(_))
         shuttingDown              <- Ref.make(false)
         registration              <- Ref.Synchronized.make(Option.empty[String])
-        retired                   <- Ref.make(Set.empty[String])
-        lifecycle                 <- Semaphore.make(1)
         eventsHub                 <- Hub.unbounded[ShardingRegistrationEvent]
         sharding                   = new Sharding(
                                        PodAddress(config.selfHost, config.shardingPort),
@@ -778,8 +765,6 @@ object Sharding {
                                        lastStaleRefresh,
                                        shuttingDown,
                                        registration,
-                                       retired,
-                                       lifecycle,
                                        shardManager,
                                        pods,
                                        storage,

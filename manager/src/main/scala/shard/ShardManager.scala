@@ -20,8 +20,6 @@ class ShardManager private (
   // one write at a time per storage key, so that the last one holds the latest state
   podsLock: Semaphore,
   assignmentsLocks: Role => UIO[Semaphore],
-  // one register or unregister at a time per address, so that the pod's registration can't change unseen
-  addressLocks: PodAddress => UIO[Semaphore],
   scope: Scope,
   healthApi: PodsHealth,
   podApi: Pods,
@@ -36,44 +34,48 @@ class ShardManager private (
     ZStream.fromHub(eventsHub)
 
   def register(pod: Pod): Task[Unit] =
-    addressLocks(pod.address).flatMap(_.withPermit(registerWithPermit(pod)))
+    findPod(pod.address).flatMap { before =>
+      ZIO.ifZIO(healthApi.isAlive(pod) && reported(pod).map(_.flatten.contains(pod.registration)))(
+        onTrue = for {
+          _         <- ZIO.logInfo(s"Registering $pod")
+          cdt       <- ZIO.succeed(OffsetDateTime.now())
+          persisted <-
+            modifyStates { states =>
+              // the pod was checked against what the address had then
+              if (podAt(states, pod.address) != before) (None, states)
+              else {
+                // an address hosts a single registration: an earlier one, or one of another role, is gone
+                val (replaced, others) =
+                  removePod(states, pod.address, p => p.pod.role != pod.role || p.pod.registration != pod.registration)
+                val current            = others.getOrElse(pod.role, ShardManagerState(config.numberOfShards(pod.role)))
+                val state              = current.copy(pods = current.pods.updated(pod.address, PodWithMetadata(pod, cdt)))
+                (Some((replaced, state.unassignedShards.nonEmpty)), others.updated(pod.role, state))
+              }
+            }.flatMap(ZIO.foreach(_) { case (replaced, triggerRebalance) =>
+              ZIO.foreachDiscard(replaced)(announceUnregistered) *>
+                eventsHub.publish(ShardingEvent.PodRegistered(pod)) *>
+                ZIO
+                  .whenDiscard(triggerRebalance)(rebalance(pod.role, rebalanceImmediately = false).background(scope)) *>
+                persistPods.background(scope)
+            }).uninterruptible
+          // a client that stops waiting doesn't cancel the write
+          _         <- persisted.fold(register(pod))(_.join)
+        } yield (),
+        onFalse = ZIO.logWarning(s"Pod $pod requested to register but is not alive or not registering, ignoring") *>
+          ZIO.fail(new RuntimeException(s"Pod $pod is not healthy or not registering, refusing to register"))
+      )
+    }
 
-  private def registerWithPermit(pod: Pod): Task[Unit] =
-    ZIO.ifZIO(healthApi.isAlive(pod) && isCurrent(pod))(
-      onTrue = for {
-        _         <- ZIO.logInfo(s"Registering $pod")
-        cdt       <- ZIO.succeed(OffsetDateTime.now())
-        persisted <-
-          modifyStates { states =>
-            // an address hosts a single registration: an earlier one, or one of another role, is gone
-            val (replaced, others) =
-              removePod(states, pod.address, p => p.pod.role != pod.role || p.pod.registration != pod.registration)
-            val current            = others.getOrElse(pod.role, ShardManagerState(config.numberOfShards(pod.role)))
-            val state              = current.copy(pods = current.pods.updated(pod.address, PodWithMetadata(pod, cdt)))
-            ((replaced, state.unassignedShards.nonEmpty), others.updated(pod.role, state))
-          }.flatMap { case (replaced, triggerRebalance) =>
-            ZIO.foreachDiscard(replaced)(announceUnregistered) *>
-              eventsHub.publish(ShardingEvent.PodRegistered(pod)) *>
-              ZIO.whenDiscard(triggerRebalance)(rebalance(pod.role, rebalanceImmediately = false).background(scope)) *>
-              persistPods.background(scope)
-          }.uninterruptible
-        // a client that stops waiting doesn't cancel the write
-        _         <- persisted.join
-      } yield (),
-      onFalse = ZIO.logWarning(s"Pod $pod requested to register but is not alive or not registering, ignoring") *>
-        ZIO.fail(new RuntimeException(s"Pod $pod is not healthy or not registering, refusing to register"))
-    )
+  // a request may arrive after the pod registered again or unregistered: only the pod knows its registration
+  // (None if it didn't answer)
+  private def reported(pod: Pod): UIO[Option[Option[String]]] =
+    podApi.ping(pod.address).timeout(config.pingTimeout).orElseSucceed(None)
 
-  // a register request may arrive after the pod registered again or unregistered: only the pod knows
-  private def isCurrent(pod: Pod): UIO[Boolean] =
-    podApi
-      .ping(pod.address)
-      .timeout(config.pingTimeout)
-      .map(_.flatten.contains(pod.registration))
-      .orElseSucceed(false)
+  private def podAt(states: Map[Role, ShardManagerState], podAddress: PodAddress): Option[PodWithMetadata] =
+    states.values.iterator.flatMap(_.pods.get(podAddress)).nextOption()
 
   private def findPod(podAddress: PodAddress): UIO[Option[PodWithMetadata]] =
-    stateRef.get.map(_.values.iterator.flatMap(_.pods.get(podAddress)).nextOption())
+    stateRef.get.map(podAt(_, podAddress))
 
   // returns the removed pod with the shards it had
   private def removePod(
@@ -96,8 +98,12 @@ class ShardManager private (
       .whenCaseZIODiscard(findPod(podAddress)) { case Some(registered) =>
         ManagerMetrics.podHealthChecked.tagged("pod_address", podAddress.toString).increment.unless(ignoreMetric) *>
           eventsHub.publish(ShardingEvent.PodHealthChecked(registered.pod)) *>
-          ZIO.unlessZIO(healthApi.isAlive(registered.pod))(
-            ZIO.logWarning(s"Pod $podAddress is not alive, unregistering") *>
+          // a pod changes its registration once the entities of the previous one stopped
+          ZIO.unlessZIO(
+            healthApi.isAlive(registered.pod) && reported(registered.pod)
+              .map(_.forall(_.contains(registered.pod.registration)))
+          )(
+            ZIO.logWarning(s"Pod $podAddress is not alive or has another registration, unregistering") *>
               // a pod that registered again at this address in the meantime stays
               unregisterIf(podAddress)(_ == registered)
           )
@@ -110,7 +116,7 @@ class ShardManager private (
     } yield ()
 
   def unregister(podAddress: PodAddress, registration: String): UIO[Unit] =
-    addressLocks(podAddress).flatMap(_.withPermit(unregisterIf(podAddress)(_.pod.registration == registration)))
+    unregisterIf(podAddress)(_.pod.registration == registration)
 
   // check and remove in one update, so that concurrent calls unregister the pod once
   private def unregisterIf(podAddress: PodAddress)(matches: PodWithMetadata => Boolean): UIO[Unit] =
@@ -423,11 +429,10 @@ object ShardManager {
                                  }
         _                   <- ZIO.foreachDiscard(initialStates)(recordGauges(_, None, _))
         state               <- Ref.Synchronized.make(initialStates)
-        rebalanceSemaphores <- semaphorePer[Role]
+        rebalanceSemaphores <- semaphorePerRole
         eventsHub           <- Hub.unbounded[ShardingEvent]
         podsLock            <- Semaphore.make(1)
-        assignmentsLocks    <- semaphorePer[Role]
-        addressLocks        <- semaphorePer[PodAddress]
+        assignmentsLocks    <- semaphorePerRole
         scope               <- ZIO.scope
         shardManager         = new ShardManager(
                                  stateRef = state,
@@ -435,7 +440,6 @@ object ShardManager {
                                  eventsHub = eventsHub,
                                  podsLock = podsLock,
                                  assignmentsLocks = assignmentsLocks,
-                                 addressLocks = addressLocks,
                                  scope = scope,
                                  healthApi = healthApi,
                                  podApi = podApi,
@@ -467,8 +471,8 @@ object ShardManager {
   }
 
   // uninterruptible: memoize never completes a role's entry if its first caller is interrupted before creating it
-  private def semaphorePer[A]: UIO[A => UIO[Semaphore]] =
-    ZIO.memoize((_: A) => Semaphore.make(1)).map(semaphore => semaphore(_).uninterruptible)
+  private val semaphorePerRole: UIO[Role => UIO[Semaphore]] =
+    ZIO.memoize((_: Role) => Semaphore.make(1)).map(semaphore => semaphore(_).uninterruptible)
 
   private def recordGauges(role: Role, before: Option[ShardManagerState], after: ShardManagerState): UIO[Unit] = {
     val previous = before.fold(Map.empty[PodAddress, Set[ShardId]])(_.shardsPerPod)
