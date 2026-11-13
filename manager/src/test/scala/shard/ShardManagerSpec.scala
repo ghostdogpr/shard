@@ -220,6 +220,37 @@ object ShardManagerSpec extends ZIOSpecDefault {
                 .provide(Storage.memory)
           } yield assertTrue(held == Map(pod1.pod.address -> shards))
         },
+        test("A call that never returns doesn't hold back the role once its pod left") {
+          for {
+            hosted <- Ref.make(Map.empty[PodAddress, Set[ShardId]])
+            pods    = Pods.noop.project(noop =>
+                        new Pods {
+                          export noop.{ ping, sendMessage, sendStream, sendStreamAndReceiveStream, unassignShards }
+                          def assignShards(pod: PodAddress, role: Role, shards: Set[ShardId]): Task[Unit] =
+                            if (pod == pod1.pod.address) ZIO.never
+                            else hosted.update(m => m.updated(pod, m.getOrElse(pod, Set.empty) ++ shards))
+                        }
+                      )
+            shards  = (1 to ManagerConfig.default.numberOfShards(role)).toSet
+            // the shards sent again to pod1 on startup never arrive, then pod1 leaves
+            held   <-
+              (ZIO.serviceWithZIO[Storage](storage =>
+                storage.savePods(Set(pod1.pod, pod2.pod)) *>
+                  storage.saveAssignments(role, shards.map(_ -> Some(pod1.pod.address)).toMap)
+              ) *>
+                (ZIO.serviceWithZIO[ShardManager](_.unregister(pod1.pod.address)) *>
+                  Live.live(
+                    hosted.get
+                      .repeat(
+                        Schedule.recurUntil[Map[PodAddress, Set[ShardId]]](_.get(pod2.pod.address).contains(shards)) <*
+                          Schedule.spaced(10.millis)
+                      )
+                      .timeoutFail(new Exception("the shards weren't reassigned"))(5.seconds)
+                  ))
+                  .provideSome[Storage](config, pods, PodsHealth.local, ShardManager.live))
+                .provide(Storage.memory)
+          } yield assertTrue(held == Map(pod2.pod.address -> shards))
+        },
         test("Simulate scaling down scenario") {
           (for {
             // setup 25 pods first
