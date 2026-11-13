@@ -318,7 +318,7 @@ object ShardManagerSpec extends ZIOSpecDefault {
                          })
             blocked   <- Ref.make(false)
             stuck     <- Promise.make[Nothing, Unit]
-            closing   <- Ref.make(false)
+            closing   <- Promise.make[Nothing, Unit]
             shutdown  <- Ref.make(Set.empty[Role])
             // the first write of pod4's assignments never returns, even interrupted, which must not block the others,
             // role1's write on shutdown fails, which must not keep the other roles from being written,
@@ -327,9 +327,9 @@ object ShardManagerSpec extends ZIOSpecDefault {
                            new Storage {
                              export memory.{ assignmentsStream, getAssignments, getPods }
                              def savePods(pods: Set[Pod]): Task[Unit]                                                   =
-                               ZIO.ifZIO(closing.get)(ZIO.never.uninterruptible, memory.savePods(pods))
+                               ZIO.ifZIO(closing.isDone)(ZIO.never.uninterruptible, memory.savePods(pods))
                              def saveAssignments(role: Role, assignments: Map[ShardId, Option[PodAddress]]): Task[Unit] =
-                               closing.get.flatMap {
+                               closing.isDone.flatMap {
                                  case true if role == role1 => ZIO.dieMessage("storage down")
                                  case true                  => shutdown.update(_ + role) *> memory.saveAssignments(role, assignments)
                                  case false                 =>
@@ -357,19 +357,16 @@ object ShardManagerSpec extends ZIOSpecDefault {
                                        deadRole    <- manager(_.getAssignments(deadPod.role))
                                        // the last pod of a role leaving clears its assignments in storage
                                        _           <- manager(_.unregister(pod1.address))
-                                       stored      <- Live.live(
-                                                        ZIO
-                                                          .serviceWithZIO[Storage](_.getAssignments(role1))
-                                                          .repeat(
-                                                            Schedule.recurUntil[Map[ShardId, Option[PodAddress]]](stored =>
-                                                              stored.size == ManagerConfig.default.numberOfShards(role1) &&
-                                                                !stored.values.exists(_.contains(pod1.address))
-                                                            ) <* Schedule.spaced(10.millis)
-                                                          )
-                                                          .timeoutFail(new Exception("assignments not persisted"))(5.seconds)
-                                                      )
+                                       stored      <- ZStream
+                                                        .serviceWithStream[Storage](_.assignmentsStream(role1))
+                                                        .filter(stored =>
+                                                          stored.size == ManagerConfig.default.numberOfShards(role1) &&
+                                                            !stored.values.exists(_.contains(pod1.address))
+                                                        )
+                                                        .runHead
+                                                        .someOrFailException
                                        _           <- stuck.await
-                                       _           <- closing.set(true)
+                                       _           <- closing.succeed(())
                                      } yield assertTrue(
                                        assignments.get(1).flatten.contains(pod1.address),
                                        deadRole.size == ManagerConfig.default.numberOfShards(deadPod.role),
@@ -378,16 +375,16 @@ object ShardManagerSpec extends ZIOSpecDefault {
                                        !stored.values.exists(_.contains(pod1.address))
                                      )).provideSome[Storage](config, Pods.noop, podsHealth, ShardManager.live)
                          } yield result).provide(storage).forkDaemon
-            // the release waits for the shutdown timeouts
-            _         <- (ZIO.whenZIO(closing.get)(TestClock.adjust(1.second)) *> Live.live(ZIO.sleep(10.millis))).forever.fork
-            result    <- Live.live(run.join.timeoutFail(new Exception("release not finished"))(10.seconds))
+            // the release waits for the shutdown timeout
+            _         <- (closing.await *> TestClock.adjust(ManagerConfig.default.shutdownPersistTimeout)).fork
+            result    <- run.join
             persisted <- shutdown.get
             // the health checks stopped with the Shard Manager
             released  <- checks.get
-            _         <- Live.live(ZIO.sleep(1.second))
+            _         <- TestClock.adjust(ManagerConfig.default.podHealthCheckInterval)
             after     <- checks.get
           } yield result && assertTrue(persisted == Set(pod2.role, deadPod.role), after == released)
-        }
+        } @@ TestAspect.timeout(10.seconds)
       )
     )
 
