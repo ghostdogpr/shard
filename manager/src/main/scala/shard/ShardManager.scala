@@ -34,33 +34,51 @@ class ShardManager private (
     ZStream.fromHub(eventsHub)
 
   def register(pod: Pod): Task[Unit] =
-    ZIO.ifZIO(healthApi.isAlive(pod))(
-      onTrue = for {
-        _         <- ZIO.logInfo(s"Registering $pod")
-        cdt       <- ZIO.succeed(OffsetDateTime.now())
-        persisted <-
-          modifyStates { states =>
-            // an address hosts a single registration: an earlier one, or one of another role, is gone
-            val (replaced, others) =
-              removePod(states, pod.address, p => p.pod.role != pod.role || p.pod.registration != pod.registration)
-            val current            = others.getOrElse(pod.role, ShardManagerState(config.numberOfShards(pod.role)))
-            val state              = current.copy(pods = current.pods.updated(pod.address, PodWithMetadata(pod, cdt)))
-            ((replaced, state.unassignedShards.nonEmpty), others.updated(pod.role, state))
-          }.flatMap { case (replaced, triggerRebalance) =>
-            ZIO.foreachDiscard(replaced)(announceUnregistered) *>
-              eventsHub.publish(ShardingEvent.PodRegistered(pod)) *>
-              ZIO.whenDiscard(triggerRebalance)(rebalance(pod.role, rebalanceImmediately = false).background(scope)) *>
-              persistPods.background(scope)
-          }.uninterruptible
-        // a client that stops waiting doesn't cancel the write
-        _         <- persisted.join
-      } yield (),
-      onFalse = ZIO.logWarning(s"Pod $pod requested to register but is not alive, ignoring") *>
-        ZIO.fail(new RuntimeException(s"Pod $pod is not healthy, refusing to register"))
-    )
+    findPod(pod.address).flatMap { before =>
+      ZIO.ifZIO(healthApi.isAlive(pod) && isCurrent(pod))(
+        onTrue = for {
+          _         <- ZIO.logInfo(s"Registering $pod")
+          cdt       <- ZIO.succeed(OffsetDateTime.now())
+          persisted <-
+            modifyStates { states =>
+              // checked against what the address had before: check again if it changed
+              if (podAt(states, pod.address) != before) (None, states)
+              else {
+                // an address hosts a single registration: an earlier one, or one of another role, is gone
+                val (replaced, others) =
+                  removePod(states, pod.address, p => p.pod.role != pod.role || p.pod.registration != pod.registration)
+                val current            = others.getOrElse(pod.role, ShardManagerState(config.numberOfShards(pod.role)))
+                val state              = current.copy(pods = current.pods.updated(pod.address, PodWithMetadata(pod, cdt)))
+                (Some((replaced, state.unassignedShards.nonEmpty)), others.updated(pod.role, state))
+              }
+            }.flatMap(ZIO.foreach(_) { case (replaced, triggerRebalance) =>
+              ZIO.foreachDiscard(replaced)(announceUnregistered) *>
+                eventsHub.publish(ShardingEvent.PodRegistered(pod)) *>
+                ZIO
+                  .whenDiscard(triggerRebalance)(rebalance(pod.role, rebalanceImmediately = false).background(scope)) *>
+                persistPods.background(scope)
+            }).uninterruptible
+          // a client that stops waiting doesn't cancel the write
+          _         <- persisted.fold(register(pod))(_.join)
+        } yield (),
+        onFalse = ZIO.logWarning(s"Pod $pod requested to register but is not alive or not registering, ignoring") *>
+          ZIO.fail(new RuntimeException(s"Pod $pod is not healthy or not registering, refusing to register"))
+      )
+    }
+
+  // a register request may arrive after the pod registered again: only the pod knows its current registration
+  private def isCurrent(pod: Pod): UIO[Boolean] =
+    podApi
+      .ping(pod.address)
+      .timeout(config.pingTimeout)
+      .map(_.exists(_.forall(_ == pod.registration)))
+      .orElseSucceed(false)
+
+  private def podAt(states: Map[Role, ShardManagerState], podAddress: PodAddress): Option[PodWithMetadata] =
+    states.values.iterator.flatMap(_.pods.get(podAddress)).nextOption()
 
   private def findPod(podAddress: PodAddress): UIO[Option[PodWithMetadata]] =
-    stateRef.get.map(_.values.iterator.flatMap(_.pods.get(podAddress)).nextOption())
+    stateRef.get.map(podAt(_, podAddress))
 
   // returns the removed pod with the shards it had
   private def removePod(

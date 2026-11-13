@@ -25,9 +25,9 @@ trait Pods {
   def unassignShards(pod: PodAddress, role: Role, registration: String, shards: Set[ShardId]): Task[Unit]
 
   /**
-   * Check that a pod is responsive
+   * Check that a pod is responsive, and get its current registration if it has one
    */
-  def ping(pod: PodAddress): Task[Unit]
+  def ping(pod: PodAddress): Task[Option[String]]
 
   /**
    * Send a message to a pod
@@ -62,7 +62,7 @@ object Pods {
         ZIO.unit
       def unassignShards(pod: PodAddress, role: Role, registration: String, shards: Set[ShardId]): Task[Unit] =
         ZIO.unit
-      def ping(pod: PodAddress): Task[Unit]                                                                   = ZIO.unit
+      def ping(pod: PodAddress): Task[Option[String]]                                                         = ZIO.none
       def sendMessage(pod: PodAddress, message: BinaryMessage): Task[BinaryReply]                             =
         ZIO.succeed(
           if (message.expectsReply) BinaryReply.Defect("Pods.noop sends no messages")

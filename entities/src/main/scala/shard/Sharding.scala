@@ -41,11 +41,13 @@ class Sharding private (
       fresh                   <- Random.nextUUID.map(_.toString)
       (registration, dropped) <-
         registrationRef.modifyZIO(current =>
-          isShuttingDownRef.getAndSet(false).flatMap {
+          isShuttingDownRef.get.flatMap {
             case false if current.isDefined => ZIO.succeed((current.get, Set.empty[ShardId]) -> current)
             case _                          =>
+              // entities start without the lock: the old shards are dropped before hosting resumes
               shardAssignments
                 .modify(map => (ownAssignments(map).keySet, map -- ownAssignments(map).keySet))
+                .zipLeft(isShuttingDownRef.set(false))
                 .map(dropped => (fresh, dropped) -> Some(fresh))
           }
         )
@@ -55,22 +57,29 @@ class Sharding private (
     } yield ()
 
   val unregister: UIO[Unit] =
-    (
-      // ping the shard manager first to stop if it's not available
-      shardManager.getAssignments(config.role) *>
-        ZIO.logDebug(s"Stopping local entities") *>
-        isShuttingDownRef.set(true) *>
-        entityManagers.flatMap(
-          ZIO.foreachParDiscard(_) { case (name, entity) =>
-            entity.terminateAllEntities.interruptible.forkDaemon // run in a daemon fiber to make sure it doesn't get interrupted
-              .flatMap(_.join)
-              .catchAllCause(ZIO.logErrorCause(s"Error during stop of entity $name", _))
-          }
-        ) *>
-        ZIO.logDebug(s"Unregistering pod $address to Shard Manager") *>
-        registrationRef.get.flatMap(ZIO.foreachDiscard(_)(shardManager.unregister(address, _)))
-    ).retry(config.unregisterRetrySchedule)
-      .catchAllCause(ZIO.logWarningCause("Error while unregistering from Shard Manager", _))
+    registrationRef.get.flatMap(ZIO.foreachDiscard(_) { registration =>
+      (
+        // ping the shard manager first to stop if it's not available
+        shardManager.getAssignments(config.role) *>
+          ifRegistration(registration)(isShuttingDownRef.set(true))
+      ).retry(config.unregisterRetrySchedule)
+        .flatMap {
+          case Some(_) =>
+            ZIO.logDebug(s"Stopping local entities") *>
+              entityManagers.flatMap(
+                ZIO.foreachParDiscard(_) { case (name, entity) =>
+                  entity.terminateAllEntities.interruptible.forkDaemon // run in a daemon fiber to make sure it doesn't get interrupted
+                    .flatMap(_.join)
+                    .catchAllCause(ZIO.logErrorCause(s"Error during stop of entity $name", _))
+                }
+              ) *>
+              registrationRef.update(_.filterNot(_ == registration)) *>
+              ZIO.logDebug(s"Unregistering pod $address to Shard Manager") *>
+              shardManager.unregister(address, registration).retry(config.unregisterRetrySchedule)
+          case None    => ZIO.unit
+        }
+        .catchAllCause(ZIO.logWarningCause("Error while unregistering from Shard Manager", _))
+    })
 
   val isSingletonNode: UIO[Boolean] =
     // Start singletons on the pod hosting shard 1.
@@ -201,28 +210,33 @@ class Sharding private (
   ): UIO[Unit] = {
     val assignments = assignmentsOpt.flatMap { case (k, v) => v.map(k -> _) }
     ZIO.logDebug("Received new shard assignments") *>
-      isShuttingDown.flatMap { shuttingDown =>
-        shardAssignments.modify {
-          case map if readFrom.exists(_ ne map) => (0, map)
-          case map                              =>
-            // we keep self assignments (we don't override them with the new assignments)
-            // because only the Shard Manager is able to change assignments of the current node, via assign/unassign.
-            // Once the pod unregistered, the Shard Manager takes its shards back without calling unassign,
-            // so we drop the self assignments that the new assignments no longer give to this pod.
-            val (self, dropped) = ownAssignments(map).partition { case (shard, _) =>
-              !shuttingDown || assignments.get(shard).contains(address)
+      // under the lock, so that the flag is the one of the registration whose assignments are updated
+      registrationRef
+        .modifyZIO(current =>
+          isShuttingDown.flatMap { shuttingDown =>
+            shardAssignments.modify {
+              case map if readFrom.exists(_ ne map) => (0, map)
+              case map                              =>
+                // we keep self assignments (we don't override them with the new assignments)
+                // because only the Shard Manager is able to change assignments of the current node, via assign/unassign.
+                // Once the pod unregistered, the Shard Manager takes its shards back without calling unassign,
+                // so we drop the self assignments that the new assignments no longer give to this pod.
+                val (self, dropped) = ownAssignments(map).partition { case (shard, _) =>
+                  !shuttingDown || assignments.get(shard).contains(address)
+                }
+                (dropped.size, assignments.filter { case (_, pod) => pod != address } ++ self)
             }
-            (dropped.size, assignments.filter { case (_, pod) => pod != address } ++ self)
-        }
-      }.flatMap(removed =>
-        ZIO
-          .when(removed > 0)(
-            Metrics.shards.tagged("role", config.role.name).decrementBy(removed) *>
-              stopSingletonsInBackground *>
-              ZIO.logDebug(s"Removed $removed shards taken back by the Shard Manager")
-          )
-          .unit
-      )
+          }.map(_ -> current)
+        )
+        .flatMap(removed =>
+          ZIO
+            .when(removed > 0)(
+              Metrics.shards.tagged("role", config.role.name).decrementBy(removed) *>
+                stopSingletonsInBackground *>
+                ZIO.logDebug(s"Removed $removed shards taken back by the Shard Manager")
+            )
+            .unit
+        )
   }
 
   // a message can't reach its entity: a notification of the storage may have been missed (e.g. while reconnecting)

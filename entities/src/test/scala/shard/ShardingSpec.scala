@@ -240,6 +240,43 @@ object ShardingSpec extends ZIOSpecDefault {
           ZLayer.succeed(config)
         )
       },
+      test("An unregister doesn't end a registration made while it stops the entities") {
+        val config = Config.default
+        (for {
+          unregistered    <- Ref.make(List.empty[String])
+          manager          = new ShardManagerClient {
+                               def register(podAddress: PodAddress, role: Role, registration: String): Task[Set[ShardId]] =
+                                 ZIO.succeed(Set.empty)
+                               def unregister(podAddress: PodAddress, registration: String): Task[Unit]                   =
+                                 unregistered.update(_ :+ registration)
+                               def notifyUnhealthyPod(podAddress: PodAddress): Task[Unit]                                 = ZIO.unit
+                               def getAssignments(role: Role): Task[Map[ShardId, Option[PodAddress]]]                     =
+                                 ZIO.succeed(Map.empty)
+                             }
+          (first, second) <- (for {
+                               sharding    <- ZIO.service[Sharding]
+                               state       <- WorkerState.make
+                               _           <- Sharding.registerEntity(Worker)(worker(state))
+                               _           <- Sharding.register
+                               first       <- sharding.registration.someOrFailException
+                               _           <- sharding.assignShards(Set(sharding.getShardId(Worker, "w1")))
+                               _           <- Sharding.messenger(Worker).flatMap(_.sendDiscard("w1")(Gated()))
+                               _           <- state.running.changes.takeUntil(_ == 1).runDrain
+                               stopping    <- Sharding.unregister.fork
+                               _           <- sharding.isShuttingDown.repeatUntil(identity)
+                               registering <- Sharding.register.fork
+                               second      <- sharding.registration.repeatUntil(_.exists(_ != first))
+                               _           <- state.gate.succeed(()) *> stopping.join *> registering.join
+                             } yield (first, second)).provideSome[Scope](
+                               Sharding.live,
+                               Pods.noop,
+                               ZLayer.succeed(manager),
+                               Storage.memory,
+                               ZLayer.succeed(config)
+                             )
+          sent            <- unregistered.get
+        } yield assertTrue(sent == List(first), second.isDefined))
+      },
       test("A duplex whose inputs were read is not sent again when its pod becomes unavailable") {
         for {
           attempts <- Ref.make(0)
@@ -412,7 +449,7 @@ object ShardingSpec extends ZIOSpecDefault {
     new Pods {
       def assignShards(pod: PodAddress, role: Role, registration: String, shards: Set[ShardId]): Task[Unit]   = ZIO.unit
       def unassignShards(pod: PodAddress, role: Role, registration: String, shards: Set[ShardId]): Task[Unit] = ZIO.unit
-      def ping(pod: PodAddress): Task[Unit]                                                                   = ZIO.unit
+      def ping(pod: PodAddress): Task[Option[String]]                                                         = ZIO.none
       def sendMessage(pod: PodAddress, message: BinaryMessage): Task[BinaryReply]                             = onSend(pod)
       def sendStream(pod: PodAddress, messages: ZStream[Any, Nothing, BinaryMessage]): Task[BinaryReply]      =
         ZIO.fail(PodUnavailable(pod))

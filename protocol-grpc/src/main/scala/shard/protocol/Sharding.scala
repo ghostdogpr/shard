@@ -18,7 +18,7 @@ object Sharding {
   case class SendResponse(reply: BinaryReply) derives ProtobufCodec
 
   case class PingShardsRequest() derives ProtobufCodec
-  case class PingShardsResponse() derives ProtobufCodec
+  case class PingShardsResponse(registration: Option[String]) derives ProtobufCodec
 
   val assignShards               = Rpc.unary[AssignShardsRequest, AssignShardsResponse]("AssignShards")
   val unassignShards             = Rpc.unary[UnassignShardsRequest, UnassignShardsResponse]("UnassignShards")

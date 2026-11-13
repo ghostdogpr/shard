@@ -81,4 +81,6 @@ message SendResponse {
 
 message PingShardsRequest {}
 
-message PingShardsResponse {}
+message PingShardsResponse {
+    optional string registration = 1;
+}

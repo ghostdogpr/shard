@@ -66,7 +66,7 @@ It is used both by the Shard Manager for assigning and unassigning shards, and b
 trait Pods {
   def assignShards(pod: PodAddress, role: Role, registration: String, shards: Set[ShardId]): Task[Unit]
   def unassignShards(pod: PodAddress, role: Role, registration: String, shards: Set[ShardId]): Task[Unit]
-  def ping(pod: PodAddress): Task[Unit]
+  def ping(pod: PodAddress): Task[Option[String]]
 
   def sendMessage(pod: PodAddress, message: BinaryMessage): Task[BinaryReply]
   def sendStream(pod: PodAddress, messages: ZStream[Any, Nothing, BinaryMessage]): Task[BinaryReply]
@@ -76,7 +76,7 @@ trait Pods {
   ): ZStream[Any, Throwable, BinaryReply]
 }
 ```
-A pod must reject `assignShards` and `unassignShards` for a role other than its own, since its address may have previously belonged to a pod of another role, and for a registration other than its current one, since the call may have been made for a previous registration of the pod or a previous process at its address.
+A pod must reject `assignShards` and `unassignShards` for a role other than its own, since its address may have previously belonged to a pod of another role, and for a registration other than its current one, since the call may have been made for a previous registration of the pod or a previous process at its address. `ping` returns the current registration of the pod, if it has one: the Shard Manager refuses a `register` request for another registration, which may have arrived late.
 
 For testing, you can use the `Pods.noop` layer that does nothing.
 

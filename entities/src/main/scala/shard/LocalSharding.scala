@@ -17,7 +17,7 @@ object LocalSharding {
         ZIO.unit
       def unassignShards(pod: PodAddress, role: Role, registration: String, shards: Set[ShardId]): Task[Unit] =
         ZIO.unit
-      def ping(pod: PodAddress): Task[Unit]                                                                   = ZIO.unit
+      def ping(pod: PodAddress): Task[Option[String]]                                                         = ZIO.none
 
       def sendMessage(pod: PodAddress, message: BinaryMessage): Task[BinaryReply] =
         sharding.await.flatMap(_.sendToLocalEntity(message))

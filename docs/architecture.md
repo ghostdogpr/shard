@@ -39,7 +39,7 @@ See [Configuration](config.md#sharding-configuration) for how to configure roles
 
 1. Pod gets shard assignments from the Storage layer, except the shards of its own address, which belong to a previous registration.
 2. Pod exposes the sharding API (e.g. starts a gRPC server) so that it can be contacted by the Shard Manager and other pods.
-3. Pod calls the `register` endpoint of the Shard Manager with a new registration id, which replaces any previous registration at its address and unassigns its shards. This will eventually trigger a rebalance, and some shards may be assigned to this pod.
+3. Pod calls the `register` endpoint of the Shard Manager with a new registration id, which replaces any previous registration at its address and unassigns its shards. The Shard Manager first pings the pod, and refuses the request if the pod reports another registration. This will eventually trigger a rebalance, and some shards may be assigned to this pod.
 When that happens, the Shard Manager will call the `assign` API of this pod with the registration id, and the pod rejects the calls for another registration.
 
 ### Pod Stop (`Sharding#unregister`)

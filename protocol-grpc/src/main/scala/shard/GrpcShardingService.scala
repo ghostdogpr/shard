@@ -74,7 +74,7 @@ object GrpcShardingService {
         (requests: ZStream[Any, StatusException, BinaryMessage]) =>
           sharding.sendStreamToLocalEntityAndReceiveStream(requests).mapBoth(mapErrorToStatus, SendResponse(_))
       )
-      .rpc(Sharding.pingShards, (_: PingShardsRequest) => ZIO.succeed(PingShardsResponse()))
+      .rpc(Sharding.pingShards, (_: PingShardsRequest) => sharding.registration.map(PingShardsResponse(_)))
       .build(Sharding.service)
 
   /**

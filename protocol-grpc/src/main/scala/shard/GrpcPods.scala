@@ -55,8 +55,8 @@ class GrpcPods(
   def unassignShards(pod: PodAddress, role: Role, registration: String, shards: Set[ShardId]): Task[Unit] =
     getConnection(pod).flatMap(_.unassignShards(UnassignShardsRequest(shards.toList, role.name, registration)).unit)
 
-  def ping(pod: PodAddress): Task[Unit] =
-    getConnection(pod).flatMap(_.pingShards(PingShardsRequest()).unit)
+  def ping(pod: PodAddress): Task[Option[String]] =
+    getConnection(pod).flatMap(_.pingShards(PingShardsRequest()).map(_.registration))
 
   private def singleReply(pod: PodAddress)(response: IO[StatusException, SendResponse]): Task[BinaryReply] =
     response.mapBoth(mapClientError(pod, streamedReplies = false), _.reply)

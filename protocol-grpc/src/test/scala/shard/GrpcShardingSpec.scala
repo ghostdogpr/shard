@@ -67,7 +67,7 @@ object GrpcShardingSpec extends ZIOSpecDefault {
           test("Composed server interceptors run in sequence order") {
             type Ping = PingShardsRequest
             type Pong = PingShardsResponse
-            val pong: UIO[Pong]                   = ZIO.succeed(PingShardsResponse())
+            val pong: UIO[Pong]                   = ZIO.succeed(PingShardsResponse(None))
             val ctx                               = GrpcContext(
               new Metadata(),
               new Metadata(),
@@ -122,7 +122,9 @@ object GrpcShardingSpec extends ZIOSpecDefault {
               self     <- ZIO.serviceWith[Config](config => PodAddress(config.selfHost, config.shardingPort))
               scope    <- Scope.make
               pods     <- scope.extend((ZLayer.succeed(GrpcConfig.default) >>> GrpcPods.live).build).map(_.get[Pods])
-              _        <- pods.ping(self).uninterruptible
+              _        <- Sharding.registerScoped
+              current  <- ZIO.serviceWithZIO[Sharding](_.registration)
+              pinged   <- pods.ping(self).uninterruptible
               // the pod rejects shards of another role or registration
               other     = Role("other")
               assign   <- pods.assignShards(self, other, "r", Set.empty).exit
@@ -133,6 +135,8 @@ object GrpcShardingSpec extends ZIOSpecDefault {
               // the same pod under another address, so that a new connection is opened
               late     <- pods.ping(self.copy(host = "127.0.0.1")).exit
             } yield assertTrue(
+              pinged.isDefined,
+              pinged == current,
               assign.isFailure,
               unassign.isFailure,
               empty.isFailure,
