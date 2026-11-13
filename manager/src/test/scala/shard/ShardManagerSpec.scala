@@ -331,6 +331,7 @@ object ShardManagerSpec extends ZIOSpecDefault {
                            def isAlive(pod: Pod): UIO[Boolean] = checks.update(_ + 1).as(pod != deadPod)
                          })
             blocked   <- Ref.make(false)
+            stuck     <- Promise.make[Nothing, Unit]
             closing   <- Ref.make(false)
             shutdown  <- Ref.make(Set.empty[Role])
             // the first write of pod4's assignments never returns, even interrupted, which must not block the others,
@@ -349,7 +350,8 @@ object ShardManagerSpec extends ZIOSpecDefault {
                                    blocked
                                      .modify(done => (role == pod4.role && !done, done || role == pod4.role))
                                      .flatMap(block =>
-                                       if (block) ZIO.never.uninterruptible else memory.saveAssignments(role, assignments)
+                                       if (block) stuck.succeed(()) *> ZIO.never.uninterruptible
+                                       else memory.saveAssignments(role, assignments)
                                      )
                                }
                            }
@@ -379,6 +381,11 @@ object ShardManagerSpec extends ZIOSpecDefault {
                                                             ) <* Schedule.spaced(10.millis)
                                                           )
                                                           .timeoutFail(new Exception("assignments not persisted"))(5.seconds)
+                                                      )
+                                       _           <- Live.live(
+                                                        stuck.await.timeoutFail(new Exception("pod4's write didn't start"))(
+                                                          5.seconds
+                                                        )
                                                       )
                                        _           <- closing.set(true)
                                      } yield assertTrue(
