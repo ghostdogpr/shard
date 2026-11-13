@@ -63,10 +63,14 @@ object ShardingSpec extends ZIOSpecDefault {
         },
         test("A pod that unregistered sends messages to the pod that took its shards, and stops its singletons") {
           for {
+            started <- Promise.make[Nothing, Unit]
             stopped <- Promise.make[Nothing, Unit]
-            _       <- Sharding.registerSingleton("singleton", ZIO.never.onInterrupt(stopped.succeed(())))
+            _       <- Sharding.registerSingleton(
+                         "singleton",
+                         (started.succeed(()) *> ZIO.never).onInterrupt(stopped.succeed(()))
+                       )
             _       <- Sharding.registerEntity(Counter)(behavior)
-            _       <- Sharding.registerScoped
+            _       <- Sharding.registerScoped *> started.await
             counter <- Sharding.messenger(Counter, MessengerTimeout.Timeout(5.seconds))
             _       <- counter.send("c1")(IncrementCounter())        // handled locally
             _       <- Sharding.unregister
@@ -96,12 +100,13 @@ object ShardingSpec extends ZIOSpecDefault {
       ),
       test("A singleton that unregisters the pod when it stops doesn't block the next registration") {
         for {
-          finalizing <- Promise.make[Nothing, Unit]
+          started    <- Promise.make[Nothing, Unit]
+          stopped    <- Promise.make[Nothing, Unit]
           registers  <- Ref.make(0)
           manager     = LocalShardManagerClient.live.project(local =>
                           new ShardManagerClient {
                             def register(podAddress: PodAddress, role: Role, registration: String): Task[Set[ShardId]] =
-                              registers.getAndUpdate(_ + 1).flatMap(n => finalizing.await.when(n == 1)) *>
+                              registers.getAndUpdate(_ + 1).flatMap(n => stopped.await.when(n == 1)) *>
                                 local.register(podAddress, role, registration)
                             def unregister(podAddress: PodAddress, registration: String): Task[Unit]                   =
                               local.unregister(podAddress, registration)
@@ -113,8 +118,8 @@ object ShardingSpec extends ZIOSpecDefault {
                         )
           registered <- (Sharding.registerSingleton(
                           "singleton",
-                          ZIO.never.onInterrupt(finalizing.succeed(()) *> Sharding.unregister)
-                        ) *> Sharding.register *> Sharding.unregister *> Sharding.register.exit <*>
+                          (started.succeed(()) *> ZIO.never).onInterrupt(Sharding.unregister *> stopped.succeed(()))
+                        ) *> Sharding.register *> started.await *> Sharding.unregister *> Sharding.register.exit <*>
                           ZIO.serviceWithZIO[Sharding](_.registration)).provide(
                           Sharding.live,
                           Pods.noop,
@@ -122,7 +127,7 @@ object ShardingSpec extends ZIOSpecDefault {
                           Storage.memory,
                           ZLayer.succeed(Config.default)
                         )
-        } yield assertTrue(registered._1.isSuccess == registered._2.isDefined)
+        } yield assertTrue(registered._1.isFailure, registered._2.isEmpty)
       } @@ TestAspect.timeout(10.seconds),
       test("A pod that unregistered stops its singletons when it reconnects to the storage") {
         val config = Config.default.copy(refreshAssignmentsRetryInterval = 10.millis)
@@ -130,11 +135,16 @@ object ShardingSpec extends ZIOSpecDefault {
         for {
           assignments <- Ref.make(Map(1 -> Option(self)))
           disconnect  <- Promise.make[Nothing, Unit]
+          started     <- Promise.make[Nothing, Unit]
           stopped     <- Promise.make[Nothing, Unit]
           reconnected <- Promise.make[Nothing, Unit]
           storage     <- reconnectingStorage(assignments, disconnect, reconnected)
-          _           <- (Sharding.registerSingleton("singleton", ZIO.never.onInterrupt(stopped.succeed(()))) *>
+          _           <- (Sharding.registerSingleton(
+                           "singleton",
+                           (started.succeed(()) *> ZIO.never).onInterrupt(stopped.succeed(()))
+                         ) *>
                            Sharding.register *>
+                           started.await *>
                            Sharding.unregister *>
                            disconnect.succeed(()) *>
                            stopped.await).provide(
@@ -153,20 +163,23 @@ object ShardingSpec extends ZIOSpecDefault {
           assignments <- Ref.make(Map(1 -> Option(self)))
           disconnect  <- Promise.make[Nothing, Unit]
           release     <- Promise.make[Nothing, Unit]
+          started     <- Promise.make[Nothing, Unit]
           reconnected <- Promise.make[Nothing, Unit]
           storage     <- reconnectingStorage(assignments, disconnect, reconnected)
-          result      <- (Sharding.registerSingleton("singleton", ZIO.never.onInterrupt(release.await)) *>
-                           Sharding.register *>
-                           Sharding.unregister *>
-                           disconnect.succeed(()) *>
-                           reconnected.await.timeout(5.seconds) <*
-                           release.succeed(())).provide(
-                           Sharding.live,
-                           Pods.noop,
-                           ZLayer.succeed(takingShardsBack(assignments)),
-                           ZLayer.succeed(storage),
-                           ZLayer.succeed(config)
-                         )
+          result      <-
+            (Sharding.registerSingleton("singleton", (started.succeed(()) *> ZIO.never).onInterrupt(release.await)) *>
+              Sharding.register *>
+              started.await *>
+              Sharding.unregister *>
+              disconnect.succeed(()) *>
+              reconnected.await.timeout(5.seconds) <*
+              release.succeed(())).provide(
+              Sharding.live,
+              Pods.noop,
+              ZLayer.succeed(takingShardsBack(assignments)),
+              ZLayer.succeed(storage),
+              ZLayer.succeed(config)
+            )
         } yield assertTrue(result.isDefined)
       },
       test("A snapshot fetched before the Shard Manager assigned shards to the pod doesn't undo the assignment") {
@@ -323,6 +336,160 @@ object ShardingSpec extends ZIOSpecDefault {
           regs.map(_._1).distinct.size == 2
         )
       },
+      test("A singleton that registers the pod when it stops doesn't block the shards given back to the pod") {
+        val config  = Config.default
+        val manager = new ShardManagerClient {
+          def register(podAddress: PodAddress, role: Role, registration: String): Task[Set[ShardId]] =
+            ZIO.succeed(Set.empty)
+          def unregister(podAddress: PodAddress, registration: String): Task[Unit]                   = ZIO.unit
+          def notifyUnhealthyPod(podAddress: PodAddress): Task[Unit]                                 = ZIO.unit
+          def getAssignments(role: Role): Task[Map[ShardId, Option[PodAddress]]]                     = ZIO.succeed(Map.empty)
+        }
+        (for {
+          started     <- Promise.make[Nothing, Unit]
+          finalizing  <- Promise.make[Nothing, Unit]
+          gate        <- Promise.make[Nothing, Unit]
+          sharding    <- ZIO.service[Sharding]
+          _           <- Sharding.registerSingleton(
+                           "singleton",
+                           (started.succeed(()) *> ZIO.never).onInterrupt(
+                             finalizing.succeed(()) *> gate.await *> Sharding.register.orDie
+                           )
+                         )
+          _           <- Sharding.register
+          _           <- sharding.assignShards(Set(1)) *> started.await
+          unassigning <- sharding.unassignShards(Set(1)).fork
+          _           <- finalizing.await
+          givenBack   <- sharding.assignShards(Set(1)).fork
+          _           <- sharding.thisPodAssignments.repeatUntil(_.contains(1))
+          _           <- gate.succeed(())
+          _           <- unassigning.join *> givenBack.join
+        } yield assertCompletes).provide(
+          Sharding.live,
+          Pods.noop,
+          ZLayer.succeed(manager),
+          Storage.memory,
+          ZLayer.succeed(config)
+        )
+      } @@ TestAspect.timeout(10.seconds),
+      test("A singleton that registers the pod when it stops doesn't block the next registration") {
+        for {
+          started     <- Promise.make[Nothing, Unit]
+          interrupted <- Promise.make[Nothing, Unit]
+          registered  <- Promise.make[Nothing, Exit[Throwable, Unit]]
+          registers   <- Ref.make(0)
+          manager      = LocalShardManagerClient.live.project(local =>
+                           new ShardManagerClient {
+                             def register(podAddress: PodAddress, role: Role, registration: String): Task[Set[ShardId]] =
+                               registers.getAndUpdate(_ + 1).flatMap(n => interrupted.await.when(n == 1)) *>
+                                 local.register(podAddress, role, registration)
+                             def unregister(podAddress: PodAddress, registration: String): Task[Unit]                   =
+                               local.unregister(podAddress, registration)
+                             def notifyUnhealthyPod(podAddress: PodAddress): Task[Unit]                                 =
+                               local.notifyUnhealthyPod(podAddress)
+                             def getAssignments(role: Role): Task[Map[ShardId, Option[PodAddress]]]                     =
+                               local.getAssignments(role)
+                           }
+                         )
+          _           <- (Sharding.registerSingleton(
+                           "singleton",
+                           (started.succeed(()) *> ZIO.never).onInterrupt(
+                             interrupted.succeed(()) *> Sharding.register.exit.flatMap(registered.succeed)
+                           )
+                         ) *> Sharding.register *> started.await *> Sharding.unregister *> Sharding.register *>
+                           registered.await).provide(
+                           Sharding.live,
+                           Pods.noop,
+                           manager,
+                           Storage.memory,
+                           ZLayer.succeed(Config.default)
+                         )
+          exit        <- registered.await
+        } yield assertTrue(exit.isSuccess)
+      } @@ TestAspect.timeout(10.seconds),
+      test("A singleton that registers another one when it stops doesn't block the closing of Sharding") {
+        for {
+          started <- Promise.make[Nothing, Unit]
+          _       <- (Sharding.registerSingleton(
+                       "singleton",
+                       (started.succeed(()) *> ZIO.never).onInterrupt(Sharding.registerSingleton("other", ZIO.never))
+                     ) *> Sharding.register *> started.await).provide(
+                       Sharding.live,
+                       Pods.noop,
+                       LocalShardManagerClient.live,
+                       Storage.memory,
+                       ZLayer.succeed(Config.default)
+                     )
+        } yield assertCompletes
+      } @@ TestAspect.timeout(10.seconds),
+      test("An unassign while Sharding closes replies once its singletons stopped") {
+        val config  = Config.default
+        val manager = new ShardManagerClient {
+          def register(podAddress: PodAddress, role: Role, registration: String): Task[Set[ShardId]] =
+            ZIO.succeed(Set.empty)
+          def unregister(podAddress: PodAddress, registration: String): Task[Unit]                   = ZIO.unit
+          def notifyUnhealthyPod(podAddress: PodAddress): Task[Unit]                                 = ZIO.unit
+          def getAssignments(role: Role): Task[Map[ShardId, Option[PodAddress]]]                     = ZIO.succeed(Map.empty)
+        }
+        for {
+          started  <- Promise.make[Nothing, Unit]
+          stopping <- Promise.make[Nothing, Unit]
+          gate     <- Promise.make[Nothing, Unit]
+          stopped  <- Ref.make(false)
+          scope    <- Scope.make
+          env      <-
+            scope.extend(
+              (ZLayer.succeed(config) ++ ZLayer.succeed(manager) ++ Pods.noop ++ Storage.memory >>> Sharding.live).build
+            )
+          sharding  = env.get[Sharding]
+          _        <- sharding.registerSingleton(
+                        "singleton",
+                        (started.succeed(()) *> ZIO.never).onInterrupt(stopping.succeed(()) *> gate.await *> stopped.set(true))
+                      )
+          _        <- sharding.register *> sharding.assignShards(Set(1)) *> started.await
+          closing  <- scope.close(Exit.unit).fork
+          _        <- stopping.await
+          cancel   <- closing.interrupt.fork
+          moving   <- (sharding.unassignShards(Set(1)) *> stopped.get).fork
+          _        <- sharding.thisPodAssignments.repeatUntil(!_.contains(1)) *> ZIO.yieldNow.repeatN(1000)
+          early    <- moving.poll
+          _        <- gate.succeed(())
+          after    <- moving.join
+          _        <- cancel.join
+        } yield assertTrue(early.isEmpty, after)
+      } @@ TestAspect.timeout(10.seconds),
+      test("A singleton that registers a stopped pod when its shard moves doesn't block the pod") {
+        val config  = Config.default
+        val self    = PodAddress(config.selfHost, config.shardingPort)
+        val manager = new ShardManagerClient {
+          def register(podAddress: PodAddress, role: Role, registration: String): Task[Set[ShardId]] =
+            ZIO.succeed(Set.empty)
+          def unregister(podAddress: PodAddress, registration: String): Task[Unit]                   = ZIO.unit
+          def notifyUnhealthyPod(podAddress: PodAddress): Task[Unit]                                 = ZIO.unit
+          def getAssignments(role: Role): Task[Map[ShardId, Option[PodAddress]]]                     = ZIO.succeed(Map.empty)
+        }
+        (for {
+          started    <- Promise.make[Nothing, Unit]
+          registered <- Promise.make[Nothing, Exit[Throwable, Unit]]
+          sharding   <- ZIO.service[Sharding]
+          _          <- Sharding.registerSingleton(
+                          "singleton",
+                          (started.succeed(()) *> ZIO.never).onInterrupt(Sharding.register.exit.flatMap(registered.succeed))
+                        )
+          _          <- Sharding.register
+          _          <- sharding.assignShards(Set(1, 2)) *> started.await
+          _          <- Sharding.unregister
+          _          <- ZIO.serviceWithZIO[Storage](_.saveAssignments(config.role, Map(1 -> Some(otherPod), 2 -> Some(self))))
+          exit       <- registered.await
+          _          <- sharding.assignShards(Set(1))
+        } yield assertTrue(exit.isSuccess)).provide(
+          Sharding.live,
+          Pods.noop,
+          ZLayer.succeed(manager),
+          Storage.memory,
+          ZLayer.succeed(config)
+        )
+      } @@ TestAspect.timeout(10.seconds),
       test("A duplex whose inputs were read is not sent again when its pod becomes unavailable") {
         for {
           attempts <- Ref.make(0)

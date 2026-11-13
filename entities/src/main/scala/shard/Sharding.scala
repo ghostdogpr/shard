@@ -22,7 +22,10 @@ class Sharding private (
   config: Config,
   shardAssignments: Ref[Map[ShardId, PodAddress]],
   entityStates: Ref.Synchronized[Map[String, Option[EntityManager[?]]]], // None once its registration has closed
-  singletons: Ref.Synchronized[List[(String, UIO[Nothing], Option[Fiber[Nothing, Nothing]])]],
+  // Left once Sharding closed, completed once its singletons stopped
+  singletons: Ref.Synchronized[
+    Either[Promise[Nothing, Unit], List[(String, UIO[Nothing], Option[Fiber[Nothing, Nothing]])]]
+  ],
   lastUnhealthyNodeReported: Ref[OffsetDateTime],
   lastStaleRefresh: Ref[Long],
   isShuttingDownRef: Ref[Boolean],
@@ -40,9 +43,10 @@ class Sharding private (
       _            <- ZIO.logDebug(s"Registering pod $address to Shard Manager")
       registration <- startRegistration
       shards       <- shardManager.register(address, config.role, registration)
-      _            <- ZIO.unlessZIO(assign(registration, shards))(
-                        ZIO.fail(new RuntimeException(s"Pod $address unregistered while registering"))
-                      )
+      // without shards, no singleton work: a singleton stopping may be waiting for this registration
+      current       = if (shards.isEmpty) registrationRef.get.map(_.contains(registration))
+                      else assign(registration, shards)
+      _            <- ZIO.unlessZIO(current)(ZIO.fail(new RuntimeException(s"Pod $address unregistered while registering")))
     } yield ()
 
   // the current registration, or a new one once the entities of the previous one stopped
@@ -64,7 +68,9 @@ class Sharding private (
               }
             )
             .flatMap {
-              case Some(dropped) => release(dropped, dropped.size).when(dropped.nonEmpty).as(fresh)
+              // a singleton's finalizer may call register, which would wait for the singleton to stop
+              case Some(dropped) =>
+                (terminateShards(dropped, dropped.size) *> stopSingletonsInBackground).when(dropped.nonEmpty).as(fresh)
               case None          => startRegistration
             }
         }
@@ -110,42 +116,55 @@ class Sharding private (
   // and again under it, to act on the latest assignments
   private def startSingletonsIfNeeded: UIO[Unit] =
     ZIO.whenZIODiscard(isSingletonNode) {
-      singletons.updateZIO { singletons =>
-        ZIO.ifZIO(isSingletonNode)(
-          onTrue = ZIO.foreach(singletons) {
-            case (name, run, None) =>
-              ZIO.logDebug(s"Starting singleton $name") *>
-                Metrics.singletons.tagged("role", config.role.name).tagged("singleton_name", name).increment *>
-                run.interruptible.forkDaemon.map(fiber => (name, run, Some(fiber)))
-            case other             => ZIO.succeed(other)
-          },
-          onFalse = ZIO.succeed(singletons)
-        )
+      singletons.updateZIO {
+        case Right(singletons) =>
+          ZIO
+            .ifZIO(isSingletonNode)(
+              onTrue = ZIO.foreach(singletons) {
+                case (name, run, None) =>
+                  ZIO.logDebug(s"Starting singleton $name") *>
+                    Metrics.singletons.tagged("role", config.role.name).tagged("singleton_name", name).increment *>
+                    run.interruptible.forkDaemon.map(fiber => (name, run, Some(fiber)))
+                case other             => ZIO.succeed(other)
+              },
+              onFalse = ZIO.succeed(singletons)
+            )
+            .map(Right(_))
+        case closed            => ZIO.succeed(closed)
       }
     }
 
+  // once Sharding closed, waits for its singletons to stop, without the lock
   private def stopSingletonsIfNeeded: UIO[Unit] =
     ZIO.unlessZIODiscard(isSingletonNode) {
-      singletons.updateZIO { singletons =>
-        ZIO.ifZIO(isSingletonNode)(
-          onTrue = ZIO.succeed(singletons),
-          onFalse = ZIO.foreach(singletons) {
-            case (name, run, Some(fiber)) =>
-              ZIO.logDebug(s"Stopping singleton $name") *>
-                Metrics.singletons.tagged("role", config.role.name).tagged("singleton_name", name).decrement *>
-                fiber.interrupt.as((name, run, None))
-            case other                    => ZIO.succeed(other)
-          }
-        )
-      }
+      singletons.modifyZIO {
+        case Left(stopped)     => ZIO.succeed(stopped.await -> Left(stopped))
+        case Right(singletons) =>
+          ZIO
+            .ifZIO(isSingletonNode)(
+              onTrue = ZIO.succeed(singletons),
+              onFalse = ZIO.foreach(singletons) {
+                case (name, run, Some(fiber)) =>
+                  ZIO.logDebug(s"Stopping singleton $name") *>
+                    Metrics.singletons.tagged("role", config.role.name).tagged("singleton_name", name).decrement *>
+                    fiber.interrupt.as((name, run, None))
+                case other                    => ZIO.succeed(other)
+              }
+            )
+            .map(ZIO.unit -> Right(_))
+      }.flatten
     }
 
   // a singleton slow to stop must not delay the processing of the assignments
   private def stopSingletonsInBackground: UIO[Unit] =
     stopSingletonsIfNeeded.forkDaemon.unit
 
+  // a singleton stopping holds the lock until its finalizer ends, and that finalizer may call register
+  private def startSingletonsInBackground: UIO[Unit] =
+    startSingletonsIfNeeded.forkDaemon.unit
+
   def registerSingleton[R](name: String, run: URIO[R, Nothing]): URIO[R, Unit] =
-    ZIO.environment[R].flatMap(env => singletons.update(list => (name, run.provideEnvironment(env), None) :: list)) <*
+    ZIO.environment[R].flatMap(env => singletons.update(_.map((name, run.provideEnvironment(env), None) :: _))) <*
       startSingletonsIfNeeded *>
       eventsHub.publish(ShardingRegistrationEvent.SingletonRegistered(name)).unit
 
@@ -164,7 +183,7 @@ class Sharding private (
     ).flatMap {
       case Some(Some(added)) =>
         Metrics.shards.tagged("role", config.role.name).incrementBy(added) *>
-          startSingletonsIfNeeded *>
+          startSingletonsInBackground *>
           ZIO.logDebug(s"Assigned shards: ${renderShardIds(shards)}").as(true)
       case Some(None)        => ZIO.succeed(true)
       case None              => ZIO.succeed(false)
@@ -185,13 +204,15 @@ class Sharding private (
     }
 
   private def release(shards: Set[ShardId], removed: Int): UIO[Unit] =
+    terminateShards(shards, removed) *> stopSingletonsIfNeeded
+
+  private def terminateShards(shards: Set[ShardId], removed: Int): UIO[Unit] =
     entityManagers.flatMap(state =>
       ZIO.foreachParDiscard(state.values)(
         _.terminateEntitiesOnShards(shards) // this will return once all shards are terminated
       )
     ) *>
-      Metrics.shards.tagged("role", config.role.name).decrementBy(removed) *>
-      stopSingletonsIfNeeded
+      Metrics.shards.tagged("role", config.role.name).decrementBy(removed)
 
   def getPodAddress(recipientType: RecipientType[?], entityId: String): UIO[Option[PodAddress]] =
     for {
@@ -741,16 +762,20 @@ object Sharding {
         storage                   <- ZIO.service[Storage]
         shardsCache               <- Ref.make(Map.empty[ShardId, PodAddress])
         entityStates              <- Ref.Synchronized.make[Map[String, Option[EntityManager[?]]]](Map())
-        singletons                <- Ref.Synchronized
-                                       .make[List[(String, UIO[Nothing], Option[Fiber[Nothing, Nothing]])]](Nil)
-                                       .withFinalizer(
-                                         _.get.flatMap(singletons =>
-                                           ZIO.foreach(singletons) {
-                                             case (_, _, Some(fiber)) => fiber.interrupt
-                                             case _                   => ZIO.unit
-                                           }
-                                         )
-                                       )
+        stopped                   <- Promise.make[Nothing, Unit]
+        singletons                <-
+          Ref.Synchronized
+            .make[Either[Promise[Nothing, Unit], List[(String, UIO[Nothing], Option[Fiber[Nothing, Nothing]])]]](
+              Right(Nil)
+            )
+            // closed under the lock, so that a start in the background can't follow it, and
+            // interrupted without it, since a singleton's finalizer may register another
+            .withFinalizer(
+              _.modify(singletons => (singletons.toSeq.flatten.flatMap(_._3), Left(stopped)))
+                .flatMap(ZIO.foreachDiscard(_)(_.interrupt))
+                .zipRight(stopped.succeed(()))
+                .uninterruptible
+            )
         cdt                       <- Clock.currentDateTime
         lastUnhealthyNodeReported <- Ref.make(cdt)
         lastStaleRefresh          <- Clock.nanoTime.flatMap(Ref.make(_))
