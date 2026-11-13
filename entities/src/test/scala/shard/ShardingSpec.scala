@@ -181,6 +181,31 @@ object ShardingSpec extends ZIOSpecDefault {
                          )
         } yield assertTrue(result == (true, false))
       },
+      test("A snapshot fetched before the Shard Manager recorded a move doesn't undo it") {
+        val config = Config.default.copy(refreshAssignmentsRetryInterval = 10.millis)
+        val self   = PodAddress(config.selfHost, config.shardingPort)
+        for {
+          assignments <- Ref.make(Map[ShardId, Option[PodAddress]](1 -> Some(self), 2 -> None))
+          disconnect  <- Promise.make[Nothing, Unit]
+          reconnected <- Promise.make[Nothing, Unit]
+          storage     <- reconnectingStorage(assignments, disconnect, reconnected)
+          own         <- (for {
+                           sharding <- ZIO.service[Sharding]
+                           _        <- sharding.unassign(Set(1))
+                           _        <- sharding.assign(Set(2))
+                           _        <- disconnect.succeed(())
+                           _        <- reconnected.await
+                           _        <- assignments.set(Map(1 -> Some(otherPod), 2 -> Some(self)))
+                           own      <- sharding.thisPodAssignments
+                         } yield own).provide(
+                           Sharding.live,
+                           Pods.noop,
+                           ZLayer.succeed(takingShardsBack(assignments)),
+                           ZLayer.succeed(storage),
+                           ZLayer.succeed(config)
+                         )
+        } yield assertTrue(own == Chunk(2))
+      },
       test("A duplex whose inputs were read is not sent again when its pod becomes unavailable") {
         for {
           attempts <- Ref.make(0)
