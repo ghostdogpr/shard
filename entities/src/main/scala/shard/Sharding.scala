@@ -49,7 +49,6 @@ class Sharding private (
       _            <- ZIO.unlessZIO(current)(ZIO.fail(new RuntimeException(s"Pod $address unregistered while registering")))
     } yield ()
 
-  // the current registration, or a new one once the entities of the previous one stopped
   private def startRegistration: UIO[String] =
     (registrationRef.get <*> isShuttingDownRef.get).flatMap {
       case (Some(registration), false) => ZIO.succeed(registration)
@@ -59,7 +58,6 @@ class Sharding private (
             .modifyZIO(current =>
               isShuttingDownRef.get.flatMap {
                 case `shuttingDown` if current == read =>
-                  // entities start without the lock: the old shards are dropped before hosting resumes
                   shardAssignments
                     .modify(map => (ownAssignments(map).keySet, map -- ownAssignments(map).keySet))
                     .zipLeft(isShuttingDownRef.set(false))
@@ -81,7 +79,6 @@ class Sharding private (
       (
         // ping the shard manager first to stop if it's not available
         shardManager.getAssignments(config.role) *>
-          // unless the pod registered again since
           registrationRef
             .modifyZIO(current =>
               ZIO
@@ -134,7 +131,7 @@ class Sharding private (
       }
     }
 
-  // once Sharding closed, waits for its singletons to stop, without the lock
+  // waits outside the lock once Sharding closed: a singleton's finalizer may need it
   private def stopSingletonsIfNeeded: UIO[Unit] =
     ZIO.unlessZIODiscard(isSingletonNode) {
       singletons.modifyZIO {
@@ -168,7 +165,6 @@ class Sharding private (
       startSingletonsIfNeeded *>
       eventsHub.publish(ShardingRegistrationEvent.SingletonRegistered(name)).unit
 
-  // one step, so that a new registration doesn't get shards sent to the previous one
   private def ifRegistration[A](registration: String)(f: UIO[A]): UIO[Option[A]] =
     registrationRef.modifyZIO(current => ZIO.when(current.contains(registration))(f).map(_ -> current))
 
@@ -252,7 +248,6 @@ class Sharding private (
   ): UIO[Unit] = {
     val assignments = assignmentsOpt.flatMap { case (k, v) => v.map(k -> _) }
     ZIO.logDebug("Received new shard assignments") *>
-      // under the lock, so that the flag is the one of the registration whose assignments are updated
       registrationRef
         .modifyZIO(current =>
           isShuttingDown.flatMap { shuttingDown =>
@@ -261,8 +256,7 @@ class Sharding private (
               case map                              =>
                 // we keep self assignments (we don't override them with the new assignments)
                 // because only the Shard Manager is able to change assignments of the current node, via assign/unassign.
-                // Once the pod unregistered, the Shard Manager takes its shards back without calling unassign,
-                // so we drop the self assignments that the new assignments no longer give to this pod.
+                // Once the pod unregistered, the Shard Manager takes its shards back without calling unassign.
                 val (self, dropped) = ownAssignments(map).partition { case (shard, _) =>
                   !shuttingDown || assignments.get(shard).contains(address)
                 }

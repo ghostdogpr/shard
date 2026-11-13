@@ -450,7 +450,6 @@ object ShardManagerSpec extends ZIOSpecDefault {
 
   val config: ULayer[ManagerConfig] = ZLayer.succeed(ManagerConfig.default)
 
-  // the pods of these tests have the registration "r"
   private val confirmingPods: ULayer[Pods] = Pods.noop.project(noop =>
     new Pods {
       export noop.{ assignShards, sendMessage, sendStream, sendStreamAndReceiveStream, unassignShards }

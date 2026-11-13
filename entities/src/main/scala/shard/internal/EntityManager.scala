@@ -221,7 +221,6 @@ private[shard] final class EntityManager[Msg[_, _]] private (
         case Some(entity) => ZIO.succeed((entity, map))
         case None         =>
           // check again under the lock, so that an entity is never started after being stopped
-          // (the flag first: a new registration drops the shards of the previous one before clearing it)
           (sharding.isShuttingDown.negate && isOnLocalShards(entityId) && closed.get.negate).flatMap {
             case true  => start(entityId).map(entity => (entity, map.updated(entityId, entity)))
             case false => ZIO.fail(EntityNotManagedByThisPod(entityId))

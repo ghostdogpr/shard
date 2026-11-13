@@ -294,7 +294,7 @@ object ShardingSpec extends ZIOSpecDefault {
         val config = Config.default
         for {
           state        <- WorkerState.make
-          registered   <- Ref.make(List.empty[(String, Int)]) // with the entities running then
+          registered   <- Ref.make(List.empty[(String, Int)])
           unregistered <- Ref.make(List.empty[String])
           manager       =
             new ShardManagerClient {

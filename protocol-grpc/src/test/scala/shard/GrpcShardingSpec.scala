@@ -125,7 +125,6 @@ object GrpcShardingSpec extends ZIOSpecDefault {
               _        <- Sharding.registerScoped
               current  <- ZIO.serviceWithZIO[Sharding](_.registration)
               pinged   <- pods.ping(self).uninterruptible
-              // the pod rejects shards of another role or registration
               other     = Role("other")
               assign   <- pods.assignShards(self, other, "r", Set.empty).exit
               unassign <- pods.unassignShards(self, other, "r", Set.empty).exit

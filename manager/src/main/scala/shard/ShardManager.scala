@@ -41,10 +41,8 @@ class ShardManager private (
           cdt       <- ZIO.succeed(OffsetDateTime.now())
           persisted <-
             modifyStates { states =>
-              // the pod was checked against what the address had then
               if (podAt(states, pod.address) != before) (None, states)
               else {
-                // an address hosts a single registration: an earlier one, or one of another role, is gone
                 val (replaced, others) =
                   removePod(states, pod.address, p => p.pod.role != pod.role || p.pod.registration != pod.registration)
                 val current            = others.getOrElse(pod.role, ShardManagerState(config.numberOfShards(pod.role)))
@@ -66,8 +64,7 @@ class ShardManager private (
       )
     }
 
-  // a request may arrive after the pod registered again or unregistered: only the pod knows its registration
-  // (None if it didn't answer)
+  // None if the pod didn't answer
   private def reported(pod: Pod): UIO[Option[Option[String]]] =
     podApi.ping(pod.address).timeout(config.pingTimeout).orElseSucceed(None)
 
@@ -98,7 +95,6 @@ class ShardManager private (
       .whenCaseZIODiscard(findPod(podAddress)) { case Some(registered) =>
         ManagerMetrics.podHealthChecked.tagged("pod_address", podAddress.toString).increment.unless(ignoreMetric) *>
           eventsHub.publish(ShardingEvent.PodHealthChecked(registered.pod)) *>
-          // a pod changes its registration once the entities of the previous one stopped
           ZIO.unlessZIO(
             healthApi.isAlive(registered.pod) && reported(registered.pod)
               .map(_.forall(_.contains(registered.pod.registration)))
