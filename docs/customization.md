@@ -76,9 +76,9 @@ trait Pods {
   ): ZStream[Any, Throwable, BinaryReply]
 }
 ```
-A pod must reject `assignShards` and `unassignShards` for a role other than its own, since its address may have previously belonged to a pod of another role, and for a registration other than its current one, since the call may have been made for a previous registration of the pod or a previous process at its address. `ping` returns the current registration of the pod, if it has one: the Shard Manager refuses a `register` request for another registration, which may have arrived late.
+A pod must reject `assignShards` and `unassignShards` for a role other than its own, since its address may have previously belonged to a pod of another role, and for a registration other than its current one, since the call may have been made for a previous registration of the pod or a previous process at its address. `ping` returns the current registration of the pod, if it has one: the Shard Manager refuses a `register` request unless the pod reports that registration, since the request may have arrived late.
 
-For testing, you can use the `Pods.noop` layer that does nothing.
+For testing, you can use the `Pods.noop` layer that does nothing. Its `ping` reports no registration, so a Shard Manager using it refuses registrations.
 
 Shard provides an implementation of `Pods` using the gRPC protocol. To use it, add the following dependency:
 ```scala

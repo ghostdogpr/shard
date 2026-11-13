@@ -194,7 +194,7 @@ object ShardManagerSpec extends ZIOSpecDefault {
         test("A starting Shard Manager sends the pods the shards recorded on them") {
           for {
             hosted <- SubscriptionRef.make(Map.empty[PodAddress, Set[ShardId]])
-            pods    = Pods.noop.project(noop =>
+            pods    = confirmingPods.project(noop =>
                         new Pods {
                           export noop.{ ping, sendMessage, sendStream, sendStreamAndReceiveStream, unassignShards }
                           def assignShards(
@@ -222,7 +222,7 @@ object ShardManagerSpec extends ZIOSpecDefault {
           for {
             hosted  <- SubscriptionRef.make(Map.empty[PodAddress, Set[ShardId]])
             started <- Promise.make[Nothing, Unit]
-            pods     = Pods.noop.project(noop =>
+            pods     = confirmingPods.project(noop =>
                          new Pods {
                            export noop.{ ping, sendMessage, sendStream, sendStreamAndReceiveStream, unassignShards }
                            def assignShards(
@@ -251,35 +251,37 @@ object ShardManagerSpec extends ZIOSpecDefault {
         } @@ TestAspect.timeout(10.seconds),
         test("A pod that registers again replaces its previous registration") {
           for {
-            calls          <- SubscriptionRef.make(List.empty[(String, Set[ShardId])])
-            current        <- Ref.make(pod1.pod.registration)
-            pods            = Pods.noop.project(noop =>
-                                new Pods {
-                                  export noop.{ sendMessage, sendStream, sendStreamAndReceiveStream, unassignShards }
-                                  def assignShards(pod: PodAddress, role: Role, registration: String, shards: Set[ShardId]) =
-                                    calls.update(_ :+ (registration -> shards))
-                                  def ping(pod: PodAddress)                                                                 =
-                                    current.get.asSome
-                                }
-                              )
-            shards          = (1 to ManagerConfig.default.numberOfShards(role)).toSet
-            again           = pod1.pod.copy(registration = "r2")
-            (late, routed) <-
+            calls                   <- SubscriptionRef.make(List.empty[(String, Set[ShardId])])
+            current                 <- Ref.make(Option(pod1.pod.registration))
+            pods                     = confirmingPods.project(noop =>
+                                         new Pods {
+                                           export noop.{ sendMessage, sendStream, sendStreamAndReceiveStream, unassignShards }
+                                           def assignShards(pod: PodAddress, role: Role, registration: String, shards: Set[ShardId]) =
+                                             calls.update(_ :+ (registration -> shards))
+                                           def ping(pod: PodAddress)                                                                 =
+                                             current.get
+                                         }
+                                       )
+            shards                   = (1 to ManagerConfig.default.numberOfShards(role)).toSet
+            again                    = pod1.pod.copy(registration = "r2")
+            (late, stopped, routed) <-
               (for {
                 manager <- ZIO.service[ShardManager]
                 assigned =
                   (registration: String) =>
                     calls.changes.filter(_.filter(_._1 == registration).flatMap(_._2).toSet == shards).runHead
                 _       <- manager.register(pod1.pod) *> assigned(pod1.pod.registration)
-                _       <- current.set(again.registration)
+                _       <- current.set(Some(again.registration))
                 _       <- manager.register(again) *> assigned(again.registration)
                 late    <- manager.register(pod1.pod).exit
                 _       <- manager.unregister(pod1.pod.address, pod1.pod.registration)
                 routed  <- manager.getAssignments(role)
-              } yield (late, routed)).provide(
+                _       <- current.set(None) *> manager.unregister(again.address, again.registration)
+                stopped <- manager.register(again).exit
+              } yield (late, stopped, routed)).provide(
                 ZLayer.make[ShardManager](config, storage, pods, PodsHealth.local, ShardManager.live)
               )
-          } yield assertTrue(late.isFailure, routed.values.forall(_.contains(pod1.pod.address)))
+          } yield assertTrue(late.isFailure, stopped.isFailure, routed.values.forall(_.contains(pod1.pod.address)))
         } @@ TestAspect.timeout(10.seconds),
         test("Simulate scaling down scenario") {
           (for {
@@ -337,7 +339,7 @@ object ShardManagerSpec extends ZIOSpecDefault {
               // simulate non-persistent storage restart
               _ <- ZIO.serviceWithZIO[Storage](s => s.saveAssignments(role, Map.empty) *> s.savePods(Set.empty))
             } yield {}).provideSome[Storage](
-              ZLayer.makeSome[Storage, ShardManager](config, Pods.noop, PodsHealth.local, ShardManager.live)
+              ZLayer.makeSome[Storage, ShardManager](config, confirmingPods, PodsHealth.local, ShardManager.live)
             )
 
             val test = for {
@@ -419,7 +421,7 @@ object ShardManagerSpec extends ZIOSpecDefault {
                                        deadRole.values.forall(_.isEmpty),
                                        stored.size == ManagerConfig.default.numberOfShards(role1),
                                        !stored.values.exists(_.contains(pod1.address))
-                                     )).provideSome[Storage](config, Pods.noop, podsHealth, ShardManager.live)
+                                     )).provideSome[Storage](config, confirmingPods, podsHealth, ShardManager.live)
                          } yield result).provide(storage).forkDaemon
             // the release waits for the shutdown timeout
             _         <- (closing.await *> TestClock.adjust(ManagerConfig.default.shutdownPersistTimeout)).fork
@@ -442,10 +444,18 @@ object ShardManagerSpec extends ZIOSpecDefault {
 
   val config: ULayer[ManagerConfig] = ZLayer.succeed(ManagerConfig.default)
 
+  // the pods of these tests have the registration "r"
+  private val confirmingPods: ULayer[Pods] = Pods.noop.project(noop =>
+    new Pods {
+      export noop.{ assignShards, sendMessage, sendStream, sendStreamAndReceiveStream, unassignShards }
+      def ping(pod: PodAddress) = ZIO.some("r")
+    }
+  )
+
   private val stuckPod = Pod(PodAddress("stuck", 1), "1", Role("stuck"), "r")
 
   // assigning shards to stuckPod never completes
-  val stuckPods: ULayer[Pods] = Pods.noop.project(noop =>
+  val stuckPods: ULayer[Pods] = confirmingPods.project(noop =>
     new Pods {
       export noop.{ ping, sendMessage, sendStream, sendStreamAndReceiveStream, unassignShards }
       def assignShards(pod: PodAddress, role: Role, registration: String, shards: Set[ShardId]): Task[Unit] =
@@ -462,7 +472,7 @@ object ShardManagerSpec extends ZIOSpecDefault {
   })
 
   val shardManager: ZLayer[Any, Throwable, ShardManager] =
-    ZLayer.make[ShardManager](config, storage, Pods.noop, PodsHealth.local, ShardManager.live)
+    ZLayer.make[ShardManager](config, storage, confirmingPods, PodsHealth.local, ShardManager.live)
 
   // pod1 applies its first assign but the reply is lost, and `undo` runs before the unassign undoing it;
   // returns the shards persisted and held per pod
@@ -485,7 +495,7 @@ object ShardManagerSpec extends ZIOSpecDefault {
       signal    <- SubscriptionRef.make(0)
       changed    = signal.update(_ + 1)
       call       = (effect: Task[Unit]) => (inFlight.update(_ + 1) *> effect).ensuring(inFlight.update(_ - 1) *> changed)
-      pods       = Pods.noop.project(noop =>
+      pods       = confirmingPods.project(noop =>
                      new Pods {
                        export noop.{ ping, sendMessage, sendStream, sendStreamAndReceiveStream }
                        def assignShards(pod: PodAddress, role: Role, registration: String, shards: Set[ShardId]): Task[Unit] =

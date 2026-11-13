@@ -27,6 +27,8 @@ class Sharding private (
   lastStaleRefresh: Ref[Long],
   isShuttingDownRef: Ref[Boolean],
   registrationRef: Ref.Synchronized[Option[String]],
+  // one register or unregister at a time, so that a registration starts once the previous one stopped its entities
+  lifecycle: Semaphore,
   shardManager: ShardManagerClient,
   pods: Pods,
   storage: Storage,
@@ -36,50 +38,58 @@ class Sharding private (
     recipientType.getShardId(entityId, config.numberOfShards)
 
   val register: Task[Unit] =
-    for {
-      _                       <- ZIO.logDebug(s"Registering pod $address to Shard Manager")
-      fresh                   <- Random.nextUUID.map(_.toString)
-      (registration, dropped) <-
-        registrationRef.modifyZIO(current =>
-          isShuttingDownRef.get.flatMap {
-            case false if current.isDefined => ZIO.succeed((current.get, Set.empty[ShardId]) -> current)
-            case _                          =>
-              // entities start without the lock: the old shards are dropped before hosting resumes
-              shardAssignments
-                .modify(map => (ownAssignments(map).keySet, map -- ownAssignments(map).keySet))
-                .zipLeft(isShuttingDownRef.set(false))
-                .map(dropped => (fresh, dropped) -> Some(fresh))
-          }
-        )
-      _                       <- release(dropped, dropped.size).when(dropped.nonEmpty)
-      shards                  <- shardManager.register(address, config.role, registration)
-      _                       <- assign(registration, shards).when(shards.nonEmpty)
-    } yield ()
+    lifecycle.withPermit(
+      for {
+        _            <- ZIO.logDebug(s"Registering pod $address to Shard Manager")
+        current      <- registrationRef.get
+        shuttingDown <- isShuttingDownRef.get
+        registration <- current match {
+                          case Some(registration) if !shuttingDown => ZIO.succeed(registration)
+                          case _                                   =>
+                            for {
+                              _       <- terminateAllEntities.when(shuttingDown)
+                              fresh   <- Random.nextUUID.map(_.toString)
+                              // entities start without the lock: the old shards are dropped before hosting resumes
+                              dropped <-
+                                registrationRef.modifyZIO(_ =>
+                                  shardAssignments
+                                    .modify(map => (ownAssignments(map).keySet, map -- ownAssignments(map).keySet))
+                                    .zipLeft(isShuttingDownRef.set(false))
+                                    .map(_ -> Some(fresh))
+                                )
+                              _       <- release(dropped, dropped.size).when(dropped.nonEmpty)
+                            } yield fresh
+                        }
+        shards       <- shardManager.register(address, config.role, registration)
+        _            <- assign(registration, shards).when(shards.nonEmpty)
+      } yield ()
+    )
 
   val unregister: UIO[Unit] =
-    registrationRef.get.flatMap(ZIO.foreachDiscard(_) { registration =>
-      (
-        // ping the shard manager first to stop if it's not available
-        shardManager.getAssignments(config.role) *>
-          ifRegistration(registration)(isShuttingDownRef.set(true))
-      ).retry(config.unregisterRetrySchedule)
-        .flatMap {
-          case Some(_) =>
+    lifecycle.withPermit(
+      registrationRef.get.flatMap(ZIO.foreachDiscard(_) { registration =>
+        (
+          // ping the shard manager first to stop if it's not available
+          shardManager.getAssignments(config.role) *>
             ZIO.logDebug(s"Stopping local entities") *>
-              entityManagers.flatMap(
-                ZIO.foreachParDiscard(_) { case (name, entity) =>
-                  entity.terminateAllEntities.interruptible.forkDaemon // run in a daemon fiber to make sure it doesn't get interrupted
-                    .flatMap(_.join)
-                    .catchAllCause(ZIO.logErrorCause(s"Error during stop of entity $name", _))
-                }
-              ) *>
-              registrationRef.update(_.filterNot(_ == registration)) *>
-              ZIO.logDebug(s"Unregistering pod $address to Shard Manager") *>
-              shardManager.unregister(address, registration).retry(config.unregisterRetrySchedule)
-          case None    => ZIO.unit
-        }
-        .catchAllCause(ZIO.logWarningCause("Error while unregistering from Shard Manager", _))
-    })
+            isShuttingDownRef.set(true) *>
+            terminateAllEntities *>
+            registrationRef.set(None) *>
+            ZIO.logDebug(s"Unregistering pod $address to Shard Manager") *>
+            shardManager.unregister(address, registration)
+        ).retry(config.unregisterRetrySchedule)
+          .catchAllCause(ZIO.logWarningCause("Error while unregistering from Shard Manager", _))
+      })
+    )
+
+  private def terminateAllEntities: UIO[Unit] =
+    entityManagers.flatMap(
+      ZIO.foreachParDiscard(_) { case (name, entity) =>
+        entity.terminateAllEntities.interruptible.forkDaemon // run in a daemon fiber to make sure it doesn't get interrupted
+          .flatMap(_.join)
+          .catchAllCause(ZIO.logErrorCause(s"Error during stop of entity $name", _))
+      }
+    )
 
   val isSingletonNode: UIO[Boolean] =
     // Start singletons on the pod hosting shard 1.
@@ -735,6 +745,7 @@ object Sharding {
         lastStaleRefresh          <- Clock.nanoTime.flatMap(Ref.make(_))
         shuttingDown              <- Ref.make(false)
         registration              <- Ref.Synchronized.make(Option.empty[String])
+        lifecycle                 <- Semaphore.make(1)
         eventsHub                 <- Hub.unbounded[ShardingRegistrationEvent]
         sharding                   = new Sharding(
                                        PodAddress(config.selfHost, config.shardingPort),
@@ -746,6 +757,7 @@ object Sharding {
                                        lastStaleRefresh,
                                        shuttingDown,
                                        registration,
+                                       lifecycle,
                                        shardManager,
                                        pods,
                                        storage,

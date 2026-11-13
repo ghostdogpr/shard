@@ -54,7 +54,8 @@ object Pods {
   /**
    * A layer that creates a service that does nothing when called.
    * Messages that expect a reply get a `Defect` reply, since no pod answers them.
-   * Useful for testing ShardManager or when we don't need messages being sent.
+   * Useful when we don't need messages being sent. Its `ping` reports no registration,
+   * so a Shard Manager using it refuses registrations.
    */
   val noop: ULayer[Pods] =
     ZLayer.succeed(new Pods {
