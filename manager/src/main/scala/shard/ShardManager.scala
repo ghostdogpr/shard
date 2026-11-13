@@ -230,25 +230,28 @@ class ShardManager private (
     assign: Boolean
   ): UIO[List[(PodAddress, Set[ShardId])]] = {
     val call  = if (assign) podApi.assignShards else podApi.unassignShards
+    val undo  = if (assign) podApi.unassignShards else podApi.assignShards
     val event = if (assign) ShardingEvent.ShardsAssigned.apply else ShardingEvent.ShardsUnassigned.apply
     ZIO.filterNotPar(moves.toList) { (podAddress, shards) =>
       val target = Option.when(assign)(podAddress)
+      val record =
+        modifyStates(states =>
+          states.get(role).filter(state => target.forall(state.pods.contains)) match {
+            case Some(state) =>
+              val changed = shards.filter(shard => state.shards.get(shard).exists(_ != target))
+              (Some(changed), states.updated(role, state.copy(shards = state.shards ++ changed.map(_ -> target))))
+            case None        => (None, states)
+          }
+        ).flatMap(
+          ZIO
+            .foreach(_)(changed => eventsHub.publish(event(podAddress, role, changed)).when(changed.nonEmpty))
+            .map(_.isDefined)
+        )
       ZIO.uninterruptibleMask(restore =>
         restore(call(podAddress, role, shards)).foldZIO(
-          _ => ZIO.succeed(false),
-          _ =>
-            modifyStates(states =>
-              states.get(role).filter(state => target.forall(state.pods.contains)) match {
-                case Some(state) =>
-                  val changed = shards.filter(shard => state.shards.get(shard).exists(_ != target))
-                  (Some(changed), states.updated(role, state.copy(shards = state.shards ++ changed.map(_ -> target))))
-                case None        => (None, states)
-              }
-            ).flatMap(
-              ZIO
-                .foreach(_)(changed => eventsHub.publish(event(podAddress, role, changed)).when(changed.nonEmpty))
-                .map(_.isDefined)
-            )
+          // the pod may have applied the call: undo it, or else keep the shards on the pod
+          _ => restore(undo(podAddress, role, shards)).foldZIO(_ => record.when(assign), _ => ZIO.none).as(false),
+          _ => record
         )
       )
     }
