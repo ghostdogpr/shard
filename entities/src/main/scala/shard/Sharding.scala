@@ -175,10 +175,7 @@ class Sharding private (
             if (ownAssignments(current) == ownAssignments(before)) (true, assignments) else (false, current)
           }.flatMap {
             case false => replaceAssignments
-            case true  =>
-              ZIO.logDebug("Received new shard assignments") *>
-                // after a storage reconnection, the snapshot may no longer give shard 1 to this pod
-                stopSingletonsInBackground
+            case true  => ZIO.logDebug("Received new shard assignments")
           }
       }
     }
@@ -238,7 +235,11 @@ class Sharding private (
       latch <- Promise.make[Nothing, Unit]
       _     <- (
                  // first, get the assignments from the shard manager directly
-                 replaceAssignments *> latch.succeed(()) *>
+                 // (after a reconnection, a snapshot may predate an assign/unassign it hasn't recorded yet)
+                 ZIO.ifZIO(latch.isDone)(
+                   shardManager.getAssignments(config.role).flatMap(updateAssignments(_)),
+                   replaceAssignments *> latch.succeed(()).unit
+                 ) *>
                    // then, get assignments changes from Redis
                    storage.assignmentsStream(config.role).mapZIO(updateAssignments(_)).runDrain
                )
