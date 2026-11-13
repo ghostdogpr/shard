@@ -111,17 +111,18 @@ object ShardingSpec extends ZIOSpecDefault {
                               local.getAssignments(role)
                           }
                         )
-          _          <- (Sharding.registerSingleton(
+          registered <- (Sharding.registerSingleton(
                           "singleton",
                           ZIO.never.onInterrupt(finalizing.succeed(()) *> Sharding.unregister)
-                        ) *> Sharding.register *> Sharding.unregister *> Sharding.register).provide(
+                        ) *> Sharding.register *> Sharding.unregister *> Sharding.register.exit <*>
+                          ZIO.serviceWithZIO[Sharding](_.registration)).provide(
                           Sharding.live,
                           Pods.noop,
                           manager,
                           Storage.memory,
                           ZLayer.succeed(Config.default)
                         )
-        } yield assertCompletes
+        } yield assertTrue(registered._1.isSuccess == registered._2.isDefined)
       } @@ TestAspect.timeout(10.seconds),
       test("A pod that unregistered stops its singletons when it reconnects to the storage") {
         val config = Config.default.copy(refreshAssignmentsRetryInterval = 10.millis)
@@ -252,17 +253,23 @@ object ShardingSpec extends ZIOSpecDefault {
         }
         (for {
           sharding <- ZIO.service[Sharding]
-          _        <- Sharding.registerSingleton("singleton", ZIO.never.onInterrupt(Sharding.unregister))
           _        <- Sharding.register
           started  <- sharding.thisPodAssignments
           first    <- sharding.registration.someOrFailException
-          _        <- sharding.assignShards(Set(1, 2))
+          _        <- sharding.assignShards(Set(2))
           _        <- Sharding.unregister
           _        <- Sharding.register
           again    <- sharding.thisPodAssignments
+          second   <- sharding.registration
           stale    <- sharding.assign(first, Set(3))
           after    <- sharding.thisPodAssignments
-        } yield assertTrue(started.isEmpty, again.isEmpty, !stale, after.isEmpty)).provide(
+        } yield assertTrue(
+          started.isEmpty,
+          again.isEmpty,
+          second.exists(_ != first),
+          !stale,
+          after.isEmpty
+        )).provide(
           Sharding.live,
           Pods.noop,
           ZLayer.succeed(manager),

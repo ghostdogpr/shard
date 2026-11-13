@@ -2,8 +2,8 @@ package shard
 
 /**
  * A pod of a role, as registered to the Shard Manager.
- * `registration` identifies one registration of the pod: each call to `Sharding.register` starts a new one, and the
- * Shard Manager's calls to the pod carry it.
+ * `registration` identifies one registration of the pod: `Sharding.register` starts a new one, unless the pod is already
+ * registered and running, and the Shard Manager's calls to the pod carry it.
  */
 case class Pod(address: PodAddress, version: String, role: Role, registration: String)
 

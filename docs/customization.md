@@ -86,7 +86,7 @@ Shard provides an implementation of `Pods` using the gRPC protocol. To use it, a
 ```
 You can then simply use the `GrpcPods.live` layer.
 
-On pods, you also need expose the gRPC API. This is done by adding the `GrpcShardingService.live` layer to your environment. You don't need this one on the Shard Manager.
+On pods, you also need expose the gRPC API. This is done by adding the `GrpcShardingService.live` layer to your environment. You don't need this one on the Shard Manager. The Shard Manager pings a pod when it registers, so the pod must serve this API before calling `Sharding.register`.
 
 ## Message Codec
 

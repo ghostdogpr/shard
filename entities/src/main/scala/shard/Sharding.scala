@@ -40,7 +40,9 @@ class Sharding private (
       _            <- ZIO.logDebug(s"Registering pod $address to Shard Manager")
       registration <- startRegistration
       shards       <- shardManager.register(address, config.role, registration)
-      _            <- assign(registration, shards).when(shards.nonEmpty)
+      _            <- ZIO.unlessZIO(assign(registration, shards))(
+                        ZIO.fail(new RuntimeException(s"Pod $address unregistered while registering"))
+                      )
     } yield ()
 
   // the current registration, or a new one once the entities of the previous one stopped
