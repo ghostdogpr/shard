@@ -56,7 +56,7 @@ object StorageRedisSpec extends ZIOSpecDefault {
             pods        <- read(RedisConfig.default.podsKey)
             assignments <- read(RedisConfig.default.assignmentsKey(role))
           } yield assertTrue(
-            pods == Map("host1:1" -> "1.0.0 default"),
+            pods == Map("host1:1" -> "1.0.0 r1 default"),
             assignments == Map("1" -> "host1:1", "2" -> "")
           )
         } :+
