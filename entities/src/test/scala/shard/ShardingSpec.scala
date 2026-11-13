@@ -94,6 +94,35 @@ object ShardingSpec extends ZIOSpecDefault {
         Storage.memory,
         ZLayer.succeed(Config.default)
       ),
+      test("A singleton that unregisters the pod when it stops doesn't block the next registration") {
+        for {
+          finalizing <- Promise.make[Nothing, Unit]
+          registers  <- Ref.make(0)
+          manager     = LocalShardManagerClient.live.project(local =>
+                          new ShardManagerClient {
+                            def register(podAddress: PodAddress, role: Role, registration: String): Task[Set[ShardId]] =
+                              registers.getAndUpdate(_ + 1).flatMap(n => finalizing.await.when(n == 1)) *>
+                                local.register(podAddress, role, registration)
+                            def unregister(podAddress: PodAddress, registration: String): Task[Unit]                   =
+                              local.unregister(podAddress, registration)
+                            def notifyUnhealthyPod(podAddress: PodAddress): Task[Unit]                                 =
+                              local.notifyUnhealthyPod(podAddress)
+                            def getAssignments(role: Role): Task[Map[ShardId, Option[PodAddress]]]                     =
+                              local.getAssignments(role)
+                          }
+                        )
+          _          <- (Sharding.registerSingleton(
+                          "singleton",
+                          ZIO.never.onInterrupt(finalizing.succeed(()) *> Sharding.unregister)
+                        ) *> Sharding.register *> Sharding.unregister *> Sharding.register).provide(
+                          Sharding.live,
+                          Pods.noop,
+                          manager,
+                          Storage.memory,
+                          ZLayer.succeed(Config.default)
+                        )
+        } yield assertCompletes
+      } @@ TestAspect.timeout(10.seconds),
       test("A pod that unregistered stops its singletons when it reconnects to the storage") {
         val config = Config.default.copy(refreshAssignmentsRetryInterval = 10.millis)
         val self   = PodAddress(config.selfHost, config.shardingPort)
@@ -244,34 +273,39 @@ object ShardingSpec extends ZIOSpecDefault {
       test("An unregister that failed is sent again by the next one") {
         val config = Config.default.copy(unregisterRetrySchedule = Schedule.stop)
         for {
-          failing      <- Ref.make(true)
-          unregistered <- Ref.make(List.empty[String])
-          manager       = new ShardManagerClient {
-                            def register(podAddress: PodAddress, role: Role, registration: String): Task[Set[ShardId]] =
-                              ZIO.succeed(Set.empty)
-                            def unregister(podAddress: PodAddress, registration: String): Task[Unit]                   =
-                              ZIO.whenZIO(failing.get)(ZIO.fail(new Exception("unavailable"))) *>
-                                unregistered.update(_ :+ registration)
-                            def notifyUnhealthyPod(podAddress: PodAddress): Task[Unit]                                 = ZIO.unit
-                            def getAssignments(role: Role): Task[Map[ShardId, Option[PodAddress]]]                     =
-                              ZIO.succeed(Map.empty)
-                          }
-          registration <- (for {
-                            sharding     <- ZIO.service[Sharding]
-                            _            <- Sharding.register
-                            registration <- sharding.registration
-                            _            <- Sharding.unregister
-                            _            <- failing.set(false)
-                            _            <- Sharding.unregister *> Sharding.unregister
-                          } yield registration).provide(
-                            Sharding.live,
-                            Pods.noop,
-                            ZLayer.succeed(manager),
-                            Storage.memory,
-                            ZLayer.succeed(config)
-                          )
-          sent         <- unregistered.get
-        } yield assertTrue(registration.isDefined, sent == registration.toList)
+          failing         <- Ref.make(false)
+          unregistered    <- Ref.make(List.empty[String])
+          manager          = new ShardManagerClient {
+                               private val unavailable                                                                    =
+                                 ZIO.whenZIO(failing.get)(ZIO.fail(new Exception("unavailable")))
+                               def register(podAddress: PodAddress, role: Role, registration: String): Task[Set[ShardId]] =
+                                 unavailable.as(Set.empty)
+                               def unregister(podAddress: PodAddress, registration: String): Task[Unit]                   =
+                                 unavailable *> unregistered.update(_ :+ registration)
+                               def notifyUnhealthyPod(podAddress: PodAddress): Task[Unit]                                 = ZIO.unit
+                               def getAssignments(role: Role): Task[Map[ShardId, Option[PodAddress]]]                     =
+                                 ZIO.succeed(Map.empty)
+                             }
+          (first, second) <-
+            (for {
+              sharding <- ZIO.service[Sharding]
+              _        <- Sharding.register
+              first    <- sharding.registration
+              _        <- failing.set(true)
+              _        <- Sharding.unregister
+              _        <- Sharding.register.exit
+              second   <- sharding.registration
+              _        <- failing.set(false)
+              _        <- Sharding.unregister *> Sharding.unregister
+            } yield (first, second)).provide(
+              Sharding.live,
+              Pods.noop,
+              ZLayer.succeed(manager),
+              Storage.memory,
+              ZLayer.succeed(config)
+            )
+          sent            <- unregistered.get
+        } yield assertTrue(first.isDefined, second.isDefined, sent.toSet == (first.toSet ++ second), sent.size == 2)
       },
       test("A registration starts once the previous one stopped its entities") {
         val config = Config.default
