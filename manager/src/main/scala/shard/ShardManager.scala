@@ -132,6 +132,23 @@ class ShardManager private (
   private def rebalance(role: Role, rebalanceImmediately: Boolean): UIO[Unit] =
     rebalanceSemaphores(role).flatMap(_.withPermit(rebalanceWithPermit(role, rebalanceImmediately)))
 
+  // the previous Shard Manager may have stopped before a pod applied the shards recorded on it, so they are sent again
+  // (pods ignore the ones they already have), before any rebalance can move them; a pod that left isn't called
+  private def resendAssignments(role: Role): UIO[Unit] =
+    rebalanceSemaphores(role).flatMap(
+      _.withPermit(
+        getAssignments(role).flatMap(assignments =>
+          ZIO.foreachParDiscard(assignments.values.flatten.toSet)(podAddress =>
+            stateRef.get.flatMap(states =>
+              ZIO.foreachDiscard(states.get(role).filter(_.pods.contains(podAddress)).map(_.shardsPerPod(podAddress)))(
+                shards => podApi.assignShards(podAddress, role, shards).ignore.when(shards.nonEmpty)
+              )
+            )
+          )
+        )
+      )
+    )
+
   // skips the role while another of its rebalances is running
   private def rebalanceIfIdle(role: Role): UIO[Unit] =
     rebalanceSemaphores(role)
@@ -374,7 +391,9 @@ object ShardManager {
         _                   <- shardManager.persistPods
         // rebalance immediately if there are unassigned shards
         _                   <- ZIO.foreachDiscard(initialStates) { case (role, state) =>
-                                 shardManager.rebalance(role, rebalanceImmediately = state.unassignedShards.nonEmpty).background(scope)
+                                 (shardManager.resendAssignments(role) *>
+                                   shardManager.rebalance(role, rebalanceImmediately = state.unassignedShards.nonEmpty))
+                                   .background(scope)
                                }
         // start a regular rebalance at the given interval, per role so that a slow one doesn't delay the others
         _                   <- state.get

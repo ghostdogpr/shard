@@ -182,15 +182,43 @@ object ShardManagerSpec extends ZIOSpecDefault {
           for {
             undone      <- lostAssignReply(undo = ZIO.unit)
             recorded    <- lostAssignReply(undo = ZIO.fail(new Exception("unreachable")))
-            interrupted <- lostAssignReply(undo = ZIO.never)
+            interrupted <- lostAssignReply(undo = ZIO.never, hangs = true)
           } yield assertTrue(
             undone._1 == undone._2,
-            undone._1.get(pod1.pod.address).exists(_.size == 150),
             recorded._1 == recorded._2,
-            recorded._1.get(pod1.pod.address).exists(_.size == 300),
+            recorded._1.values.flatten.size == ManagerConfig.default.numberOfShards(role),
             interrupted._1 == interrupted._2,
-            interrupted._1.get(pod1.pod.address).exists(_.size == 300)
+            interrupted._1.get(pod1.pod.address).exists(_.size == ManagerConfig.default.numberOfShards(role))
           )
+        },
+        test("A starting Shard Manager sends the pods the shards recorded on them") {
+          for {
+            hosted <- Ref.make(Map.empty[PodAddress, Set[ShardId]])
+            pods    = Pods.noop.project(noop =>
+                        new Pods {
+                          export noop.{ ping, sendMessage, sendStream, sendStreamAndReceiveStream, unassignShards }
+                          def assignShards(pod: PodAddress, role: Role, shards: Set[ShardId]): Task[Unit] =
+                            hosted.update(m => m.updated(pod, m.getOrElse(pod, Set.empty) ++ shards))
+                        }
+                      )
+            shards  = (1 to ManagerConfig.default.numberOfShards(role)).toSet
+            held   <-
+              (ZIO.serviceWithZIO[Storage](storage =>
+                storage.savePods(Set(pod1.pod)) *>
+                  storage.saveAssignments(role, shards.map(_ -> Some(pod1.pod.address)).toMap)
+              ) *>
+                (ZIO.service[ShardManager] *>
+                  Live.live(
+                    hosted.get
+                      .repeat(
+                        Schedule.recurUntil[Map[PodAddress, Set[ShardId]]](_.get(pod1.pod.address).contains(shards)) <*
+                          Schedule.spaced(10.millis)
+                      )
+                      .timeoutFail(new Exception("the shards weren't sent"))(5.seconds)
+                  ))
+                  .provideSome[Storage](config, pods, PodsHealth.local, ShardManager.live))
+                .provide(Storage.memory)
+          } yield assertTrue(held == Map(pod1.pod.address -> shards))
         },
         test("Simulate scaling down scenario") {
           (for {
@@ -371,23 +399,39 @@ object ShardManagerSpec extends ZIOSpecDefault {
   val shardManager: ZLayer[Any, Throwable, ShardManager] =
     ZLayer.make[ShardManager](config, storage, Pods.noop, PodsHealth.local, ShardManager.live)
 
-  // pod1 applies its first assign but the reply is lost, and the unassign undoing it runs `undo` first, then pod2
-  // registers and the Shard Manager stops; returns the shards persisted on each pod and those each pod holds
-  private def lostAssignReply(undo: Task[Unit]): Task[(Map[PodAddress, Set[ShardId]], Map[PodAddress, Set[ShardId]])] =
+  // pod1 applies its first assign but the reply is lost, and the unassign undoing it runs `undo` first; unless the
+  // undo hangs, pod2 registers once the moves have settled; then the Shard Manager stops; returns the shards persisted
+  // on each pod and those each pod holds
+  private def lostAssignReply(
+    undo: Task[Unit],
+    hangs: Boolean = false
+  ): Task[(Map[PodAddress, Set[ShardId]], Map[PodAddress, Set[ShardId]])] = {
+    def byPod(assignments: Map[ShardId, Option[PodAddress]]): Map[PodAddress, Set[ShardId]] =
+      assignments.toList.collect { case (shard, Some(pod)) => pod -> shard }
+        .groupMap(_._1)(_._2)
+        .view
+        .mapValues(_.toSet)
+        .toMap
     for {
       hosted    <- Ref.make(Map.empty[PodAddress, Set[ShardId]])
       lost      <- Ref.make(true)
       firstUndo <- Ref.make(Option(undo))
+      inFlight  <- Ref.make(0)
       persisted <- Ref.make(Map.empty[ShardId, Option[PodAddress]])
+      call       = (effect: Task[Unit]) => (inFlight.update(_ + 1) *> effect).ensuring(inFlight.update(_ - 1))
       pods       = Pods.noop.project(noop =>
                      new Pods {
                        export noop.{ ping, sendMessage, sendStream, sendStreamAndReceiveStream }
                        def assignShards(pod: PodAddress, role: Role, shards: Set[ShardId]): Task[Unit]   =
-                         hosted.update(m => m.updated(pod, m.getOrElse(pod, Set.empty) ++ shards)) *>
-                           ZIO.whenZIO(lost.getAndSet(false))(ZIO.fail(new Exception("reply lost"))).unit
+                         call(
+                           hosted.update(m => m.updated(pod, m.getOrElse(pod, Set.empty) ++ shards)) *>
+                             ZIO.whenZIO(lost.getAndSet(false))(ZIO.fail(new Exception("reply lost"))).unit
+                         )
                        def unassignShards(pod: PodAddress, role: Role, shards: Set[ShardId]): Task[Unit] =
-                         firstUndo.getAndSet(None).flatMap(ZIO.foreachDiscard(_)(identity)) *>
-                           hosted.update(m => m.updated(pod, m.getOrElse(pod, Set.empty) -- shards))
+                         call(
+                           firstUndo.getAndSet(None).flatMap(ZIO.foreachDiscard(_)(identity)) *>
+                             hosted.update(m => m.updated(pod, m.getOrElse(pod, Set.empty) -- shards))
+                         )
                      }
                    )
       saving     = storage.project(base =>
@@ -397,21 +441,29 @@ object ShardManagerSpec extends ZIOSpecDefault {
                          persisted.set(assignments)
                      }
                    )
+      // waits until the moves in flight reached their pods and the routing matches what the pods hold
+      settled    =
+        (routed: Map[PodAddress, Set[ShardId]] => Boolean) =>
+          Live.live(
+            (ZIO.serviceWithZIO[ShardManager](_.getAssignments(role)).map(byPod) <*>
+              hosted.get.map(_.filter(_._2.nonEmpty)) <*> firstUndo.get <*> inFlight.get)
+              .repeat(
+                Schedule
+                  .recurUntil[(Map[PodAddress, Set[ShardId]], Map[PodAddress, Set[ShardId]], Option[Task[Unit]], Int)] {
+                    case (routing, held, pending, calls) =>
+                      pending.isEmpty && (hangs || calls == 0) && routing == held && routed(routing)
+                  } <* Schedule.spaced(10.millis)
+              )
+              .timeoutFail(new Exception("the moves didn't settle"))(5.seconds)
+          )
       _         <- (simulate(List(SimulationEvent.PodRegister(pod1.pod))) *>
-                     TestClock.adjust(1.second) *>
-                     simulate(List(SimulationEvent.PodRegister(pod2.pod))) *>
-                     TestClock.adjust(1.second))
+                     settled(_ => true) *>
+                     (simulate(List(SimulationEvent.PodRegister(pod2.pod))) *> settled(_.nonEmpty)).unless(hangs))
                      .provide(ZLayer.make[ShardManager](config, saving, pods, PodsHealth.local, ShardManager.live))
       saved     <- persisted.get
       held      <- hosted.get
-    } yield (
-      saved.toList.collect { case (shard, Some(pod)) => pod -> shard }
-        .groupMap(_._1)(_._2)
-        .view
-        .mapValues(_.toSet)
-        .toMap,
-      held.filter(_._2.nonEmpty)
-    )
+    } yield (byPod(saved), held.filter(_._2.nonEmpty))
+  }
 
   def simulate(events: List[SimulationEvent]): RIO[ShardManager, Unit] =
     for {
