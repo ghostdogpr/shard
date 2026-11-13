@@ -132,8 +132,7 @@ class ShardManager private (
   private def rebalance(role: Role, rebalanceImmediately: Boolean): UIO[Unit] =
     rebalanceSemaphores(role).flatMap(_.withPermit(rebalanceWithPermit(role, rebalanceImmediately)))
 
-  // the previous Shard Manager may have stopped before a pod applied the shards recorded on it, so they are sent again
-  // (pods ignore the ones they already have), before any rebalance can move them; a pod that left isn't called
+  // a pod may have missed shards recorded on it before the previous Shard Manager stopped
   private def resendAssignments(role: Role): UIO[Unit] =
     rebalanceSemaphores(role).flatMap(
       _.withPermit(
@@ -247,8 +246,7 @@ class ShardManager private (
   ): UIO[List[(PodAddress, Set[ShardId])]] =
     if (assign) assignShards(role, moves) else unassignShards(role, moves)
 
-  // once the pod has been called, the state is updated even on shutdown; the shards of a failed call stay on the pod,
-  // so they're assigned back in case the call reached it; returns the failed moves
+  // a failed call may have reached the pod, so it's undone; returns the failed moves
   private def unassignShards(role: Role, moves: Map[PodAddress, Set[ShardId]]): UIO[List[(PodAddress, Set[ShardId])]] =
     ZIO.filterNotPar(moves.toList) { (podAddress, shards) =>
       ZIO.uninterruptibleMask(restore =>
@@ -266,8 +264,8 @@ class ShardManager private (
       )
     }
 
-  // recorded and persisted before calling the pods, so that a call reaching its pod leaves the shards on it even if the
-  // Shard Manager stops; a failed call is undone, or else the shards stay on the pod; returns the failed moves
+  // persisted before the calls, so that shards a pod received stay on it if the Shard Manager stops;
+  // a failed call may have reached the pod, so it's undone; returns the failed moves
   private def assignShards(role: Role, moves: Map[PodAddress, Set[ShardId]]): UIO[List[(PodAddress, Set[ShardId])]] =
     for {
       reserved <- ZIO.foreach(moves.toList)((podAddress, shards) =>
@@ -278,7 +276,7 @@ class ShardManager private (
                     case (_, None)                          => ZIO.succeed(false)
                     case (podAddress, Some(reservedShards)) =>
                       val shards = moves(podAddress)
-                      // again, in case the pod registered again in the meantime
+                      // a pod that registered again during the call lost its shards
                       val keep   = setShards(role, shards, Some(podAddress)).flatMap(
                         ZIO
                           .foreach(_)(changed =>
@@ -300,8 +298,7 @@ class ShardManager private (
                   }
     } yield failed.map { case (podAddress, _) => podAddress -> moves(podAddress) }
 
-  // a pod that left is either gone, so a call can no longer reach it, or shutting down, so it ignores the shards:
-  // it isn't called, and a call that hasn't returned when it leaves fails, so that a hung call doesn't block the role
+  // fails once the pod left, so that a hung call doesn't block the role
   private def callPod(role: Role, podAddress: PodAddress)(call: Task[Unit]): Task[Unit] = {
     val left = new RuntimeException(s"Pod $podAddress left")
     ZIO.scoped(
@@ -320,7 +317,7 @@ class ShardManager private (
     )
   }
 
-  // unless the target is a pod that isn't registered; returns the shards that changed
+  // returns the shards that changed, or None if the target isn't registered
   private def setShards(role: Role, shards: Set[ShardId], target: Option[PodAddress]): UIO[Option[Set[ShardId]]] =
     modifyStates(states =>
       states.get(role).filter(state => target.forall(state.pods.contains)) match {
@@ -331,7 +328,7 @@ class ShardManager private (
       }
     )
 
-  // unassigns the shards that are still on the pod
+  // only the shards still on the pod
   private def releaseShards(role: Role, podAddress: PodAddress, shards: Set[ShardId]): UIO[Unit] =
     modifyStates(states =>
       (

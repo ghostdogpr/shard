@@ -233,7 +233,6 @@ object ShardManagerSpec extends ZIOSpecDefault {
                          }
                        )
             shards   = (1 to ManagerConfig.default.numberOfShards(role)).toSet
-            // the shards sent again to pod1 on startup never arrive, then pod1 leaves while that call is waiting
             held    <-
               (ZIO.serviceWithZIO[Storage](storage =>
                 storage.savePods(Set(pod1.pod, pod2.pod)) *>
@@ -433,9 +432,8 @@ object ShardManagerSpec extends ZIOSpecDefault {
   val shardManager: ZLayer[Any, Throwable, ShardManager] =
     ZLayer.make[ShardManager](config, storage, Pods.noop, PodsHealth.local, ShardManager.live)
 
-  // pod1 applies its first assign but the reply is lost, and the unassign undoing it runs `undo` first; unless the
-  // undo hangs, pod2 registers once the moves have settled; then the Shard Manager stops; returns the shards persisted
-  // on each pod and those each pod holds
+  // pod1 applies its first assign but the reply is lost, and `undo` runs before the unassign undoing it;
+  // returns the shards persisted and held per pod
   private def lostAssignReply(
     undo: Task[Unit],
     hangs: Boolean = false
@@ -475,7 +473,6 @@ object ShardManagerSpec extends ZIOSpecDefault {
                          persisted.set(assignments)
                      }
                    )
-      // waits until the moves in flight reached their pods and the routing matches what the pods hold
       settled    =
         (routed: Map[PodAddress, Set[ShardId]] => Boolean) =>
           Live.live(
