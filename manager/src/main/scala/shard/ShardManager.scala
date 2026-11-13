@@ -132,6 +132,23 @@ class ShardManager private (
   private def rebalance(role: Role, rebalanceImmediately: Boolean): UIO[Unit] =
     rebalanceSemaphores(role).flatMap(_.withPermit(rebalanceWithPermit(role, rebalanceImmediately)))
 
+  // a pod may have missed shards recorded on it before the previous Shard Manager stopped
+  private def resendAssignments(role: Role): UIO[Unit] =
+    rebalanceSemaphores(role).flatMap(
+      _.withPermit(
+        getAssignments(role).flatMap(assignments =>
+          ZIO.foreachParDiscard(assignments.values.flatten.toSet)(podAddress =>
+            stateRef.get.flatMap(states =>
+              ZIO.foreachDiscard(states.get(role).filter(_.pods.contains(podAddress)).map(_.shardsPerPod(podAddress)))(
+                shards =>
+                  callPod(role, podAddress)(podApi.assignShards(podAddress, role, shards)).ignore.when(shards.nonEmpty)
+              )
+            )
+          )
+        )
+      )
+    )
+
   // skips the role while another of its rebalances is running
   private def rebalanceIfIdle(role: Role): UIO[Unit] =
     rebalanceSemaphores(role)
@@ -222,37 +239,106 @@ class ShardManager private (
       )
     )
 
-  // once the pod has been called, the state is updated even on shutdown (unless an assigned pod left meanwhile)
-  // and only the shards that actually moved are announced; returns the failed moves
   private def moveShards(
     role: Role,
     moves: Map[PodAddress, Set[ShardId]],
     assign: Boolean
-  ): UIO[List[(PodAddress, Set[ShardId])]] = {
-    val call  = if (assign) podApi.assignShards else podApi.unassignShards
-    val event = if (assign) ShardingEvent.ShardsAssigned.apply else ShardingEvent.ShardsUnassigned.apply
+  ): UIO[List[(PodAddress, Set[ShardId])]] =
+    if (assign) assignShards(role, moves) else unassignShards(role, moves)
+
+  // a failed call may have reached the pod, so it's undone; returns the failed moves
+  private def unassignShards(role: Role, moves: Map[PodAddress, Set[ShardId]]): UIO[List[(PodAddress, Set[ShardId])]] =
     ZIO.filterNotPar(moves.toList) { (podAddress, shards) =>
-      val target = Option.when(assign)(podAddress)
       ZIO.uninterruptibleMask(restore =>
-        restore(call(podAddress, role, shards)).foldZIO(
-          _ => ZIO.succeed(false),
+        restore(callPod(role, podAddress)(podApi.unassignShards(podAddress, role, shards))).foldZIO(
+          _ => restore(callPod(role, podAddress)(podApi.assignShards(podAddress, role, shards))).ignore.as(false),
           _ =>
-            modifyStates(states =>
-              states.get(role).filter(state => target.forall(state.pods.contains)) match {
-                case Some(state) =>
-                  val changed = shards.filter(shard => state.shards.get(shard).exists(_ != target))
-                  (Some(changed), states.updated(role, state.copy(shards = state.shards ++ changed.map(_ -> target))))
-                case None        => (None, states)
-              }
-            ).flatMap(
+            setShards(role, shards, None).flatMap(
               ZIO
-                .foreach(_)(changed => eventsHub.publish(event(podAddress, role, changed)).when(changed.nonEmpty))
+                .foreach(_)(changed =>
+                  eventsHub.publish(ShardingEvent.ShardsUnassigned(podAddress, role, changed)).when(changed.nonEmpty)
+                )
                 .map(_.isDefined)
             )
         )
       )
     }
+
+  // persisted before the calls, so that shards a pod received stay on it if the Shard Manager stops;
+  // a failed call may have reached the pod, so it's undone; returns the failed moves
+  private def assignShards(role: Role, moves: Map[PodAddress, Set[ShardId]]): UIO[List[(PodAddress, Set[ShardId])]] =
+    for {
+      reserved <- ZIO.foreach(moves.toList)((podAddress, shards) =>
+                    setShards(role, shards, Some(podAddress)).map(podAddress -> _)
+                  )
+      _        <- persistAssignments(role).when(reserved.exists(_._2.exists(_.nonEmpty)))
+      failed   <- ZIO.filterNotPar(reserved) {
+                    case (_, None)                          => ZIO.succeed(false)
+                    case (podAddress, Some(reservedShards)) =>
+                      val shards = moves(podAddress)
+                      // a pod that registered again during the call lost its shards
+                      val keep   = setShards(role, shards, Some(podAddress)).flatMap(
+                        ZIO
+                          .foreach(_)(changed =>
+                            eventsHub
+                              .publish(ShardingEvent.ShardsAssigned(podAddress, role, reservedShards ++ changed))
+                              .when((reservedShards ++ changed).nonEmpty)
+                          )
+                          .map(_.isDefined)
+                      )
+                      ZIO.uninterruptibleMask(restore =>
+                        restore(callPod(role, podAddress)(podApi.assignShards(podAddress, role, shards))).foldZIO(
+                          _ =>
+                            restore(callPod(role, podAddress)(podApi.unassignShards(podAddress, role, shards)))
+                              .foldZIO(_ => keep, _ => releaseShards(role, podAddress, shards))
+                              .as(false),
+                          _ => keep
+                        )
+                      )
+                  }
+    } yield failed.map { case (podAddress, _) => podAddress -> moves(podAddress) }
+
+  // fails once the pod left, so that a hung call doesn't block the role
+  private def callPod(role: Role, podAddress: PodAddress)(call: Task[Unit]): Task[Unit] = {
+    val left = new RuntimeException(s"Pod $podAddress left")
+    ZIO.scoped(
+      eventsHub.subscribe.flatMap(events =>
+        stateRef.get.flatMap(states =>
+          if (states.get(role).exists(_.pods.contains(podAddress)))
+            call.raceFirst(
+              events.take.repeatUntil {
+                case ShardingEvent.PodUnregistered(pod) => pod.address == podAddress && pod.role == role
+                case _                                  => false
+              } *> ZIO.fail(left)
+            )
+          else ZIO.fail(left)
+        )
+      )
+    )
   }
+
+  // returns the shards that changed, or None if the target isn't registered
+  private def setShards(role: Role, shards: Set[ShardId], target: Option[PodAddress]): UIO[Option[Set[ShardId]]] =
+    modifyStates(states =>
+      states.get(role).filter(state => target.forall(state.pods.contains)) match {
+        case Some(state) =>
+          val changed = shards.filter(shard => state.shards.get(shard).exists(_ != target))
+          (Some(changed), states.updated(role, state.copy(shards = state.shards ++ changed.map(_ -> target))))
+        case None        => (None, states)
+      }
+    )
+
+  // only the shards still on the pod
+  private def releaseShards(role: Role, podAddress: PodAddress, shards: Set[ShardId]): UIO[Unit] =
+    modifyStates(states =>
+      (
+        (),
+        states.get(role).fold(states) { state =>
+          val released = shards.filter(shard => state.shards.get(shard).contains(Some(podAddress)))
+          states.updated(role, state.copy(shards = state.shards ++ released.map(_ -> None)))
+        }
+      )
+    )
 }
 
 object ShardManager {
@@ -323,7 +409,9 @@ object ShardManager {
         _                   <- shardManager.persistPods
         // rebalance immediately if there are unassigned shards
         _                   <- ZIO.foreachDiscard(initialStates) { case (role, state) =>
-                                 shardManager.rebalance(role, rebalanceImmediately = state.unassignedShards.nonEmpty).background(scope)
+                                 (shardManager.resendAssignments(role) *>
+                                   shardManager.rebalance(role, rebalanceImmediately = state.unassignedShards.nonEmpty))
+                                   .background(scope)
                                }
         // start a regular rebalance at the given interval, per role so that a slow one doesn't delay the others
         _                   <- state.get
