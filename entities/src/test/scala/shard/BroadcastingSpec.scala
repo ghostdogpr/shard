@@ -1,6 +1,7 @@
 package shard
 
 import shard.Messenger.MessengerTimeout
+import shard.ShardingSpec.{ assignShards, unassignShards }
 import shard.interfaces.Storage
 import shard.internal.LocalShardManagerClient
 import shard.javaSerialization.given

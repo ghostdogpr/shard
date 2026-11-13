@@ -353,6 +353,14 @@ object ShardingSpec extends ZIOSpecDefault {
 
   val otherPod: PodAddress = PodAddress("other", 1)
 
+  extension (sharding: Sharding) {
+    def assignShards(shards: Set[ShardId]): UIO[Unit] =
+      sharding.registration.someOrElseZIO(ZIO.dieMessage("not registered")).flatMap(sharding.assign(_, shards)).unit
+
+    def unassignShards(shards: Set[ShardId]): UIO[Unit] =
+      sharding.registration.someOrElseZIO(ZIO.dieMessage("not registered")).flatMap(sharding.unassign(_, shards)).unit
+  }
+
   // a Shard Manager that gives the shards of a pod that unregisters to another pod
   private def takingShardsBack(assignments: Ref[Map[ShardId, Option[PodAddress]]]): ShardManagerClient =
     new ShardManagerClient {
