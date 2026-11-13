@@ -3,7 +3,7 @@ package shard
 import shard.ShardManager.{ PodWithMetadata, ShardManagerState }
 import shard.interfaces.{ Pods, PodsHealth, Storage }
 import zio._
-import zio.stream.ZStream
+import zio.stream.{ SubscriptionRef, ZStream }
 import zio.test._
 
 import java.time.OffsetDateTime
@@ -190,10 +190,10 @@ object ShardManagerSpec extends ZIOSpecDefault {
             interrupted._1 == interrupted._2,
             interrupted._1.get(pod1.pod.address).exists(_.size == ManagerConfig.default.numberOfShards(role))
           )
-        },
+        } @@ TestAspect.timeout(10.seconds),
         test("A starting Shard Manager sends the pods the shards recorded on them") {
           for {
-            hosted <- Ref.make(Map.empty[PodAddress, Set[ShardId]])
+            hosted <- SubscriptionRef.make(Map.empty[PodAddress, Set[ShardId]])
             pods    = Pods.noop.project(noop =>
                         new Pods {
                           export noop.{ ping, sendMessage, sendStream, sendStreamAndReceiveStream, unassignShards }
@@ -208,21 +208,14 @@ object ShardManagerSpec extends ZIOSpecDefault {
                   storage.saveAssignments(role, shards.map(_ -> Some(pod1.pod.address)).toMap)
               ) *>
                 (ZIO.service[ShardManager] *>
-                  Live.live(
-                    hosted.get
-                      .repeat(
-                        Schedule.recurUntil[Map[PodAddress, Set[ShardId]]](_.get(pod1.pod.address).contains(shards)) <*
-                          Schedule.spaced(10.millis)
-                      )
-                      .timeoutFail(new Exception("the shards weren't sent"))(5.seconds)
-                  ))
+                  hosted.changes.filter(_.get(pod1.pod.address).contains(shards)).runHead)
                   .provideSome[Storage](config, pods, PodsHealth.local, ShardManager.live))
                 .provide(Storage.memory)
-          } yield assertTrue(held == Map(pod1.pod.address -> shards))
-        },
+          } yield assertTrue(held.contains(Map(pod1.pod.address -> shards)))
+        } @@ TestAspect.timeout(10.seconds),
         test("A call that never returns doesn't hold back the role once its pod left") {
           for {
-            hosted  <- Ref.make(Map.empty[PodAddress, Set[ShardId]])
+            hosted  <- SubscriptionRef.make(Map.empty[PodAddress, Set[ShardId]])
             started <- Promise.make[Nothing, Unit]
             pods     = Pods.noop.project(noop =>
                          new Pods {
@@ -239,20 +232,13 @@ object ShardManagerSpec extends ZIOSpecDefault {
                   storage.saveAssignments(role, shards.map(_ -> Some(pod1.pod.address)).toMap)
               ) *>
                 (ZIO.service[ShardManager] *>
-                  Live.live(started.await.timeoutFail(new Exception("the shards weren't sent to pod1"))(5.seconds)) *>
+                  started.await *>
                   ZIO.serviceWithZIO[ShardManager](_.unregister(pod1.pod.address)) *>
-                  Live.live(
-                    hosted.get
-                      .repeat(
-                        Schedule.recurUntil[Map[PodAddress, Set[ShardId]]](_.get(pod2.pod.address).contains(shards)) <*
-                          Schedule.spaced(10.millis)
-                      )
-                      .timeoutFail(new Exception("the shards weren't reassigned"))(5.seconds)
-                  ))
+                  hosted.changes.filter(_.get(pod2.pod.address).contains(shards)).runHead)
                   .provideSome[Storage](config, pods, PodsHealth.local, ShardManager.live))
                 .provide(Storage.memory)
-          } yield assertTrue(held == Map(pod2.pod.address -> shards))
-        },
+          } yield assertTrue(held.contains(Map(pod2.pod.address -> shards)))
+        } @@ TestAspect.timeout(10.seconds),
         test("Simulate scaling down scenario") {
           (for {
             // setup 25 pods first
@@ -382,11 +368,7 @@ object ShardManagerSpec extends ZIOSpecDefault {
                                                           )
                                                           .timeoutFail(new Exception("assignments not persisted"))(5.seconds)
                                                       )
-                                       _           <- Live.live(
-                                                        stuck.await.timeoutFail(new Exception("pod4's write didn't start"))(
-                                                          5.seconds
-                                                        )
-                                                      )
+                                       _           <- stuck.await
                                        _           <- closing.set(true)
                                      } yield assertTrue(
                                        assignments.get(1).flatten.contains(pod1.address),
@@ -457,7 +439,9 @@ object ShardManagerSpec extends ZIOSpecDefault {
       firstUndo <- Ref.make(Option(undo))
       inFlight  <- Ref.make(0)
       persisted <- Ref.make(Map.empty[ShardId, Option[PodAddress]])
-      call       = (effect: Task[Unit]) => (inFlight.update(_ + 1) *> effect).ensuring(inFlight.update(_ - 1))
+      signal    <- SubscriptionRef.make(0)
+      changed    = signal.update(_ + 1)
+      call       = (effect: Task[Unit]) => (inFlight.update(_ + 1) *> effect).ensuring(inFlight.update(_ - 1) *> changed)
       pods       = Pods.noop.project(noop =>
                      new Pods {
                        export noop.{ ping, sendMessage, sendStream, sendStreamAndReceiveStream }
@@ -468,7 +452,7 @@ object ShardManagerSpec extends ZIOSpecDefault {
                          )
                        def unassignShards(pod: PodAddress, role: Role, shards: Set[ShardId]): Task[Unit] =
                          call(
-                           firstUndo.getAndSet(None).flatMap(ZIO.foreachDiscard(_)(identity)) *>
+                           firstUndo.getAndSet(None).flatMap(ZIO.foreachDiscard(_)(changed *> _)) *>
                              hosted.update(m => m.updated(pod, m.getOrElse(pod, Set.empty) -- shards))
                          )
                      }
@@ -477,23 +461,20 @@ object ShardManagerSpec extends ZIOSpecDefault {
                      new Storage {
                        export base.{ assignmentsStream, getAssignments, getPods, savePods }
                        def saveAssignments(role: Role, assignments: Map[ShardId, Option[PodAddress]]): Task[Unit] =
-                         persisted.set(assignments)
+                         persisted.set(assignments) *> changed
                      }
                    )
       settled    =
         (routed: Map[PodAddress, Set[ShardId]] => Boolean) =>
-          Live.live(
-            (ZIO.serviceWithZIO[ShardManager](_.getAssignments(role)).map(byPod) <*>
-              hosted.get.map(_.filter(_._2.nonEmpty)) <*> firstUndo.get <*> inFlight.get)
-              .repeat(
-                Schedule
-                  .recurUntil[(Map[PodAddress, Set[ShardId]], Map[PodAddress, Set[ShardId]], Option[Task[Unit]], Int)] {
-                    case (routing, held, pending, calls) =>
-                      pending.isEmpty && (hangs || calls == 0) && routing == held && routed(routing)
-                  } <* Schedule.spaced(10.millis)
-              )
-              .timeoutFail(new Exception("the moves didn't settle"))(5.seconds)
-          )
+          signal.changes
+            .mapZIO(_ =>
+              ZIO.serviceWithZIO[ShardManager](_.getAssignments(role)).map(byPod) <*>
+                hosted.get.map(_.filter(_._2.nonEmpty)) <*> firstUndo.get <*> inFlight.get
+            )
+            .filter { case (routing, held, pending, calls) =>
+              pending.isEmpty && (hangs || calls == 0) && routing == held && routed(routing)
+            }
+            .runHead
       _         <- (simulate(List(SimulationEvent.PodRegister(pod1.pod))) *>
                      settled(_ => true) *>
                      (simulate(List(SimulationEvent.PodRegister(pod2.pod))) *> settled(_.nonEmpty)).unless(hangs))
