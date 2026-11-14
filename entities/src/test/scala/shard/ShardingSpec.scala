@@ -61,21 +61,24 @@ object ShardingSpec extends ZIOSpecDefault {
             pods   <- Sharding.getPods
           } yield assertTrue(pods == Set(PodAddress(config.selfHost, config.shardingPort)))
         },
-        test("A pod that unregistered sends messages to the pod that took its shards, and stops its singletons") {
+        test("A pod stops its singletons when it unregisters, and sends messages to the pod that took its shards") {
           for {
+            started <- Promise.make[Nothing, Unit]
             stopped <- Promise.make[Nothing, Unit]
-            _       <- Sharding.registerSingleton("singleton", ZIO.never.onInterrupt(stopped.succeed(())))
             _       <- Sharding.registerEntity(Counter)(behavior)
             _       <- Sharding.registerScoped
+            _       <- Sharding
+                         .registerSingleton("singleton", (started.succeed(()) *> ZIO.never).onInterrupt(stopped.succeed(())))
+                         .uninterruptible *> started.await
             counter <- Sharding.messenger(Counter, MessengerTimeout.Timeout(5.seconds))
             _       <- counter.send("c1")(IncrementCounter())        // handled locally
             _       <- Sharding.unregister
+            done    <- stopped.isDone
             // the Shard Manager gives the shards of the pod to another pod, without unassigning them from it
             _       <- giveAllShardsTo(otherPod)
             _       <- (Clock.sleep(10.millis) *> Sharding.getPods).repeatUntil(_ == Set(otherPod))
             _       <- counter.sendDiscard("c1")(IncrementCounter()) // sent to the other pod
-            _       <- stopped.await
-          } yield assertCompletes
+          } yield assertTrue(done)
         },
         test("A message expecting a reply from another pod fails with Pods.noop") {
           for {
@@ -116,8 +119,11 @@ object ShardingSpec extends ZIOSpecDefault {
                          )
         } yield assertCompletes
       },
-      test("A singleton slow to stop doesn't block the assignments of a pod reconnecting to the storage") {
-        val config = Config.default.copy(refreshAssignmentsRetryInterval = 10.millis)
+      test(
+        "A singleton slow to stop doesn't block the unregister or the assignments of a pod reconnecting to the storage"
+      ) {
+        val config =
+          Config.default.copy(refreshAssignmentsRetryInterval = 10.millis, entityTerminationTimeout = 100.millis)
         val self   = PodAddress(config.selfHost, config.shardingPort)
         for {
           assignments <- Ref.make(Map(1 -> Option(self)))
