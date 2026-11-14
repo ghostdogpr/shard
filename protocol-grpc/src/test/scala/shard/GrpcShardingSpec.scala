@@ -117,6 +117,17 @@ object GrpcShardingSpec extends ZIOSpecDefault {
               )
             )
           } @@ TestAspect.timeout(10.seconds),
+          test("A ping reaches a pod that starts at an address that couldn't be reached") {
+            ZIO.scoped(for {
+              pods   <- (ZLayer.succeed(GrpcConfig.default) >>> GrpcPods.live).build.map(_.get[Pods])
+              config <- ZIO.service[Config].map(_.copy(shardingPort = 54331))
+              address = PodAddress(config.selfHost, config.shardingPort)
+              before <- pods.ping(address).exit
+              server  = ZLayer.succeed(config) ++ ZLayer.succeed(GrpcConfig.default) ++ ZLayer.service[Sharding]
+              _      <- (server >>> GrpcShardingService.live).build
+              after  <- pods.ping(address).exit
+            } yield assertTrue(before.isFailure, after.isSuccess))
+          },
           test("Releasing GrpcPods closes its connections, including those opened from uninterruptible code or after") {
             for {
               self     <- ZIO.serviceWith[Config](config => PodAddress(config.selfHost, config.shardingPort))

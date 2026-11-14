@@ -4,7 +4,7 @@ import shard.errors._
 import shard.interfaces.Pods
 import shard.interfaces.Pods.{ BinaryMessage, BinaryReply }
 import shard.protocol.Sharding._
-import io.grpc.{ ClientInterceptors, ManagedChannelBuilder, Status, StatusException }
+import io.grpc.{ ClientInterceptors, ConnectivityState, ManagedChannel, ManagedChannelBuilder, Status, StatusException }
 import proteus.client.ZioClientBackend
 import zio._
 import zio.stream.ZStream
@@ -15,32 +15,42 @@ class GrpcPods(
   config: GrpcConfig,
   // closes the channels when the layer is released, or right away if it already was
   scope: Scope,
-  connections: Ref.Synchronized[Map[PodAddress, PodClient]]
+  connections: Ref.Synchronized[Map[PodAddress, GrpcPods.Connection]]
 ) extends Pods {
 
   private def getConnection(pod: PodAddress): Task[PodClient] =
+    connection(pod).map(_.client)
+
+  private def connection(pod: PodAddress): Task[GrpcPods.Connection] =
     // optimize happy path and only get first
     connections.get.flatMap(_.get(pod) match {
-      case Some(client) => ZIO.succeed(client)
-      case None         =>
+      case Some(connection) => ZIO.succeed(connection)
+      case None             =>
         // then do modify in the case it doesn't already exist
         connections.modifyZIO { map =>
           map.get(pod) match {
-            case Some(client) => ZIO.succeed((client, map))
-            case None         =>
-              scope
-                .extend(
-                  ZIO.logDebug(s"Opening connection to pod $pod") *>
-                    ZIO.addFinalizer(ZIO.logDebug(s"Closing connection to pod $pod")) *>
-                    GrpcPods.clientBackend(pod.host, pod.port, config)
-                )
-                .map { backend =>
-                  val client = new PodClient(backend)
-                  (client, map.updated(pod, client))
-                }
+            case Some(connection) => ZIO.succeed((connection, map))
+            case None             =>
+              scope.fork.flatMap(connectionScope =>
+                connectionScope
+                  .extend(
+                    ZIO.logDebug(s"Opening connection to pod $pod") *>
+                      ZIO.addFinalizer(ZIO.logDebug(s"Closing connection to pod $pod")) *>
+                      GrpcPods.channel(pod.host, pod.port, config)
+                  )
+                  .map { channel =>
+                    val connection =
+                      GrpcPods.Connection(new PodClient(GrpcPods.backend(channel, config)), channel, connectionScope)
+                    (connection, map.updated(pod, connection))
+                  }
+              )
           }
         }.uninterruptible
     })
+
+  private def close(pod: PodAddress, connection: GrpcPods.Connection): UIO[Unit] =
+    connections.update(map => if (map.get(pod).contains(connection)) map - pod else map) *>
+      connection.scope.close(Exit.unit)
 
   private def mapClientError(pod: PodAddress, streamedReplies: Boolean)(ex: StatusException): Throwable =
     ex.getStatus.getCode match {
@@ -56,7 +66,18 @@ class GrpcPods(
     getConnection(pod).flatMap(_.unassignShards(UnassignShardsRequest(shards.toList, role.name, registration)).unit)
 
   def ping(pod: PodAddress): Task[Option[String]] =
-    getConnection(pod).flatMap(_.pingShards(PingShardsRequest()).map(_.registration))
+    connection(pod).flatMap(connection =>
+      connection.client
+        .pingShards(PingShardsRequest())
+        .catchSome {
+          // a channel that failed to reach an earlier pod at this address waits for its backoff to connect again
+          case ex
+              if ex.getStatus.getCode == Status.Code.UNAVAILABLE &&
+                connection.channel.getState(false) == ConnectivityState.TRANSIENT_FAILURE =>
+            close(pod, connection) *> getConnection(pod).flatMap(_.pingShards(PingShardsRequest()))
+        }
+        .map(_.registration)
+    )
 
   private def singleReply(pod: PodAddress)(response: IO[StatusException, SendResponse]): Task[BinaryReply] =
     response.mapBoth(mapClientError(pod, streamedReplies = false), _.reply)
@@ -81,10 +102,15 @@ class GrpcPods(
 
 object GrpcPods {
 
+  private[shard] final case class Connection(client: PodClient, channel: ManagedChannel, scope: Scope.Closeable)
+
   /**
    * Open a gRPC client to the given host and port, closed when the scope ends.
    */
   private[shard] def clientBackend(host: String, port: Int, config: GrpcConfig): RIO[Scope, ZioClientBackend] =
+    channel(host, port, config).map(backend(_, config))
+
+  private def channel(host: String, port: Int, config: GrpcConfig): RIO[Scope, ManagedChannel] =
     ZIO.suspend {
       val builder =
         ManagedChannelBuilder.forAddress(host, port).maxInboundMessageSize(config.maxInboundMessageSize).usePlaintext()
@@ -97,10 +123,10 @@ object GrpcPods {
             channel.shutdownNow(): Unit
           }.ignore
         }
-        .map(channel =>
-          ZioClientBackend(ClientInterceptors.intercept(channel, config.clientInterceptors*), config.streamingPrefetch)
-        )
     }
+
+  private def backend(channel: ManagedChannel, config: GrpcConfig): ZioClientBackend =
+    ZioClientBackend(ClientInterceptors.intercept(channel, config.clientInterceptors*), config.streamingPrefetch)
 
   /**
    * A layer that creates an instance of Pods that communicates using the gRPC protocol.
@@ -110,7 +136,7 @@ object GrpcPods {
       for {
         config      <- ZIO.service[GrpcConfig]
         scope       <- ZIO.serviceWithZIO[Scope](_.forkWith(ExecutionStrategy.Parallel))
-        connections <- Ref.Synchronized.make(Map.empty[PodAddress, PodClient])
+        connections <- Ref.Synchronized.make(Map.empty[PodAddress, Connection])
       } yield new GrpcPods(config, scope, connections)
     }
 }
