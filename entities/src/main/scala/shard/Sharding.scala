@@ -37,7 +37,8 @@ class Sharding private (
   val register: Task[Unit] =
     ZIO.logDebug(s"Registering pod $address to Shard Manager") *>
       isShuttingDownRef.set(false) *>
-      shardManager.register(address, config.role)
+      shardManager.register(address, config.role) *>
+      startSingletonsIfNeeded
 
   val unregister: UIO[Unit] =
     (
@@ -52,6 +53,12 @@ class Sharding private (
               .catchAllCause(ZIO.logErrorCause(s"Error during stop of entity $name", _))
           }
         ) *>
+        // in a fresh fiber, so that a pending interruption of a finalizer doesn't skip the unregister
+        stopSingletonsIfNeeded.disconnect
+          .timeout(config.entityTerminationTimeout)
+          .interruptible
+          .forkDaemon
+          .flatMap(_.join) *>
         ZIO.logDebug(s"Unregistering pod $address to Shard Manager") *>
         shardManager.unregister(address)
     ).retry(config.unregisterRetrySchedule)
@@ -59,7 +66,7 @@ class Sharding private (
 
   val isSingletonNode: UIO[Boolean] =
     // Start singletons on the pod hosting shard 1.
-    shardAssignments.get.map(_.get(1).contains(address))
+    isShuttingDownRef.get.negate && shardAssignments.get.map(_.get(1).contains(address))
 
   // `isSingletonNode` is checked before the lock, which is held while a singleton stops,
   // and again under it, to act on the latest assignments
@@ -71,7 +78,7 @@ class Sharding private (
             case (name, run, None) =>
               ZIO.logDebug(s"Starting singleton $name") *>
                 Metrics.singletons.tagged("role", config.role.name).tagged("singleton_name", name).increment *>
-                run.forkDaemon.map(fiber => (name, run, Some(fiber)))
+                run.interruptible.forkDaemon.map(fiber => (name, run, Some(fiber)))
             case other             => ZIO.succeed(other)
           },
           onFalse = ZIO.succeed(singletons)
@@ -79,20 +86,23 @@ class Sharding private (
       }
     }
 
+  // uninterruptible, so that interrupting the caller doesn't leave a stopped fiber in the state
   private def stopSingletonsIfNeeded: UIO[Unit] =
     ZIO.unlessZIODiscard(isSingletonNode) {
       singletons.updateZIO { singletons =>
         ZIO.ifZIO(isSingletonNode)(
           onTrue = ZIO.succeed(singletons),
-          onFalse = ZIO.foreach(singletons) {
-            case (name, run, Some(fiber)) =>
-              ZIO.logDebug(s"Stopping singleton $name") *>
-                Metrics.singletons.tagged("role", config.role.name).tagged("singleton_name", name).decrement *>
-                fiber.interrupt.as((name, run, None))
-            case other                    => ZIO.succeed(other)
-          }
+          onFalse = ZIO
+            .foreach(singletons) {
+              case (name, run, Some(fiber)) =>
+                ZIO.logDebug(s"Stopping singleton $name") *>
+                  Metrics.singletons.tagged("role", config.role.name).tagged("singleton_name", name).decrement *>
+                  fiber.interruptFork.as((name, run, None) -> List(fiber))
+              case other                    => ZIO.succeed(other -> Nil)
+            }
+            .flatMap(stopped => ZIO.foreachParDiscard(stopped.flatMap(_._2))(_.await).as(stopped.map(_._1)))
         )
-      }
+      }.uninterruptible
     }
 
   // a singleton slow to stop must not delay the processing of the assignments
