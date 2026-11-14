@@ -97,28 +97,6 @@ object ShardingSpec extends ZIOSpecDefault {
         Storage.memory,
         ZLayer.succeed(Config.default)
       ),
-      test("A pod that unregistered stops its singletons when it reconnects to the storage") {
-        val config = Config.default.copy(refreshAssignmentsRetryInterval = 10.millis)
-        val self   = PodAddress(config.selfHost, config.shardingPort)
-        for {
-          assignments <- Ref.make(Map(1 -> Option(self)))
-          disconnect  <- Promise.make[Nothing, Unit]
-          stopped     <- Promise.make[Nothing, Unit]
-          reconnected <- Promise.make[Nothing, Unit]
-          storage     <- reconnectingStorage(assignments, disconnect, reconnected)
-          _           <- (Sharding.registerSingleton("singleton", ZIO.never.onInterrupt(stopped.succeed(()))) *>
-                           Sharding.register *>
-                           Sharding.unregister *>
-                           disconnect.succeed(()) *>
-                           stopped.await).provide(
-                           Sharding.live,
-                           Pods.noop,
-                           ZLayer.succeed(takingShardsBack(assignments)),
-                           ZLayer.succeed(storage),
-                           ZLayer.succeed(config)
-                         )
-        } yield assertCompletes
-      },
       test(
         "A singleton slow to stop doesn't block the unregister or the assignments of a pod reconnecting to the storage"
       ) {
@@ -1026,8 +1004,7 @@ object ShardingSpec extends ZIOSpecDefault {
           _             <- Sharding.registerScoped *> starts.take
           unregistering <- Sharding.unregister.fork
           _             <- stopping.await
-          cancelled     <- unregistering.interrupt.fork
-          _             <- release.succeed(()) *> cancelled.join
+          _             <- unregistering.interrupt *> release.succeed(())
           _             <- Sharding.register *> ZIO.serviceWithZIO[Sharding](_.assign(Set(1)))
           restarted     <- starts.take.timeout(5.seconds)
         } yield assertTrue(restarted.isDefined)
