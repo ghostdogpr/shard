@@ -86,15 +86,26 @@ class Sharding private (
       singletons.updateZIO { singletons =>
         ZIO.ifZIO(isSingletonNode)(
           onTrue = ZIO.succeed(singletons),
-          onFalse = ZIO.foreachPar(singletons) {
-            case (name, run, Some(fiber)) =>
-              ZIO.logDebug(s"Stopping singleton $name") *>
-                Metrics.singletons.tagged("role", config.role.name).tagged("singleton_name", name).decrement *>
-                fiber.interrupt.timeout(config.entityTerminationTimeout).as((name, run, None))
-            case other                    => ZIO.succeed(other)
-          }
+          onFalse = ZIO
+            .foreach(singletons) {
+              case (name, run, Some(fiber)) =>
+                ZIO.logDebug(s"Stopping singleton $name") *>
+                  Metrics.singletons.tagged("role", config.role.name).tagged("singleton_name", name).decrement *>
+                  fiber.interruptFork.as((name, run, None) -> List(fiber))
+              case other                    => ZIO.succeed(other -> Nil)
+            }
+            .flatMap(stopped =>
+              // in a daemon fiber, so that interrupting the caller doesn't discard the stopped state
+              ZIO
+                .foreachParDiscard(stopped.flatMap(_._2))(_.await)
+                .timeout(config.entityTerminationTimeout)
+                .interruptible
+                .forkDaemon
+                .flatMap(_.join)
+                .as(stopped.map(_._1))
+            )
         )
-      }
+      }.uninterruptible
     }
 
   // a singleton slow to stop must not delay the processing of the assignments

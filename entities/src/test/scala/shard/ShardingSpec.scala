@@ -128,12 +128,15 @@ object ShardingSpec extends ZIOSpecDefault {
         for {
           assignments <- Ref.make(Map(1 -> Option(self)))
           disconnect  <- Promise.make[Nothing, Unit]
+          started     <- Promise.make[Nothing, Unit]
           release     <- Promise.make[Nothing, Unit]
           reconnected <- Promise.make[Nothing, Unit]
           storage     <- reconnectingStorage(assignments, disconnect, reconnected)
-          result      <- (Sharding.registerSingleton("singleton", ZIO.never.onInterrupt(release.await)) *>
-                           Sharding.register *>
-                           Sharding.unregister *>
+          result      <- (Sharding.registerSingleton(
+                           "singleton",
+                           (started.succeed(()) *> ZIO.never).onInterrupt(release.await)
+                         ) *>
+                           ZIO.scoped(Sharding.registerScoped *> started.await) *>
                            disconnect.succeed(()) *>
                            reconnected.await.timeout(5.seconds) <*
                            release.succeed(())).provide(
@@ -1010,6 +1013,24 @@ object ShardingSpec extends ZIOSpecDefault {
           _       <- sent.join
           c1      <- counter.send("c1")(GetCounter())
         } yield assertTrue(pending.forall(_.isEmpty), items == Chunk(1, 2, 3, 4, 5), c1 == 2)
+      },
+      test("A singleton stopped by a cancelled unregister starts again when the pod registers again") {
+        for {
+          starts        <- Queue.unbounded[Unit]
+          stopping      <- Promise.make[Nothing, Unit]
+          release       <- Promise.make[Nothing, Unit]
+          _             <- Sharding.registerSingleton(
+                             "singleton",
+                             (starts.offer(()) *> ZIO.never).onInterrupt(stopping.succeed(()) *> release.await)
+                           )
+          _             <- Sharding.registerScoped *> starts.take
+          unregistering <- Sharding.unregister.fork
+          _             <- stopping.await
+          cancelled     <- unregistering.interrupt.fork
+          _             <- release.succeed(()) *> cancelled.join
+          _             <- Sharding.register *> ZIO.serviceWithZIO[Sharding](_.assign(Set(1)))
+          restarted     <- starts.take.timeout(5.seconds)
+        } yield assertTrue(restarted.isDefined)
       },
       test("Cluster singleton") {
         for {
