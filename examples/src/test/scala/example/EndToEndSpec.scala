@@ -1,22 +1,23 @@
 package example
 
+import java.net.Socket
+
+import com.dimafeng.testcontainers.GenericContainer
+import example.simple.GuildBehavior
+import example.simple.GuildBehavior.{Guild, GuildFull}
+import example.simple.GuildBehavior.GuildMessage.{Join, Stream, Timeout}
+import io.grpc.{Status, StatusException}
+import sage.{Endpoint, SageConfig, Topology}
+import sage.backend.SageClient
+import zio.{Config => _, _}
+import zio.Clock.ClockLive
+import zio.test._
+import zio.test.Assertion._
+import zio.test.TestAspect.{sequential, withLiveClock}
+
 import shard._
 import shard.errors.SendTimeout
 import shard.interfaces.PodsHealth
-import com.dimafeng.testcontainers.GenericContainer
-import example.simple.GuildBehavior
-import example.simple.GuildBehavior.{ Guild, GuildFull }
-import example.simple.GuildBehavior.GuildMessage.{ Join, Stream, Timeout }
-import io.grpc.{ Status, StatusException }
-import sage.{ Endpoint, SageConfig, Topology }
-import sage.backend.SageClient
-import zio.{ Config => _, _ }
-import zio.Clock.ClockLive
-import zio.test.Assertion._
-import zio.test.TestAspect.{ sequential, withLiveClock }
-import zio.test._
-
-import java.net.Socket
 
 object EndToEndSpec extends ZIOSpecDefault {
 
@@ -24,8 +25,8 @@ object EndToEndSpec extends ZIOSpecDefault {
     ZLayer.scoped(ZIO.serviceWithZIO[ManagerConfig](config => Server.run.forkScoped *> awaitPort(config.apiPort)))
 
   /**
-   * Wait until a server accepts connections on the given port.
-   */
+    * Wait until a server accepts connections on the given port.
+    */
   def awaitPort(port: Int): UIO[Unit] =
     ZIO.withClock(ClockLive)(
       ZIO.attemptBlocking(new Socket("localhost", port).close()).retry(Schedule.spaced(50.millis)).orDie

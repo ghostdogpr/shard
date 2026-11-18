@@ -1,8 +1,9 @@
 package example.complex
 
+import zio._
+
 import shard._
 import shard.interfaces._
-import zio._
 
 object ShardManagerApp extends ZIOAppDefault {
   def run: Task[Nothing] =

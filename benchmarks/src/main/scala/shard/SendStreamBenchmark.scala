@@ -1,10 +1,11 @@
 package shard
 
-import org.openjdk.jmh.annotations._
-import zio.{ durationInt, Fiber, Runtime, Unsafe, ZIO }
-
 import java.util.concurrent.TimeUnit
+
 import scala.compiletime.uninitialized
+
+import org.openjdk.jmh.annotations._
+import zio.{durationInt, Fiber, Runtime, Unsafe, ZIO}
 
 @State(Scope.Thread)
 @BenchmarkMode(Array(Mode.Throughput))
@@ -17,16 +18,14 @@ class SendStreamBenchmark {
 
   @Setup
   def setup(): Unit =
-    fiber = Unsafe.unsafe(implicit unsafe =>
-      Runtime.default.unsafe.run(Server.run.forkDaemon <* ZIO.sleep(3.seconds)).getOrThrow()
-    )
+    fiber = Unsafe.unsafe(implicit unsafe => Runtime.default.unsafe.run(Server.run.forkDaemon <* ZIO.sleep(3.seconds)).getOrThrow())
 
   @TearDown
   def tearDown(): Unit =
-    Unsafe.unsafe(implicit unsafe => Runtime.default.unsafe.run(fiber.interrupt))
+    Unsafe.unsafe(implicit unsafe => Runtime.default.unsafe.run(fiber.interrupt): Unit)
 
   // 8 parallel server-streams, each receiving 100 messages → 800 messages per op
   @Benchmark
   def serverStream(): Unit =
-    Unsafe.unsafe(implicit unsafe => Runtime.default.unsafe.run(Client.sendStream(8, 100, 8)))
+    Unsafe.unsafe(implicit unsafe => Runtime.default.unsafe.run(Client.sendStream(8, 100, 8)): Unit)
 }

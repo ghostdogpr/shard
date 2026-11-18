@@ -1,19 +1,19 @@
 package shard
 
+import io.grpc.{CallOptions, Channel, ClientCall, ClientInterceptor, Metadata, MethodDescriptor}
 import io.grpc.ForwardingClientCall.SimpleForwardingClientCall
-import io.grpc.{ CallOptions, Channel, ClientCall, ClientInterceptor, Metadata, MethodDescriptor }
 
 /**
- * Helpers for building common `ClientInterceptor` instances to put in
- * [[GrpcConfig.clientInterceptors]].
- */
+  * Helpers for building common `ClientInterceptor` instances to put in
+  * [[GrpcConfig.clientInterceptors]].
+  */
 object ShardingClientInterceptor {
 
   /**
-   * Builds a client interceptor that lets you mutate the outgoing request headers before every
-   * call. The `update` callback receives the `Metadata` for the current call and may put,
-   * remove or read entries on it.
-   */
+    * Builds a client interceptor that lets you mutate the outgoing request headers before every
+    * call. The `update` callback receives the `Metadata` for the current call and may put,
+    * remove or read entries on it.
+    */
   def headersUpdater(update: Metadata => Unit): ClientInterceptor =
     new ClientInterceptor {
       def interceptCall[ReqT, RespT](

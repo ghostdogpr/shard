@@ -2,7 +2,7 @@ package shard
 
 import io.grpc.StatusException
 import proteus.ProtobufCodec
-import proteus.server.{ GrpcContext, ServerInterceptor }
+import proteus.server.{GrpcContext, ServerInterceptor}
 import zio._
 import zio.stream.ZStream
 
@@ -10,26 +10,26 @@ private type UnaryEffect[A]  = IO[StatusException, A]
 private type StreamEffect[A] = ZStream[Any, StatusException, A]
 
 /**
- * Type alias for a proteus `ServerInterceptor` scoped to shard's effect types
- * (`IO` and `ZStream` with `StatusException` errors) and the default
- * `GrpcContext`. Use the smart constructors in the companion object — or implement
- * the trait directly for advanced pre/post/error wrapping.
- */
+  * Type alias for a proteus `ServerInterceptor` scoped to shard's effect types
+  * (`IO` and `ZStream` with `StatusException` errors) and the default
+  * `GrpcContext`. Use the smart constructors in the companion object — or implement
+  * the trait directly for advanced pre/post/error wrapping.
+  */
 type ShardingServerInterceptor =
   ServerInterceptor[UnaryEffect, UnaryEffect, StreamEffect, StreamEffect, GrpcContext, GrpcContext]
 
 object ShardingServerInterceptor {
 
   /**
-   * An interceptor that does nothing — useful as a starting point or for composition.
-   */
+    * An interceptor that does nothing — useful as a starting point or for composition.
+    */
   val identity: ShardingServerInterceptor =
     ServerInterceptor.empty[UnaryEffect, StreamEffect, GrpcContext]
 
   /**
-   * Builds an interceptor that runs `effect` before each handler. If the effect fails,
-   * the RPC fails with that error and the handler is never called.
-   */
+    * Builds an interceptor that runs `effect` before each handler. If the effect fails,
+    * the RPC fails with that error and the handler is never called.
+    */
   def beforeEach(effect: GrpcContext => IO[StatusException, Unit]): ShardingServerInterceptor =
     new ShardingServerInterceptor {
       def unary[Req: ProtobufCodec, Resp: ProtobufCodec](
@@ -54,9 +54,9 @@ object ShardingServerInterceptor {
     }
 
   /**
-   * Composes a sequence of interceptors into a single one. The first interceptor in the
-   * sequence runs outermost (i.e. its pre-logic runs first, its post-logic runs last).
-   */
+    * Composes a sequence of interceptors into a single one. The first interceptor in the
+    * sequence runs outermost (i.e. its pre-logic runs first, its post-logic runs last).
+    */
   def compose(interceptors: Seq[ShardingServerInterceptor]): ShardingServerInterceptor =
     interceptors.reduceRightOption(wrap).getOrElse(identity)
 

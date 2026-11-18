@@ -1,8 +1,9 @@
 package shard.internal
 
-import shard.{ Config, PodAddress, Role, ShardId }
+import zio.{Task, ZIO, ZLayer}
+
+import shard.{Config, PodAddress, Role, ShardId}
 import shard.interfaces.ShardManagerClient
-import zio.{ Task, ZIO, ZLayer }
 
 private[shard] object LocalShardManagerClient {
 

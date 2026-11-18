@@ -1,15 +1,15 @@
 package shard
 
-import com.coralogix.zio.k8s.client.model.{ K8sNamespace, LabelSelector }
+import com.coralogix.zio.k8s.client.model.{K8sNamespace, LabelSelector}
 import zio._
 
 /**
- * Configuration for K8sPodsHealth
- * @param cacheSize how many items we keep in the pod status cache
- * @param cacheDuration how long we keep items in the pod status cache
- * @param namespace namespace to query the pods of a role from (if None, query all namespaces)
- * @param labelSelector label selector to filter the pods of a role by (if None, no filter)
- */
+  * Configuration for K8sPodsHealth
+  * @param cacheSize how many items we keep in the pod status cache
+  * @param cacheDuration how long we keep items in the pod status cache
+  * @param namespace namespace to query the pods of a role from (if None, query all namespaces)
+  * @param labelSelector label selector to filter the pods of a role by (if None, no filter)
+  */
 case class K8sConfig(
   cacheSize: Int,
   cacheDuration: Duration,

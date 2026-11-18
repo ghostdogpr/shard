@@ -11,8 +11,6 @@ on:
 jobs:
   lint:
     runs-on: ubuntu-24.04
-    strategy:
-      fail-fast: false
     steps:
       - name: Checkout current branch
         uses: actions/checkout@v6
@@ -32,11 +30,6 @@ jobs:
 
   test:
     runs-on: ubuntu-24.04
-    strategy:
-      fail-fast: false
-      matrix:
-        java: ['25']
-        scala: ['3.9.0']
     steps:
       - name: Checkout current branch
         uses: actions/checkout@v6
@@ -48,11 +41,11 @@ jobs:
         uses: actions/setup-java@v6
         with:
           distribution: temurin
-          java-version: ${{ matrix.java }}
+          java-version: 25
       - name: Setup sbt
         uses: sbt/setup-sbt@v1
       - name: Run tests
-        run: sbt ++${{ matrix.scala }}! test
+        run: sbt test
         
   publish:
     runs-on: ubuntu-24.04

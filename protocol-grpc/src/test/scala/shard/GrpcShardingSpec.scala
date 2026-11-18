@@ -1,19 +1,20 @@
 package shard
 
+import io.grpc.{Attributes, Metadata}
+import proteus.server.GrpcContext
+import zio.{Config => _, _}
+import zio.stream.{SubscriptionRef, ZStream}
+import zio.test._
+import zio.test.TestAspect.{sequential, withLiveClock}
+
 import shard.BroadcastingSpec.IncrementerActor
-import shard.BroadcastingSpec.IncrementerActor.{ Incrementer, IncrementerMessage }
+import shard.BroadcastingSpec.IncrementerActor.{Incrementer, IncrementerMessage}
 import shard.Messenger.MessengerTimeout
 import shard.errors._
-import shard.interfaces.{ MessageCodec, Pods, Storage }
+import shard.interfaces.{MessageCodec, Pods, Storage}
 import shard.interfaces.MessageCodec.Codec
-import shard.protocol.{ Sharding => ProtocolSharding }
-import shard.protocol.Sharding.{ PingShardsRequest, PingShardsResponse }
-import io.grpc.{ Attributes, Metadata }
-import proteus.server.GrpcContext
-import zio.stream.{ SubscriptionRef, ZStream }
-import zio.test.TestAspect.{ sequential, withLiveClock }
-import zio.test._
-import zio.{ Config => _, _ }
+import shard.protocol.{Sharding => ProtocolSharding}
+import shard.protocol.Sharding.{PingShardsRequest, PingShardsResponse}
 
 object GrpcShardingSpec extends ZIOSpecDefault {
   import GrpcShardingSpec.AccountActor._
@@ -220,9 +221,7 @@ object GrpcShardingSpec extends ZIOSpecDefault {
               case Numbers(n)         => ZIO.succeed(Streamed(ZStream(1, 2, n, 3)))
               case DepositAll()       =>
                 ZIO.succeed(
-                  Duplex[Int, Nothing, Int](input =>
-                    balance.changes.drainFork(input.mapZIO(amount => balance.update(_ + amount)))
-                  )
+                  Duplex[Int, Nothing, Int](input => balance.changes.drainFork(input.mapZIO(amount => balance.update(_ + amount))))
                 )
             }
         }

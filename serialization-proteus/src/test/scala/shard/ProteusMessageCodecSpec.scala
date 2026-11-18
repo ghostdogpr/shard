@@ -1,12 +1,13 @@
 package shard
 
 import _root_.proteus.ProtobufCodec
-import shard.interfaces.MessageCodec
-import shard.proteus.ProteusMessageCodec
-import shard.proteus.given
 import zio.Scope
 import zio.blocks.schema.Schema
 import zio.test._
+
+import shard.interfaces.MessageCodec
+import shard.proteus.ProteusMessageCodec
+import shard.proteus.given
 
 object ProteusMessageCodecSpec extends ZIOSpecDefault {
 

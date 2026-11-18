@@ -1,15 +1,16 @@
 package shard
 
-import shard.errors._
-import shard.interfaces.Pods
-import shard.interfaces.Pods.{ BinaryMessage, BinaryReply }
-import shard.protocol.Sharding._
-import io.grpc.{ ClientInterceptors, ManagedChannelBuilder, Status, StatusException }
+import java.util.concurrent.TimeUnit
+
+import io.grpc.{ClientInterceptors, ManagedChannelBuilder, Status, StatusException}
 import proteus.client.ZioClientBackend
 import zio._
 import zio.stream.ZStream
 
-import java.util.concurrent.TimeUnit
+import shard.errors._
+import shard.interfaces.Pods
+import shard.interfaces.Pods.{BinaryMessage, BinaryReply}
+import shard.protocol.Sharding._
 
 class GrpcPods(
   config: GrpcConfig,
@@ -82,8 +83,8 @@ class GrpcPods(
 object GrpcPods {
 
   /**
-   * Open a gRPC client to the given host and port, closed when the scope ends.
-   */
+    * Open a gRPC client to the given host and port, closed when the scope ends.
+    */
   private[shard] def clientBackend(host: String, port: Int, config: GrpcConfig): RIO[Scope, ZioClientBackend] =
     ZIO.suspend {
       val builder =
@@ -97,14 +98,12 @@ object GrpcPods {
             channel.shutdownNow(): Unit
           }.ignore
         }
-        .map(channel =>
-          ZioClientBackend(ClientInterceptors.intercept(channel, config.clientInterceptors*), config.streamingPrefetch)
-        )
+        .map(channel => ZioClientBackend(ClientInterceptors.intercept(channel, config.clientInterceptors*), config.streamingPrefetch))
     }
 
   /**
-   * A layer that creates an instance of Pods that communicates using the gRPC protocol.
-   */
+    * A layer that creates an instance of Pods that communicates using the gRPC protocol.
+    */
   val live: ZLayer[GrpcConfig, Throwable, Pods] =
     ZLayer.scoped {
       for {

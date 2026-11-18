@@ -1,46 +1,47 @@
 package shard.interfaces
 
-import shard.interfaces.Pods.{ BinaryMessage, BinaryReply }
-import shard.{ PodAddress, Role, ShardId }
+import zio.{Task, ULayer, ZIO, ZLayer}
 import zio.stream.ZStream
-import zio.{ Task, ULayer, ZIO, ZLayer }
+
+import shard.{PodAddress, Role, ShardId}
+import shard.interfaces.Pods.{BinaryMessage, BinaryReply}
 
 /**
- * An interface to communicate with remote pods.
- * This is used by the Shard Manager for assigning and unassigning shards.
- * This is also used by pods for internal communication (forward messages to each other).
- */
+  * An interface to communicate with remote pods.
+  * This is used by the Shard Manager for assigning and unassigning shards.
+  * This is also used by pods for internal communication (forward messages to each other).
+  */
 trait Pods {
 
   /**
-   * Notify a pod that it was assigned a list of shards of the given role (to be rejected by a pod of another role)
-   */
+    * Notify a pod that it was assigned a list of shards of the given role (to be rejected by a pod of another role)
+    */
   def assignShards(pod: PodAddress, role: Role, shards: Set[ShardId]): Task[Unit]
 
   /**
-   * Notify a pod that it was unassigned a list of shards of the given role (to be rejected by a pod of another role)
-   */
+    * Notify a pod that it was unassigned a list of shards of the given role (to be rejected by a pod of another role)
+    */
   def unassignShards(pod: PodAddress, role: Role, shards: Set[ShardId]): Task[Unit]
 
   /**
-   * Check that a pod is responsive
-   */
+    * Check that a pod is responsive
+    */
   def ping(pod: PodAddress): Task[Unit]
 
   /**
-   * Send a message to a pod
-   */
+    * Send a message to a pod
+    */
   def sendMessage(pod: PodAddress, message: BinaryMessage): Task[BinaryReply]
 
   /**
-   * Send a stream of messages to a pod
-   */
+    * Send a stream of messages to a pod
+    */
   def sendStream(pod: PodAddress, messages: ZStream[Any, Nothing, BinaryMessage]): Task[BinaryReply]
 
   /**
-   * Send a stream of messages to a pod and receive a stream of replies.
-   * The first message is the request and the next ones are its inputs.
-   */
+    * Send a stream of messages to a pod and receive a stream of replies.
+    * The first message is the request and the next ones are its inputs.
+    */
   def sendStreamAndReceiveStream(
     pod: PodAddress,
     messages: ZStream[Any, Nothing, BinaryMessage]
@@ -50,10 +51,10 @@ trait Pods {
 object Pods {
 
   /**
-   * A layer that creates a service that does nothing when called.
-   * Messages that expect a reply get a `Defect` reply, since no pod answers them.
-   * Useful for testing ShardManager or when we don't need messages being sent.
-   */
+    * A layer that creates a service that does nothing when called.
+    * Messages that expect a reply get a `Defect` reply, since no pod answers them.
+    * Useful for testing ShardManager or when we don't need messages being sent.
+    */
   val noop: ULayer[Pods] =
     ZLayer.succeed(new Pods {
       def assignShards(pod: PodAddress, role: Role, shards: Set[ShardId]): Task[Unit]                    = ZIO.unit
@@ -74,66 +75,66 @@ object Pods {
     })
 
   /**
-   * A message sent to an entity or topic.
-   * @param expectsReply if false, the receiver replies as soon as the message is enqueued
-   */
+    * A message sent to an entity or topic.
+    * @param expectsReply if false, the receiver replies as soon as the message is enqueued
+    */
   case class BinaryMessage(entityId: String, entityType: String, body: Array[Byte], expectsReply: Boolean)
 
   /**
-   * A reply to a message. A stream of replies is a sequence of `Element`, possibly ended by an error reply.
-   */
+    * A reply to a message. A stream of replies is a sequence of `Element`, possibly ended by an error reply.
+    */
   sealed trait BinaryReply
 
   object BinaryReply {
 
     /**
-     * The message was processed and returned a value (empty when the sender didn't expect a reply)
-     */
+      * The message was processed and returned a value (empty when the sender didn't expect a reply)
+      */
     final case class Success(body: Array[Byte]) extends BinaryReply
 
     /**
-     * The message was processed and failed with a typed error
-     */
+      * The message was processed and failed with a typed error
+      */
     final case class Failure(body: Array[Byte]) extends BinaryReply
 
     /**
-     * An element of a stream of replies
-     */
+      * An element of a stream of replies
+      */
     final case class Element(body: Array[Byte]) extends BinaryReply
 
     /**
-     * A stream of replies failed with a typed error
-     */
+      * A stream of replies failed with a typed error
+      */
     final case class StreamFailure(body: Array[Byte]) extends BinaryReply
 
     /**
-     * The message processing died with an unexpected error
-     */
+      * The message processing died with an unexpected error
+      */
     final case class Defect(message: String) extends BinaryReply
 
     /**
-     * The message processing was interrupted before completing (e.g. the entity was stopped)
-     */
+      * The message processing was interrupted before completing (e.g. the entity was stopped)
+      */
     case object Interrupted extends BinaryReply
 
     /**
-     * The entity mailbox was full and the message was rejected
-     */
+      * The entity mailbox was full and the message was rejected
+      */
     case object MailboxFull extends BinaryReply
 
     /**
-     * The entity was not running and the message was discarded (see `loadEntity`)
-     */
+      * The entity was not running and the message was discarded (see `loadEntity`)
+      */
     case object Discarded extends BinaryReply
 
     /**
-     * The pod doesn't host the entity (or the entity is stopping): the message was not processed and can be sent again
-     */
+      * The pod doesn't host the entity (or the entity is stopping): the message was not processed and can be sent again
+      */
     case object EntityNotManagedByThisPod extends BinaryReply
 
     /**
-     * A message, reply or stream element failed to be encoded or decoded
-     */
+      * A message, reply or stream element failed to be encoded or decoded
+      */
     final case class SerializationError(message: String) extends BinaryReply
   }
 }

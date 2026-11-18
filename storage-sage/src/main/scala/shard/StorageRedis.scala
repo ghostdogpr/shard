@@ -1,16 +1,17 @@
 package shard
 
-import shard.interfaces.Storage
-import sage.backend.{ subscribe, SageClient }
+import sage.backend.{subscribe, SageClient}
 import sage.commands.Commands
+import zio.{Task, ZIO, ZLayer}
 import zio.stream.ZStream
-import zio.{ Task, ZIO, ZLayer }
+
+import shard.interfaces.Storage
 
 object StorageRedis {
 
   /**
-   * A layer that returns a Storage implementation using Redis
-   */
+    * A layer that returns a Storage implementation using Redis
+    */
   val live: ZLayer[SageClient & RedisConfig, Nothing, Storage] =
     ZLayer {
       for {

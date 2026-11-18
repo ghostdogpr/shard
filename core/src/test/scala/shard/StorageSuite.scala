@@ -1,14 +1,15 @@
 package shard
 
-import shard.interfaces.Storage
+import zio.{durationInt, Promise, ZIO}
 import zio.Clock.ClockLive
-import zio.{ durationInt, Promise, ZIO }
 import zio.stream.ZStream
 import zio.test._
 
+import shard.interfaces.Storage
+
 /**
- * The tests shared by the Redis storages, run in sequence on one shared storage
- */
+  * The tests shared by the Redis storages, run in sequence on one shared storage
+  */
 object StorageSuite {
   private val role = Role.default
 

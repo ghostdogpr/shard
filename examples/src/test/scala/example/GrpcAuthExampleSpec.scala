@@ -1,10 +1,11 @@
 package example
 
-import shard._
-import shard.interfaces.{ Pods, Storage }
-import io.grpc.{ Metadata, Status }
+import io.grpc.{Metadata, Status}
+import zio.{Config => _, _}
 import zio.test._
-import zio.{ Config => _, _ }
+
+import shard._
+import shard.interfaces.{Pods, Storage}
 
 object GrpcAuthExampleSpec extends ZIOSpecDefault {
 

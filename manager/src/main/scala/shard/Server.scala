@@ -1,17 +1,18 @@
 package shard
 
-import shard.protocol.{ ShardManager => Protocol }
-import shard.protocol.ShardManager._
-import io.grpc.{ ServerServiceDefinition, StatusException }
+import io.grpc.{ServerServiceDefinition, StatusException}
 import io.grpc.protobuf.services.HealthStatusManager
-import proteus.server.{ GrpcContext, ServerService, ZioServerBackend }
+import proteus.server.{GrpcContext, ServerService, ZioServerBackend}
 import zio._
+
+import shard.protocol.{ShardManager => Protocol}
+import shard.protocol.ShardManager._
 
 object Server {
 
   /**
-   * Start a gRPC server that exposes the Shard Manager API.
-   */
+    * Start a gRPC server that exposes the Shard Manager API.
+    */
   def run: RIO[ShardManager & ManagerConfig & GrpcConfig, Nothing] =
     ZIO.scoped {
       for {
@@ -40,8 +41,7 @@ object Server {
       )
       .rpc(
         Protocol.register,
-        (request: RegisterRequest) =>
-          shardManager.register(request.pod).mapBoth(GrpcShardingService.mapErrorToStatus, _ => RegisterResponse())
+        (request: RegisterRequest) => shardManager.register(request.pod).mapBoth(GrpcShardingService.mapErrorToStatus, _ => RegisterResponse())
       )
       .rpc(
         Protocol.unregister,
@@ -49,8 +49,7 @@ object Server {
       )
       .rpc(
         Protocol.notifyUnhealthyPod,
-        (request: NotifyUnhealthyPodRequest) =>
-          shardManager.notifyUnhealthyPod(request.podAddress).as(NotifyUnhealthyPodResponse())
+        (request: NotifyUnhealthyPodRequest) => shardManager.notifyUnhealthyPod(request.podAddress).as(NotifyUnhealthyPodResponse())
       )
       .rpc(
         Protocol.checkAllPodsHealth,

@@ -1,44 +1,42 @@
 package shard.proteus
 
-import _root_.proteus.{ Dependency, ProtobufCodec, ProtobufDeriver }
-import shard.{ Duplex, Streamed }
-import shard.interfaces.MessageCodec
-import shard.interfaces.MessageCodec.{ Codec, ReplyCodec }
-
 import scala.annotation.tailrec
-import scala.compiletime.{ erasedValue, error, summonFrom }
+import scala.compiletime.{erasedValue, error, summonFrom}
 import scala.compiletime.ops.int
 import scala.deriving.Mirror
 
+import _root_.proteus.{Dependency, ProtobufCodec, ProtobufDeriver}
+
+import shard.{Duplex, Streamed}
+import shard.interfaces.MessageCodec
+import shard.interfaces.MessageCodec.{Codec, ReplyCodec}
+
 /**
- * An inline-derived `MessageCodec[Msg]` backed by Proteus.
- *
- * `Msg` must be a sealed trait or an enum whose variants extend it with fixed type arguments.
- * Error and reply types must be case classes, sealed traits, enums, `Unit`, `Nothing`, or have a `ProtobufCodec` in scope
- * that encodes a message or an enum.
- */
+  * An inline-derived `MessageCodec[Msg]` backed by Proteus.
+  *
+  * `Msg` must be a sealed trait or an enum whose variants extend it with fixed type arguments.
+  * Error and reply types must be case classes, sealed traits, enums, `Unit`, `Nothing`, or have a `ProtobufCodec` in scope
+  * that encodes a message or an enum.
+  */
 object ProteusMessageCodec {
 
   /**
-   * The mirror of a message type, whose `MirroredMonoType` is `Msg[?, ?]`.
-   */
+    * The mirror of a message type, whose `MirroredMonoType` is `Msg[?, ?]`.
+    */
   type MessageMirror[Msg[_, _]] =
     Mirror.Sum { type MirroredType[E, A] = Msg[E, A]; type MirroredElemTypes[E, A] <: Tuple }
 
   /**
-   * Derive a `MessageCodec[Msg]` using Proteus.
-   */
+    * Derive a `MessageCodec[Msg]` using Proteus.
+    */
   inline def derived[Msg[_, _]](using m: MessageMirror[Msg], deriver: ProtobufDeriver): MessageCodec[Msg] =
     build[Msg](m, collectVariantCodecs[Msg, m.MirroredElemTypes[Any, Any]], messageCodec[Msg])
 
   /**
-   * Create a Proteus `Dependency` containing the message type and the error, reply and stream types of its variants.
-   * Render it to get a .proto file describing the message contract.
-   */
-  inline def dependency[Msg[_, _]](name: String, packageName: String)(using
-    m: MessageMirror[Msg],
-    deriver: ProtobufDeriver
-  ): Dependency =
+    * Create a Proteus `Dependency` containing the message type and the error, reply and stream types of its variants.
+    * Render it to get a .proto file describing the message contract.
+    */
+  inline def dependency[Msg[_, _]](name: String, packageName: String)(using m: MessageMirror[Msg], deriver: ProtobufDeriver): Dependency =
     collectVariantCodecs[Msg, m.MirroredElemTypes[Any, Any]]
       .flatMap(_.protobufCodecs)
       .foldLeft(
@@ -61,22 +59,19 @@ object ProteusMessageCodec {
   }
 
   /**
-   * Get the `ProtobufCodec` of `Msg[?, ?]`, typed as `Msg[Any, Any]`.
-   */
-  private inline def messageCodec[Msg[_, _]](using
-    m: MessageMirror[Msg],
-    deriver: ProtobufDeriver
-  ): ProtobufCodec[Msg[Any, Any]] =
+    * Get the `ProtobufCodec` of `Msg[?, ?]`, typed as `Msg[Any, Any]`.
+    */
+  private inline def messageCodec[Msg[_, _]](using m: MessageMirror[Msg], deriver: ProtobufDeriver): ProtobufCodec[Msg[Any, Any]] =
     // `Msg[?, ?]` can't be written for an abstract `Msg`: `t` binds it once `Msg` is known
     inline erasedValue[Option[m.MirroredMonoType]] match {
       case _: Option[t] => summonOrDeriveProtobufCodec[t].asInstanceOf[ProtobufCodec[Msg[Any, Any]]]
     }
 
   // The codecs of an error, reply or stream type: `codec` for the reply codec, `protobufCodec` for the dependency.
-  private final case class TypeCodec(codec: Codec, protobufCodec: Option[ProtobufCodec[?]])
+  final private case class TypeCodec(codec: Codec, protobufCodec: Option[ProtobufCodec[?]])
 
   // The codecs of a variant's error, reply, stream error and stream input types.
-  private final case class VariantCodecs(
+  final private case class VariantCodecs(
     error: TypeCodec,
     value: TypeCodec,
     streamError: TypeCodec,
@@ -90,9 +85,7 @@ object ProteusMessageCodec {
   }
 
   // Recurses on halves: one nested inline per variant would exceed the compiler's inline limit (`-Xmax-inlines`).
-  private inline def collectVariantCodecs[Msg[_, _], Variants <: Tuple](using
-    deriver: ProtobufDeriver
-  ): List[VariantCodecs] =
+  private inline def collectVariantCodecs[Msg[_, _], Variants <: Tuple](using deriver: ProtobufDeriver): List[VariantCodecs] =
     inline erasedValue[Variants] match {
       case _: (head *: EmptyTuple) => variantCodecsOf[Msg, head] :: Nil
       case _: (? *: ? *: ?)        =>
@@ -121,9 +114,9 @@ object ProteusMessageCodec {
     }
 
   /**
-   * Get the codecs of a reply or error type.
-   * Uses a `ProtobufCodec` in scope if there is one, otherwise derives one.
-   */
+    * Get the codecs of a reply or error type.
+    * Uses a `ProtobufCodec` in scope if there is one, otherwise derives one.
+    */
   private inline def typeCodecOf[A](using deriver: ProtobufDeriver): TypeCodec =
     summonFrom {
       case _: (A =:= Unit)                      => TypeCodec(Codec.unit, None)

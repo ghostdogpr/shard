@@ -1,9 +1,10 @@
 package shard
 
-import shard.interfaces.MessageCodec
-import shard.kryo.given
 import zio.Scope
 import zio.test._
+
+import shard.interfaces.MessageCodec
+import shard.kryo.given
 
 object KryoMessageCodecSpec extends ZIOSpecDefault {
 

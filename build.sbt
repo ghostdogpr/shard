@@ -18,7 +18,7 @@ inThisBuild(
     scalaVersion := scala3,
     organization := "com.github.ghostdogpr",
     homepage     := Some(url("https://ghostdogpr.github.io/shard/")),
-    licenses     := List("Apache-2.0" -> url("http://www.apache.org/licenses/LICENSE-2.0")),
+    licenses     := List(License.Apache2),
     scmInfo      := Some(
       ScmInfo(
         url("https://github.com/ghostdogpr/shard"),
@@ -242,12 +242,13 @@ lazy val commonSettings = Def.settings(
   ),
   scalacOptions ++= Seq(
     "-deprecation",
-    "-encoding",
-    "UTF-8",
     "-feature",
-    "-language:higherKinds",
-    "-language:existentials",
     "-unchecked",
+    "-no-indent",
+    "-release",
+    "21",
+    "-Wunused:imports,params,privates,implicits,explicits",
+    "-Wvalue-discard",
     "-Werror",
     "-language:postfixOps",
     "-explain-types",

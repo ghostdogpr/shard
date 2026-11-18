@@ -1,8 +1,9 @@
 package shard
 
-import shard.interfaces.Storage
 import zio._
 import zio.test._
+
+import shard.interfaces.Storage
 
 object StorageMemorySpec extends ZIOSpecDefault {
   private val roleA = Role("a")
