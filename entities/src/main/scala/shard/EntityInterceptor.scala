@@ -1,5 +1,7 @@
 package shard
 
+import scala.annotation.unused
+
 import zio.IO
 
 /**
@@ -28,14 +30,20 @@ trait EntityInterceptor[-Msg[_, _]] { self =>
    * The streams of `Streamed` and `Duplex` replies run outside of it.
    * It must run `effect` once. If it dies, the messages sent to the entity fail with `EntityDefect`.
    */
-  def aroundEntity[E, A](recipientType: RecipientType[?], entityId: String)(effect: IO[E, A]): IO[E, A] = effect
+  def aroundEntity[E, A](@unused recipientType: RecipientType[?], @unused entityId: String)(
+    effect: IO[E, A]
+  ): IO[E, A] = effect
 
   /**
    * Wraps the processing of one message by the handler, which completes with the message's reply.
    * For `Streamed` and `Duplex` replies, it wraps the creation of the stream, not the stream itself.
    * Its failures and defects are those of the message.
    */
-  def aroundMessage[E, A](recipientType: RecipientType[?], entityId: String, message: Msg[E, A])(
+  def aroundMessage[E, A](
+    @unused recipientType: RecipientType[?],
+    @unused entityId: String,
+    @unused message: Msg[E, A]
+  )(
     effect: IO[E, A]
   ): IO[E, A] =
     effect

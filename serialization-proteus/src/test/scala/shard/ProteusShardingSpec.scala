@@ -1,5 +1,6 @@
 package shard
 
+import scala.annotation.unused
 import shard.errors.EntityDefect
 import shard.interfaces.Storage
 import shard.internal.LocalShardManagerClient
@@ -127,7 +128,7 @@ object ProteusShardingSpec extends ZIOSpecDefault {
     def startCounter: RIO[Sharding & Scope, Messenger[CounterMessage]] =
       Sharding.registerEntity(Counter)(behavior) *> Sharding.registerScoped *> Sharding.messenger(Counter)
 
-    def behavior(entityId: String): UIO[Counter.Handler] =
+    def behavior(@unused entityId: String): UIO[Counter.Handler] =
       SubscriptionRef.make(0).map { state =>
         new Counter.Handler {
           def handle[E, A](message: CounterMessage[E, A]): IO[E, A] =

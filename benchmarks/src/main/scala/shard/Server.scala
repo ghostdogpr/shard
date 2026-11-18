@@ -1,5 +1,6 @@
 package shard
 
+import scala.annotation.unused
 import shard.kryo.given
 import shard.interfaces.{ ShardManagerClient, Storage }
 import zio.{ Config => _, _ }
@@ -15,7 +16,7 @@ object Server {
 
   object PingPongEntity extends EntityType[Message]("ping-pong")
 
-  private def behavior(entityId: String): UIO[PingPongEntity.Handler] =
+  private def behavior(@unused entityId: String): UIO[PingPongEntity.Handler] =
     ZIO.succeed(new PingPongEntity.Handler {
       def handle[E, A](message: Message[E, A]): IO[E, A] =
         message match {

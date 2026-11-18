@@ -1,5 +1,6 @@
 package shard
 
+import scala.annotation.unused
 import shard.Messenger.MessengerTimeout
 import shard.CounterActor.CounterMessage._
 import shard.CounterActor._
@@ -1618,7 +1619,7 @@ object WorkerActor {
       } yield WorkerState(running, finalized, completed, started, gate)
   }
 
-  def worker(state: WorkerState)(entityId: String): URIO[Scope, Worker.Handler] =
+  def worker(state: WorkerState)(@unused entityId: String): URIO[Scope, Worker.Handler] =
     for {
       unblock  <- Promise.make[Nothing, Unit]
       instance <- state.started.updateAndGet(_ + 1)

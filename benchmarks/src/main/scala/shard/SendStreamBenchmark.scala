@@ -23,10 +23,10 @@ class SendStreamBenchmark {
 
   @TearDown
   def tearDown(): Unit =
-    Unsafe.unsafe(implicit unsafe => Runtime.default.unsafe.run(fiber.interrupt))
+    Unsafe.unsafe(implicit unsafe => Runtime.default.unsafe.run(fiber.interrupt): Unit)
 
   // 8 parallel server-streams, each receiving 100 messages → 800 messages per op
   @Benchmark
   def serverStream(): Unit =
-    Unsafe.unsafe(implicit unsafe => Runtime.default.unsafe.run(Client.sendStream(8, 100, 8)))
+    Unsafe.unsafe(implicit unsafe => Runtime.default.unsafe.run(Client.sendStream(8, 100, 8)): Unit)
 }

@@ -23,9 +23,9 @@ class SendBenchmark {
 
   @TearDown
   def tearDown(): Unit =
-    Unsafe.unsafe(implicit unsafe => Runtime.default.unsafe.run(fiber.interrupt))
+    Unsafe.unsafe(implicit unsafe => Runtime.default.unsafe.run(fiber.interrupt): Unit)
 
   @Benchmark
   def send(): Unit =
-    Unsafe.unsafe(implicit unsafe => Runtime.default.unsafe.run(Client.send(100, 8)))
+    Unsafe.unsafe(implicit unsafe => Runtime.default.unsafe.run(Client.send(100, 8)): Unit)
 }

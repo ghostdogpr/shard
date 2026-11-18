@@ -1,5 +1,6 @@
 package example.simple
 
+import scala.annotation.unused
 import shard.{ EntityType, Streamed }
 import shard.javaSerialization.given
 import zio.stream.ZStream
@@ -17,7 +18,7 @@ object GuildBehavior {
 
   object Guild extends EntityType[GuildMessage]("guild")
 
-  def behavior(entityId: String): UIO[Guild.Handler] =
+  def behavior(@unused entityId: String): UIO[Guild.Handler] =
     Ref.make(Set.empty[String]).map { state =>
       new Guild.Handler {
         def handle[E, A](message: GuildMessage[E, A]): IO[E, A] =

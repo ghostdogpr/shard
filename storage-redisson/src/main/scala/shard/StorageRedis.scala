@@ -54,7 +54,7 @@ object StorageRedis {
                                classOf[String],
                                new MessageListener[String] {
                                  def onMessage(channel: CharSequence, msg: String): Unit =
-                                   Unsafe.unsafe(implicit unsafe => runtime.unsafe.run(queue.offer(msg)))
+                                   Unsafe.unsafe(implicit unsafe => runtime.unsafe.run(queue.offer(msg)): Unit)
                                }
                              )
                            )
