@@ -1,22 +1,23 @@
 package shard.internal
 
-import shard._
-import shard.errors.{ EntityNotManagedByThisPod, MailboxFull, MessageDiscarded, StreamCancelled }
-import shard.interfaces.MessageCodec.ReplyCodec
-import shard.interfaces.Pods.BinaryMessage
-import zio.{ Config => _, _ }
+import java.util.concurrent.TimeUnit
+
+import zio.{Config => _, _}
 import zio.stream.ZStream
 
-import java.util.concurrent.TimeUnit
+import shard._
+import shard.errors.{EntityNotManagedByThisPod, MailboxFull, MessageDiscarded, StreamCancelled}
+import shard.interfaces.MessageCodec.ReplyCodec
+import shard.interfaces.Pods.BinaryMessage
 
 private[shard] object EntityManager {
 
   /**
-   * The reply of a Streamed or Duplex message: runs its stream given its inputs (ignored for Streamed).
-   */
+    * The reply of a Streamed or Duplex message: runs its stream given its inputs (ignored for Streamed).
+    */
   final case class StreamReply(usesInput: Boolean, run: ZStream[Any, Nothing, Any] => ZStream[Any, Any, Any])
 
-  private sealed trait EnvelopeState
+  sealed private trait EnvelopeState
   private object EnvelopeState {
     case object Queued                                           extends EnvelopeState
     final case class Running(fiber: Fiber.Runtime[Nothing, Any]) extends EnvelopeState
@@ -25,8 +26,8 @@ private[shard] object EntityManager {
   }
 
   /**
-   * A message enqueued for an entity.
-   */
+    * A message enqueued for an entity.
+    */
   final class Envelope[Msg[_, _]] private[EntityManager] (
     val message: Msg[Any, Any],
     private[EntityManager] val result: Promise[Nothing, Exit[Any, Any]],
@@ -52,10 +53,10 @@ private[shard] object EntityManager {
   }
 
   /**
-   * @param drained completed when the entity is closing and has no pending messages or open streams, or a message died
-   * @param closing completed when the entity starts closing, to interrupt its streams
-   */
-  private final class RunningEntity[Msg[_, _]](
+    * @param drained completed when the entity is closing and has no pending messages or open streams, or a message died
+    * @param closing completed when the entity starts closing, to interrupt its streams
+    */
+  final private class RunningEntity[Msg[_, _]](
     val entityId: String,
     val mailbox: Queue[Envelope[Msg]],
     val concurrentMailbox: Queue[Envelope[Msg]],
@@ -68,9 +69,9 @@ private[shard] object EntityManager {
   private object RunningEntity {
 
     /**
-     * @param pending number of messages enqueued and not yet completed, limited by `mailboxCapacity`
-     * @param streams number of open reply streams, which don't count in `pending` but keep the entity running
-     */
+      * @param pending number of messages enqueued and not yet completed, limited by `mailboxCapacity`
+      * @param streams number of open reply streams, which don't count in `pending` but keep the entity running
+      */
     final case class State(
       pending: Int,
       streams: Int,
@@ -107,10 +108,10 @@ private[shard] object EntityManager {
 }
 
 /**
- * Runs the entities of an entity or topic type on this pod.
- * Only the processing of a message is interruptible, so that no message is lost or left uncompleted.
- */
-private[shard] final class EntityManager[Msg[_, _]] private (
+  * Runs the entities of an entity or topic type on this pod.
+  * Only the processing of a message is interruptible, so that no message is lost or left uncompleted.
+  */
+final private[shard] class EntityManager[Msg[_, _]] private (
   val recipientType: RecipientType[Msg],
   makeHandler: String => URIO[Scope, EntityHandler[Msg]],
   entities: Ref.Synchronized[Map[String, EntityManager.RunningEntity[Msg]]],
@@ -152,9 +153,9 @@ private[shard] final class EntityManager[Msg[_, _]] private (
     }
 
   /**
-   * Add a message to an entity's mailbox, starting the entity if needed, and trying again a little later if it is stopping.
-   * Fails with `EntityNotManagedByThisPod`, `MailboxFull` or `MessageDiscarded`.
-   */
+    * Add a message to an entity's mailbox, starting the entity if needed, and trying again a little later if it is stopping.
+    * Fails with `EntityNotManagedByThisPod`, `MailboxFull` or `MessageDiscarded`.
+    */
   def enqueue[E, A](entityId: String, message: Msg[E, A]): IO[Throwable, Envelope[Msg]] =
     tryEnqueue(entityId, message).someOrElseZIO(stoppingRetryDelay *> enqueue(entityId, message))
 
@@ -173,9 +174,9 @@ private[shard] final class EntityManager[Msg[_, _]] private (
   }
 
   /**
-   * Add a message to an entity's mailbox and wait for its result.
-   * If the caller is interrupted while waiting, the message is cancelled.
-   */
+    * Add a message to an entity's mailbox and wait for its result.
+    * If the caller is interrupted while waiting, the message is cancelled.
+    */
   def ask[E, A](entityId: String, message: Msg[E, A]): IO[Throwable, Exit[Any, Any]] =
     ZIO.uninterruptibleMask(restore =>
       tryEnqueue(entityId, message).flatMap {
@@ -185,14 +186,15 @@ private[shard] final class EntityManager[Msg[_, _]] private (
     )
 
   /**
-   * Deliver a message from another pod and give its result to `onExit` with the codec of its reply.
-   * A message that expects no reply returns `ack` once it is in the mailbox.
-   */
+    * Deliver a message from another pod and give its result to `onExit` with the codec of its reply.
+    * A message that expects no reply returns `ack` once it is in the mailbox.
+    */
   def receive[A](msg: BinaryMessage)(ack: => A)(onExit: (Exit[Any, Any], ReplyCodec) => A): Task[A] =
-    ZIO.attempt {
-      val decoded = recipientType.codec.decodeMessage(msg.body)
-      (decoded, recipientType.codec.replyCodec(decoded))
-    }
+    ZIO
+      .attempt {
+        val decoded = recipientType.codec.decodeMessage(msg.body)
+        (decoded, recipientType.codec.replyCodec(decoded))
+      }
       .mapError(Replies.serializationError("decode a message", _))
       .flatMap((decoded, codec) =>
         if (msg.expectsReply) ask(msg.entityId, decoded).map(onExit(_, codec))
@@ -200,19 +202,22 @@ private[shard] final class EntityManager[Msg[_, _]] private (
       )
 
   /**
-   * Add a message to the entity's mailbox, or fail with `MailboxFull` if it is full.
-   * Returns None if the entity is closing.
-   */
+    * Add a message to the entity's mailbox, or fail with `MailboxFull` if it is full.
+    * Returns None if the entity is closing.
+    */
   private def tryOffer(entity: RunningEntity[Msg], message: Msg[Any, Any]): IO[MailboxFull, Option[Envelope[Msg]]] = {
     val mailbox = if (message.isInstanceOf[Concurrent]) entity.concurrentMailbox else entity.mailbox
     val add     = Envelope.make(message).tap(mailbox.offer).asSome
     // uninterruptible so that a message counted in `pending` always reaches the mailbox
-    entity.state.modify { s =>
-      // no need to update lastActive: the entity is not stopped while it has pending messages
-      if (s.closing) (ZIO.none, s)
-      else if (s.pending >= options.mailboxCapacity) (ZIO.fail(MailboxFull(recipientType.name, entity.entityId)), s)
-      else (add, s.copy(pending = s.pending + 1))
-    }.flatten.uninterruptible
+    entity.state
+      .modify { s =>
+        // no need to update lastActive: the entity is not stopped while it has pending messages
+        if (s.closing) (ZIO.none, s)
+        else if (s.pending >= options.mailboxCapacity) (ZIO.fail(MailboxFull(recipientType.name, entity.entityId)), s)
+        else (add, s.copy(pending = s.pending + 1))
+      }
+      .flatten
+      .uninterruptible
   }
 
   private def getOrStart(entityId: String): IO[EntityNotManagedByThisPod, RunningEntity[Msg]] =
@@ -253,8 +258,8 @@ private[shard] final class EntityManager[Msg[_, _]] private (
     } yield entity
 
   /**
-   * Run an entity until it stops, wrapped by the interceptors.
-   */
+    * Run an entity until it stops, wrapped by the interceptors.
+    */
   private def run(entity: RunningEntity[Msg]): UIO[Unit] =
     // the fibers of the entity are forked inside the interceptors, so that they inherit what they set (e.g. log annotations)
     ZIO
@@ -273,8 +278,8 @@ private[shard] final class EntityManager[Msg[_, _]] private (
       .uninterruptible
 
   /**
-   * Start the handler of an entity, then stop it once the entity is closing.
-   */
+    * Start the handler of an entity, then stop it once the entity is closing.
+    */
   private def lifecycle(entity: RunningEntity[Msg]): UIO[Unit] =
     for {
       scope      <- Scope.make
@@ -317,8 +322,8 @@ private[shard] final class EntityManager[Msg[_, _]] private (
     } yield ()
 
   /**
-   * Remove an entity from the running entities, unless it was already removed.
-   */
+    * Remove an entity from the running entities, unless it was already removed.
+    */
   private def remove(entity: RunningEntity[Msg]): UIO[Unit] =
     // compared by reference, since an entity with the same ID may have started since
     entities.modify { map =>
@@ -326,9 +331,9 @@ private[shard] final class EntityManager[Msg[_, _]] private (
     }.flatten
 
   /**
-   * Stop an entity whose handler failed to start.
-   * Every message already sent to it fails with that error.
-   */
+    * Stop an entity whose handler failed to start.
+    * Every message already sent to it fails with that error.
+    */
   private def failToStart(entity: RunningEntity[Msg], cause: Cause[Nothing]): UIO[Unit] =
     // the shutdown waits until these messages are finished
     (stopInBackground(entity) *> finishQueued(entity, Exit.failCause(cause))).uninterruptible
@@ -379,15 +384,13 @@ private[shard] final class EntityManager[Msg[_, _]] private (
     ) *>
       // starts uninterruptible and marks the message as running before calling the handler,
       // so that a message cancelled before that never starts
-      forkWithSelf(fiber =>
-        runIfQueued(entity, handler, envelope, fiber)(complete(entity, envelope, _)) *> releasePermit
-      )
+      forkWithSelf(fiber => runIfQueued(entity, handler, envelope, fiber)(complete(entity, envelope, _)) *> releasePermit)
   }
 
   /**
-   * Run the handler on a message.
-   * Once a message has died, the next ones are interrupted instead of processed.
-   */
+    * Run the handler on a message.
+    * Once a message has died, the next ones are interrupted instead of processed.
+    */
   private def handle(entity: RunningEntity[Msg], handler: EntityHandler[Msg], message: Msg[Any, Any]): IO[Any, Any] =
     // this message is still pending, so `drained` can only be done here if a message died
     entity.drained.isDone.flatMap(died =>
@@ -426,9 +429,9 @@ private[shard] final class EntityManager[Msg[_, _]] private (
     envelope.result.succeed(exit) *> release(entity)
 
   /**
-   * Keep the entity running while a stream it returned is open, and cancel the stream when the entity stops.
-   * A stream started while the entity is stopping fails with `Sharding.Retry`.
-   */
+    * Keep the entity running while a stream it returned is open, and cancel the stream when the entity stops.
+    * A stream started while the entity is stopping fails with `Sharding.Retry`.
+    */
   private def track(entity: RunningEntity[Msg], stream: ZStream[Any, Any, Any]): ZStream[Any, Any, Any] =
     ZStream.unwrapScoped(
       ZIO
@@ -442,39 +445,45 @@ private[shard] final class EntityManager[Msg[_, _]] private (
     )
 
   /**
-   * Mark a message, or an open stream if `stream` is true, as done.
-   */
+    * Mark a message, or an open stream if `stream` is true, as done.
+    */
   private def release(entity: RunningEntity[Msg], stream: Boolean = false): UIO[Unit] =
-    currentTimeInMilliseconds.flatMap { now =>
-      entity.state.modify { s =>
-        val updated =
-          if (stream) s.copy(streams = s.streams - 1, lastActive = now)
-          else s.copy(pending = s.pending - 1, lastActive = now)
-        (updated.closing && updated.isIdle, updated)
+    currentTimeInMilliseconds
+      .flatMap { now =>
+        entity.state.modify { s =>
+          val updated =
+            if (stream) s.copy(streams = s.streams - 1, lastActive = now)
+            else s.copy(pending = s.pending - 1, lastActive = now)
+          (updated.closing && updated.isIdle, updated)
+        }
       }
-    }.flatMap(ZIO.when(_)(entity.drained.succeed(()))).unit
+      .flatMap(ZIO.when(_)(entity.drained.succeed(())))
+      .unit
 
   /**
-   * Stop an entity without waiting, if `condition` holds.
-   * The entity accepts no new messages once this returns, and is given up on if it doesn't terminate in time.
-   */
+    * Stop an entity without waiting, if `condition` holds.
+    * The entity accepts no new messages once this returns, and is given up on if it doesn't terminate in time.
+    */
   private def stopInBackground(
     entity: RunningEntity[Msg],
     condition: RunningEntity.State => Boolean = _ => true
   ): UIO[Unit] =
-    entity.state.modify { s =>
-      if (s.closing || !condition(s)) (ZIO.unit, s)
-      else
-        (
-          entity.closing.succeed(()) *> ZIO.when(s.isIdle)(entity.drained.succeed(())) *> abandonIfStuck(entity),
-          s.copy(closing = true)
-        )
-    }.flatten.uninterruptible
+    entity.state
+      .modify { s =>
+        if (s.closing || !condition(s)) (ZIO.unit, s)
+        else
+          (
+            entity.closing.succeed(()) *> ZIO.when(s.isIdle)(entity.drained.succeed(())) *> abandonIfStuck(entity),
+            s.copy(closing = true)
+          )
+      }
+      .flatten
+      .uninterruptible
 
   /**
-   * In the background, give up on an entity that hasn't terminated after twice `entityTerminationTimeout`,
-   * since the interceptor, a handler or a finalizer may never return.
-   */
+    * In the background, give up on an entity that hasn't terminated after twice `entityTerminationTimeout`,
+    * since the interceptor, a handler or a finalizer may never return.
+    */
   private def abandonIfStuck(entity: RunningEntity[Msg]): UIO[Unit] =
     entity.terminated.await.interruptible // interruptible so that the timeout works
       .timeout(config.entityTerminationTimeout * 2)
@@ -489,9 +498,9 @@ private[shard] final class EntityManager[Msg[_, _]] private (
       .unit
 
   /**
-   * Complete the messages still in the entity's mailboxes with the given result.
-   * Call it once the entity is closing and nothing takes messages from its mailboxes anymore.
-   */
+    * Complete the messages still in the entity's mailboxes with the given result.
+    * Call it once the entity is closing and nothing takes messages from its mailboxes anymore.
+    */
   private def finishQueued(entity: RunningEntity[Msg], exit: Exit[Any, Any]): UIO[Unit] =
     // messages accepted before closing may not be in the mailbox yet, hence the retry
     finishMailboxes(entity, exit) *>
@@ -514,8 +523,8 @@ private[shard] final class EntityManager[Msg[_, _]] private (
     entities.modifyZIO(map => ZIO.succeed((map, map)))
 
   /**
-   * Get the IDs of the entities running on this pod, from their start until they terminate.
-   */
+    * Get the IDs of the entities running on this pod, from their start until they terminate.
+    */
   def entityIds: UIO[Set[String]] =
     // under the lock, so that an entity whose behavior was called is always included
     runningEntities.map(_.keySet)
@@ -536,9 +545,9 @@ private[shard] final class EntityManager[Msg[_, _]] private (
     runningEntities.flatMap(map => stopAll(map.values))
 
   /**
-   * Stop all entities and never start new ones.
-   * Used when the entity or topic type is unregistered.
-   */
+    * Stop all entities and never start new ones.
+    * Used when the entity or topic type is unregistered.
+    */
   def close: UIO[Unit] =
     closed.set(true) *> terminateAllEntities
 

@@ -3,18 +3,18 @@ package shard
 import zio._
 
 /**
- * Shard Manager configuration
- * @param numberOfShards number of shards of a role (see documentation on how to choose this), should be same on all pods of that role
- * @param apiPort port to expose the gRPC API
- * @param rebalanceInterval interval for regular rebalancing of shards
- * @param rebalanceRetryInterval retry interval for rebalancing when some shards failed to be rebalanced
- * @param pingTimeout time to wait for a pod to respond to a ping request
- * @param persistRetryInterval retry interval for persistence of pods and shard assignments
- * @param persistRetryCount max retry count for persistence of pods and shard assignments
- * @param rebalanceRate max ratio of shards to rebalance at once
- * @param podHealthCheckInterval interval for checking pod health
- * @param shutdownPersistTimeout max time to wait for pods and shard assignments to be persisted on shutdown
- */
+  * Shard Manager configuration
+  * @param numberOfShards number of shards of a role (see documentation on how to choose this), should be same on all pods of that role
+  * @param apiPort port to expose the gRPC API
+  * @param rebalanceInterval interval for regular rebalancing of shards
+  * @param rebalanceRetryInterval retry interval for rebalancing when some shards failed to be rebalanced
+  * @param pingTimeout time to wait for a pod to respond to a ping request
+  * @param persistRetryInterval retry interval for persistence of pods and shard assignments
+  * @param persistRetryCount max retry count for persistence of pods and shard assignments
+  * @param rebalanceRate max ratio of shards to rebalance at once
+  * @param podHealthCheckInterval interval for checking pod health
+  * @param shutdownPersistTimeout max time to wait for pods and shard assignments to be persisted on shutdown
+  */
 case class ManagerConfig(
   numberOfShards: Role => Int,
   apiPort: Int,

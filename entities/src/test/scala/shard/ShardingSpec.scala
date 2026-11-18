@@ -1,20 +1,22 @@
 package shard
 
 import scala.annotation.unused
-import shard.Messenger.MessengerTimeout
-import shard.CounterActor.CounterMessage._
+
+import zio.{Config => _, _}
+import zio.stream.{SubscriptionRef, ZChannel, ZStream}
+import zio.test._
+import zio.test.TestAspect.{sequential, withLiveClock}
+
 import shard.CounterActor._
-import shard.WorkerActor.WorkerMessage._
+import shard.CounterActor.CounterMessage._
+import shard.Messenger.MessengerTimeout
 import shard.WorkerActor._
+import shard.WorkerActor.WorkerMessage._
 import shard.errors._
-import shard.interfaces.{ Pods, ShardManagerClient, Storage }
-import shard.interfaces.Pods.{ BinaryMessage, BinaryReply }
+import shard.interfaces.{Pods, ShardManagerClient, Storage}
+import shard.interfaces.Pods.{BinaryMessage, BinaryReply}
 import shard.internal.LocalShardManagerClient
 import shard.javaSerialization.given
-import zio.stream.{ SubscriptionRef, ZChannel, ZStream }
-import zio.test.TestAspect.{ sequential, withLiveClock }
-import zio.test._
-import zio.{ Config => _, _ }
 
 object ShardingSpec extends ZIOSpecDefault {
   def spec: Spec[TestEnvironment & Scope, Any] =
@@ -645,9 +647,8 @@ object ShardingSpec extends ZIOSpecDefault {
           _        <- Sharding.registerScoped
           state    <- WorkerState.make
           hung     <- Ref.make(true)
-          _        <- Sharding.registerEntity(Worker)(entityId =>
-                        worker(state)(entityId) <* ZIO.addFinalizer(hung.getAndSet(false).flatMap(ZIO.never.when(_)))
-                      )
+          _        <-
+            Sharding.registerEntity(Worker)(entityId => worker(state)(entityId) <* ZIO.addFinalizer(hung.getAndSet(false).flatMap(ZIO.never.when(_))))
           worker   <- Sharding.messenger(Worker)
           sharding <- ZIO.service[Sharding]
           _        <- worker.send("w1")(Ping())
@@ -662,12 +663,8 @@ object ShardingSpec extends ZIOSpecDefault {
           second   <- Promise.make[Nothing, Unit]
           state    <- WorkerState.make
           // each finalizer waits for the other one, so stopping the types one at a time reaches the stop bound
-          _        <- Sharding.registerEntity(Worker)(entityId =>
-                        worker(state)(entityId) <* ZIO.addFinalizer(first.succeed(()) *> second.await)
-                      )
-          _        <- Sharding.registerEntity(Counter)(entityId =>
-                        behavior(entityId) <* ZIO.addFinalizer(second.succeed(()) *> first.await)
-                      )
+          _        <- Sharding.registerEntity(Worker)(entityId => worker(state)(entityId) <* ZIO.addFinalizer(first.succeed(()) *> second.await))
+          _        <- Sharding.registerEntity(Counter)(entityId => behavior(entityId) <* ZIO.addFinalizer(second.succeed(()) *> first.await))
           _        <- Sharding.registerScoped
           workers  <- Sharding.messenger(Worker)
           counters <- Sharding.messenger(Counter)
@@ -903,9 +900,7 @@ object ShardingSpec extends ZIOSpecDefault {
           worker <- Sharding.messenger(Worker)
           _      <- worker.send("w1")(Ping())
           _      <-
-            ZIO.foreachDiscard(1 to 300)(i =>
-              worker.stream("w1")(QuickStream()).runDrain.fork.flatMap(ZIO.yieldNow.repeatN(i % 100) *> _.interrupt)
-            )
+            ZIO.foreachDiscard(1 to 300)(i => worker.stream("w1")(QuickStream()).runDrain.fork.flatMap(ZIO.yieldNow.repeatN(i % 100) *> _.interrupt))
           _      <- state.finalized.changes.takeUntil(_ == 1).runDrain
         } yield assertCompletes
       },
@@ -1099,9 +1094,7 @@ object ShardingSpec extends ZIOSpecDefault {
       test("Duplex: the returned stream fails if the input stream fails, even when the replies end with the inputs") {
         for {
           counter <- startCounter()
-          results <- ZIO.foreach(1 to 20)(_ =>
-                       counter.duplex("c1")(Doubled(), ZStream(1, 2, 3) ++ ZStream.fail("boom")).runCollect.either
-                     )
+          results <- ZIO.foreach(1 to 20)(_ => counter.duplex("c1")(Doubled(), ZStream(1, 2, 3) ++ ZStream.fail("boom")).runCollect.either)
           died    <- counter.duplex("c1")(Doubled(), ZStream(1) ++ ZStream.die(new Exception("boom"))).runCollect.exit
           logged  <- unhandledFailures
         } yield assertTrue(
@@ -1164,9 +1157,8 @@ object ShardingSpec extends ZIOSpecDefault {
         for {
           state     <- WorkerState.make
           finalized <- Promise.make[Nothing, Unit]
-          _         <- Sharding.registerEntity(Worker)(entityId =>
-                         worker(state)(entityId) <* ZIO.addFinalizer(finalized.succeed(()) *> ZIO.dieMessage("boom"))
-                       )
+          _         <-
+            Sharding.registerEntity(Worker)(entityId => worker(state)(entityId) <* ZIO.addFinalizer(finalized.succeed(()) *> ZIO.dieMessage("boom")))
           _         <- Sharding.registerScoped
           worker    <- Sharding.messenger(Worker)
           _         <- worker.send("w1")(Ping())
@@ -1402,8 +1394,8 @@ object ShardingSpec extends ZIOSpecDefault {
   }
 
   /**
-   * An interceptor that logs around each entity and message.
-   */
+    * An interceptor that logs around each entity and message.
+    */
   private val logging: EntityInterceptor[AnyMessage] =
     new EntityInterceptor[AnyMessage] {
       override def aroundEntity[E, A](recipientType: RecipientType[?], entityId: String)(effect: IO[E, A]): IO[E, A] =
@@ -1450,8 +1442,8 @@ object ShardingSpec extends ZIOSpecDefault {
     }
 
   /**
-   * Test that an auto-restarting stream resumes where it ended when the entity restarts.
-   */
+    * Test that an auto-restarting stream resumes where it ended when the entity restarts.
+    */
   private def autoRestartTest(name: String)(
     autoRestart: Messenger[CounterMessage] => ZStream[Any, Any, Int]
   ): Spec[Sharding & Scope, Any] =

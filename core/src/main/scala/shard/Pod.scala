@@ -5,8 +5,8 @@ case class Pod(address: PodAddress, version: String, role: Role)
 object Pod {
 
   /**
-   * How storages keeping a pod under its address store the rest of it: its version with `%` and spaces escaped, a space, then its role name
-   */
+    * How storages keeping a pod under its address store the rest of it: its version with `%` and spaces escaped, a space, then its role name
+    */
   private[shard] def encode(pod: Pod): String =
     s"${pod.version.replace("%", "%25").replace(" ", "%20")} ${pod.role.name}"
 

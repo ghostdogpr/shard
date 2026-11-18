@@ -1,9 +1,10 @@
 package example.complex
 
+import sage.backend.SageClient
+import zio.{IO, Scope, URIO, ZIO}
+
 import shard.EntityType
 import shard.kryo.given
-import sage.backend.SageClient
-import zio.{ IO, Scope, URIO, ZIO }
 
 object GuildBehavior {
   case class GuildFull(maxMembers: Int)

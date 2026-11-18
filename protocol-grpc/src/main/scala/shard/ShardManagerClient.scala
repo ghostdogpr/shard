@@ -1,20 +1,21 @@
 package shard
 
-import shard.internal.LocalShardManagerClient
-import shard.interfaces.ShardManagerClient
-import shard.protocol.ShardManager
-import shard.protocol.ShardManager._
+import java.util.concurrent.TimeUnit
+
 import io.grpc.CallOptions
 import proteus.client.ZioClientBackend
-import zio.{ Config => _, _ }
+import zio.{Config => _, _}
 
-import java.util.concurrent.TimeUnit
+import shard.interfaces.ShardManagerClient
+import shard.internal.LocalShardManagerClient
+import shard.protocol.ShardManager
+import shard.protocol.ShardManager._
 
 object ShardManagerClient {
 
   /**
-   * A layer that creates a client for the Shard Manager API using the gRPC protocol.
-   */
+    * A layer that creates a client for the Shard Manager API using the gRPC protocol.
+    */
   val live: ZLayer[Config & GrpcConfig, Throwable, ShardManagerClient] =
     ZLayer.scoped {
       for {
@@ -25,13 +26,12 @@ object ShardManagerClient {
     }
 
   /**
-   * A layer that mocks the Shard Manager, useful for testing with a single pod.
-   */
+    * A layer that mocks the Shard Manager, useful for testing with a single pod.
+    */
   val local: ZLayer[Config, Nothing, ShardManagerClient] =
     LocalShardManagerClient.live
 
-  private class GrpcClient(backend: ZioClientBackend, serverVersion: String, timeout: Duration)
-      extends ShardManagerClient {
+  private class GrpcClient(backend: ZioClientBackend, serverVersion: String, timeout: Duration) extends ShardManagerClient {
     private val withDeadline: CallOptions => CallOptions =
       _.withDeadlineAfter(timeout.toMillis, TimeUnit.MILLISECONDS)
 

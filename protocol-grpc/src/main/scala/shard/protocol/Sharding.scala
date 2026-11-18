@@ -1,7 +1,8 @@
 package shard.protocol
 
 import proteus._
-import shard.interfaces.Pods.{ BinaryMessage, BinaryReply }
+
+import shard.interfaces.Pods.{BinaryMessage, BinaryReply}
 
 object Sharding {
   given ProtobufDeriver =

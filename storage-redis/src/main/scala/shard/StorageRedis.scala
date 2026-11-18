@@ -1,13 +1,14 @@
 package shard
 
-import shard.interfaces.Storage
 import dev.profunktor.redis4cats.RedisCommands
 import dev.profunktor.redis4cats.data.RedisChannel
 import dev.profunktor.redis4cats.effects.ScriptOutputType
 import dev.profunktor.redis4cats.pubsub.PubSubCommands
+import zio.{Task, ZIO, ZLayer}
 import zio.stream.ZStream
 import zio.stream.interop.fs2z._
-import zio.{ Task, ZIO, ZLayer }
+
+import shard.interfaces.Storage
 
 object StorageRedis {
   type fs2Stream[A] = fs2.Stream[Task, A]
@@ -21,8 +22,8 @@ object StorageRedis {
       |return redis.status_reply('OK')""".stripMargin
 
   /**
-   * A layer that returns a Storage implementation using Redis
-   */
+    * A layer that returns a Storage implementation using Redis
+    */
   val live: ZLayer[Redis & RedisConfig, Nothing, Storage] =
     ZLayer {
       for {

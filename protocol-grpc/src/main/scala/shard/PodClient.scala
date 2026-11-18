@@ -1,18 +1,19 @@
 package shard
 
-import shard.protocol.Sharding
-import shard.protocol.Sharding._
-import shard.interfaces.Pods.BinaryMessage
 import io.grpc.StatusException
 import proteus.client.ZioClientBackend
 import zio._
 import zio.stream.ZStream
 
+import shard.interfaces.Pods.BinaryMessage
+import shard.protocol.Sharding
+import shard.protocol.Sharding._
+
 /**
- * Bundles the per-RPC client functions for a single pod. The underlying channel's
- * lifecycle is managed by the scope that builds the backend.
- */
-private[shard] final class PodClient(backend: ZioClientBackend) {
+  * Bundles the per-RPC client functions for a single pod. The underlying channel's
+  * lifecycle is managed by the scope that builds the backend.
+  */
+final private[shard] class PodClient(backend: ZioClientBackend) {
   val assignShards: AssignShardsRequest => IO[StatusException, AssignShardsResponse]                                  =
     backend.client(Sharding.assignShards, Sharding.service)
   val unassignShards: UnassignShardsRequest => IO[StatusException, UnassignShardsResponse]                            =

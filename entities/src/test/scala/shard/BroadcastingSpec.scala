@@ -1,12 +1,13 @@
 package shard
 
+import zio.{Config => _, _}
+import zio.test._
+import zio.test.TestAspect.{sequential, withLiveClock}
+
 import shard.Messenger.MessengerTimeout
 import shard.interfaces.Storage
 import shard.internal.LocalShardManagerClient
 import shard.javaSerialization.given
-import zio.test.TestAspect.{ sequential, withLiveClock }
-import zio.test._
-import zio.{ Config => _, _ }
 
 object BroadcastingSpec extends ZIOSpecDefault {
 

@@ -1,20 +1,21 @@
 package shard
 
+import java.lang
+
 import com.coralogix.zio.k8s.client._
 import com.coralogix.zio.k8s.client.model.FieldSelector
 import com.coralogix.zio.k8s.client.v1.pods.Pods
 import com.coralogix.zio.k8s.model.pkg.apis.meta.v1.Status
-import shard.interfaces.PodsHealth
 import zio._
-import zio.cache.{ Cache, Lookup }
+import zio.cache.{Cache, Lookup}
 
-import java.lang
+import shard.interfaces.PodsHealth
 
 object K8sPodsHealth {
 
   /**
-   * A layer for PodsHealth that checks if the node exists in Kubernetes.
-   */
+    * A layer for PodsHealth that checks if the node exists in Kubernetes.
+    */
   val live: URLayer[Pods & K8sConfig, PodsHealth] =
     ZLayer {
       for {
@@ -35,9 +36,7 @@ object K8sPodsHealth {
                           .runHead
                           .map(_.isDefined)
                           .tap(ZIO.unless(_)(ZIO.logWarning(s"${pod.address} is not found in k8s")))
-                          .catchAllCause(cause =>
-                            ZIO.logErrorCause(s"Error communicating with k8s", cause.map(asException)).as(true)
-                          )
+                          .catchAllCause(cause => ZIO.logErrorCause(s"Error communicating with k8s", cause.map(asException)).as(true))
                       }
                     )
       } yield new PodsHealth {
@@ -130,6 +129,5 @@ object K8sPodsHealth {
   private def toLogString(status: Status) =
     status.message.getOrElse(status.reason.getOrElse("no explanation from k8s"))
 
-  private class K8sException(message: String, cause: Throwable = null)
-      extends RuntimeException(message, cause, true, false)
+  private class K8sException(message: String, cause: Throwable = null) extends RuntimeException(message, cause, true, false)
 }

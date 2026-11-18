@@ -1,6 +1,6 @@
 package example
 
-import sage.{ Endpoint, SageConfig, SageException, Topology }
+import sage.{Endpoint, SageConfig, SageException, Topology}
 import sage.backend.SageClient
 import zio.ZLayer
 

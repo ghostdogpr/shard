@@ -1,6 +1,5 @@
 package shard
 
-import shard.StorageRedis.Redis
 import com.dimafeng.testcontainers.GenericContainer
 import dev.profunktor.redis4cats.Redis
 import dev.profunktor.redis4cats.connection.RedisClient
@@ -9,8 +8,10 @@ import dev.profunktor.redis4cats.effect.Log
 import dev.profunktor.redis4cats.pubsub.PubSub
 import zio._
 import zio.interop.catz._
-import zio.test.TestAspect.{ sequential, timeout }
 import zio.test._
+import zio.test.TestAspect.{sequential, timeout}
+
+import shard.StorageRedis.Redis
 
 object StorageRedisSpec extends ZIOSpecDefault {
   val container: ZLayer[Any, Nothing, GenericContainer] =

@@ -1,12 +1,14 @@
 package shard
 
+import java.util.concurrent.ForkJoinPool
+
 import scala.annotation.unused
-import shard.kryo.given
-import shard.interfaces.{ ShardManagerClient, Storage }
-import zio.{ Config => _, _ }
+
+import zio.{Config => _, _}
 import zio.stream.ZStream
 
-import java.util.concurrent.ForkJoinPool
+import shard.interfaces.{ShardManagerClient, Storage}
+import shard.kryo.given
 
 object Server {
   enum Message[E, A] {

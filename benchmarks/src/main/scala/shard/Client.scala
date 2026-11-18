@@ -1,8 +1,9 @@
 package shard
 
-import shard.Server.Message.{ Ping, StreamPing }
+import zio.{Config => _, _}
+
+import shard.Server.Message.{Ping, StreamPing}
 import shard.Server.PingPongEntity
-import zio.{ Config => _, _ }
 
 object Client {
   // self host should not be `localhost` to avoid optimization

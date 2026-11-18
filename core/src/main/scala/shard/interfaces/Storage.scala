@@ -1,46 +1,47 @@
 package shard.interfaces
 
-import shard.{ Pod, PodAddress, Role, ShardId }
-import zio.{ Ref, Task, UIO, ZIO, ZLayer }
-import zio.stream.{ SubscriptionRef, ZStream }
+import zio.{Ref, Task, UIO, ZIO, ZLayer}
+import zio.stream.{SubscriptionRef, ZStream}
+
+import shard.{Pod, PodAddress, Role, ShardId}
 
 /**
- * An interface for storing the state of shards, pods and their assignments.
- */
+  * An interface for storing the state of shards, pods and their assignments.
+  */
 trait Storage {
 
   /**
-   * Get the current state of shard assignments to pods
-   */
+    * Get the current state of shard assignments to pods
+    */
   def getAssignments(role: Role): Task[Map[ShardId, Option[PodAddress]]]
 
   /**
-   * Save the current state of shard assignments to pods
-   */
+    * Save the current state of shard assignments to pods
+    */
   def saveAssignments(role: Role, assignments: Map[ShardId, Option[PodAddress]]): Task[Unit]
 
   /**
-   * A stream that will emit the state of shard assignments whenever it changes
-   */
+    * A stream that will emit the state of shard assignments whenever it changes
+    */
   def assignmentsStream(role: Role): ZStream[Any, Throwable, Map[ShardId, Option[PodAddress]]]
 
   /**
-   * Get the list of existing pods
-   */
+    * Get the list of existing pods
+    */
   def getPods: Task[Set[Pod]]
 
   /**
-   * Save the list of existing pods
-   */
+    * Save the list of existing pods
+    */
   def savePods(pods: Set[Pod]): Task[Unit]
 }
 
 object Storage {
 
   /**
-   * A layer that stores data in-memory, with separate assignments for each role.
-   * This is useful for testing with a single pod only.
-   */
+    * A layer that stores data in-memory, with separate assignments for each role.
+    * This is useful for testing with a single pod only.
+    */
   val memory: ZLayer[Any, Nothing, Storage] =
     ZLayer {
       for {

@@ -1,21 +1,22 @@
 package shard.internal
 
-import shard.Sharding
-import shard.errors._
-import shard.interfaces.MessageCodec.{ Codec, ReplyCodec }
-import shard.interfaces.Pods.BinaryReply
 import zio._
 import zio.stream.ZStream
 
+import shard.Sharding
+import shard.errors._
+import shard.interfaces.MessageCodec.{Codec, ReplyCodec}
+import shard.interfaces.Pods.BinaryReply
+
 /**
- * Conversions between the results of messages and their binary replies.
- */
+  * Conversions between the results of messages and their binary replies.
+  */
 private[shard] object Replies {
 
   /**
-   * Convert the result of a message to the result seen by its sender.
-   * An interruption becomes `interruptedError` and a defect becomes `EntityDefect`.
-   */
+    * Convert the result of a message to the result seen by its sender.
+    * An interruption becomes `interruptedError` and a defect becomes `EntityDefect`.
+    */
   def toResult(exit: Exit[Any, Any], interruptedError: => ClusterError): Exit[Any, Any] =
     exit.foldExit(cause => Exit.fail(toError(cause, interruptedError)), Exit.succeed)
 
@@ -82,20 +83,18 @@ private[shard] object Replies {
     }
 
   /**
-   * Create a `SerializationError` for a failed `action`, such as "encode a reply".
-   */
+    * Create a `SerializationError` for a failed `action`, such as "encode a reply".
+    */
   def serializationError(action: String, throwable: Throwable): SerializationError =
     SerializationError(s"Failed to $action: $throwable")
 
   /**
-   * Convert the elements of a stream with a codec, failing with a `SerializationError` for `action` if it throws.
-   */
+    * Convert the elements of a stream with a codec, failing with a `SerializationError` for `action` if it throws.
+    */
   def mapElements[E, A, B](stream: ZStream[Any, E, A], action: String)(
     f: A => B
   ): ZStream[Any, E | SerializationError, B] =
-    stream.mapChunksZIO(chunk =>
-      catching[Exit[SerializationError, Chunk[B]]](action)(Exit.succeed(chunk.map(f)))(Exit.fail)
-    )
+    stream.mapChunksZIO(chunk => catching[Exit[SerializationError, Chunk[B]]](action)(Exit.succeed(chunk.map(f)))(Exit.fail))
 
   // what `ZIO.attempt` catches, without its work per call
   private inline def catching[A](inline action: String)(inline body: A)(inline onError: SerializationError => A): A =

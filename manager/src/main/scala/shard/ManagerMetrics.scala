@@ -1,7 +1,7 @@
 package shard
 
 import zio.metrics.Metric
-import zio.metrics.Metric.{ Counter, Gauge }
+import zio.metrics.Metric.{Counter, Gauge}
 
 object ManagerMetrics {
   val pods: Gauge[Double]             = Metric.gauge("shard.pods")

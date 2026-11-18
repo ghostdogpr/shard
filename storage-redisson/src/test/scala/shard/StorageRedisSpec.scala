@@ -2,17 +2,18 @@ package shard
 
 import scala.jdk.CollectionConverters._
 
-import shard.interfaces.Storage
 import com.dimafeng.testcontainers.GenericContainer
 import org.redisson.Redisson
-import org.redisson.config.{ Config => RedissonConfig }
 import org.redisson.api.RedissonClient
 import org.redisson.client.codec.StringCodec
-import zio.Clock.ClockLive
+import org.redisson.config.{Config => RedissonConfig}
 import zio._
+import zio.Clock.ClockLive
 import zio.stream.ZStream
-import zio.test.TestAspect.{ sequential, timeout }
 import zio.test._
+import zio.test.TestAspect.{sequential, timeout}
+
+import shard.interfaces.Storage
 
 object StorageRedisSpec extends ZIOSpecDefault {
   val container: ZLayer[Any, Nothing, GenericContainer] =

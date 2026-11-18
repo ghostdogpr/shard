@@ -1,11 +1,11 @@
 package shard
 
 import com.dimafeng.testcontainers.GenericContainer
-import sage.{ Endpoint, SageConfig, Topology }
+import sage.{Endpoint, SageConfig, Topology}
 import sage.backend.SageClient
 import zio._
-import zio.test.TestAspect.{ sequential, timeout }
 import zio.test._
+import zio.test.TestAspect.{sequential, timeout}
 
 object StorageRedisSpec extends ZIOSpecDefault {
   val container: ZLayer[Any, Nothing, GenericContainer] =

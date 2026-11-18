@@ -1,10 +1,12 @@
 package example.simple
 
 import scala.annotation.unused
-import shard.{ EntityType, Streamed }
-import shard.javaSerialization.given
+
+import zio.{IO, Ref, UIO, ZIO}
 import zio.stream.ZStream
-import zio.{ IO, Ref, UIO, ZIO }
+
+import shard.{EntityType, Streamed}
+import shard.javaSerialization.given
 
 object GuildBehavior {
   case class GuildFull(maxMembers: Int)

@@ -2,19 +2,20 @@ package shard
 
 import scala.jdk.CollectionConverters._
 
-import shard.interfaces.Storage
+import org.redisson.api.{BatchOptions, RedissonClient}
 import org.redisson.api.BatchOptions.ExecutionMode
-import org.redisson.api.{ BatchOptions, RedissonClient }
 import org.redisson.api.listener.MessageListener
 import org.redisson.client.codec.StringCodec
+import zio.{Queue, Task, Unsafe, ZIO, ZLayer}
 import zio.stream.ZStream
-import zio.{ Queue, Task, Unsafe, ZIO, ZLayer }
+
+import shard.interfaces.Storage
 
 object StorageRedis {
 
   /**
-   * A layer that returns a Storage implementation using Redis
-   */
+    * A layer that returns a Storage implementation using Redis
+    */
   val live: ZLayer[RedissonClient & RedisConfig, Nothing, Storage] =
     ZLayer {
       for {

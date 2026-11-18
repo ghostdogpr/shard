@@ -1,7 +1,8 @@
 package shard.protocol
 
-import shard.{ Pod, PodAddress, Role, ShardId, ShardingEvent }
 import proteus._
+
+import shard.{Pod, PodAddress, Role, ShardId, ShardingEvent}
 
 object ShardManager {
   case class Assignment(shardId: ShardId, pod: Option[PodAddress])

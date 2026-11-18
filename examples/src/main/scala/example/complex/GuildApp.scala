@@ -1,10 +1,11 @@
 package example.complex
 
-import shard._
-import example.complex.GuildBehavior.GuildMessage.Join
 import example.complex.GuildBehavior._
+import example.complex.GuildBehavior.GuildMessage.Join
 import sage.backend.SageClient
-import zio.{ Config => _, _ }
+import zio.{Config => _, _}
+
+import shard._
 
 object GuildApp extends ZIOAppDefault {
   val config: ZLayer[Any, SecurityException, Config] =

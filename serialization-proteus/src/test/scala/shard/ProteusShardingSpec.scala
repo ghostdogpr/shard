@@ -1,23 +1,25 @@
 package shard
 
 import scala.annotation.unused
+
+import zio.{Config => _, _}
+import zio.stream.{SubscriptionRef, ZStream}
+import zio.test._
+import zio.test.TestAspect.{sequential, withLiveClock}
+
 import shard.errors.EntityDefect
 import shard.interfaces.Storage
 import shard.internal.LocalShardManagerClient
 import shard.proteus.given
-import zio.stream.{ SubscriptionRef, ZStream }
-import zio.test.TestAspect.{ sequential, withLiveClock }
-import zio.test._
-import zio.{ Config => _, _ }
 
 /**
- * End-to-end test that exercises the full Sharding + LocalSharding flow using the Proteus
- * backend. Reply types are case classes (Proteus only supports messages / enums at the
- * root, not primitives), so we wrap `Int` in a small `Count` case class.
- *
- * The local-pod shortcut means most of the action goes through the typed path;
- * setting `simulateRemotePods = true` forces the binary path through Proteus.
- */
+  * End-to-end test that exercises the full Sharding + LocalSharding flow using the Proteus
+  * backend. Reply types are case classes (Proteus only supports messages / enums at the
+  * root, not primitives), so we wrap `Int` in a small `Count` case class.
+  *
+  * The local-pod shortcut means most of the action goes through the typed path;
+  * setting `simulateRemotePods = true` forces the binary path through Proteus.
+  */
 object ProteusShardingSpec extends ZIOSpecDefault {
   import ProteusShardingSpec.CounterActor._
   import ProteusShardingSpec.CounterActor.CounterMessage._
@@ -137,9 +139,7 @@ object ProteusShardingSpec extends ZIOSpecDefault {
               case Increment()      => state.update(_ + 1)
               case Decrement()      => state.update(_ - 1)
               case Withdraw(amount) =>
-                state.get.flatMap(available =>
-                  if (available < amount) ZIO.fail(CounterError.NotEnough(available)) else state.update(_ - amount)
-                )
+                state.get.flatMap(available => if (available < amount) ZIO.fail(CounterError.NotEnough(available)) else state.update(_ - amount))
               case Crash()          => ZIO.die(new IllegalStateException("crash"))
               case Changes()        => ZIO.succeed(Streamed(state.changes.map(Count(_))))
               case CountDown(from)  =>
@@ -153,9 +153,7 @@ object ProteusShardingSpec extends ZIOSpecDefault {
                   )
               case Add()            =>
                 ZIO.succeed(
-                  Duplex[Count, Nothing, Count](input =>
-                    state.changes.map(Count(_)).drainFork(input.mapZIO(count => state.update(_ + count.value)))
-                  )
+                  Duplex[Count, Nothing, Count](input => state.changes.map(Count(_)).drainFork(input.mapZIO(count => state.update(_ + count.value))))
                 )
             }
         }

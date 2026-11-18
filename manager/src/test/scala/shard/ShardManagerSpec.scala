@@ -1,12 +1,13 @@
 package shard
 
-import shard.ShardManager.{ PodWithMetadata, ShardManagerState }
-import shard.interfaces.{ Pods, PodsHealth, Storage }
+import java.time.OffsetDateTime
+
 import zio._
 import zio.stream.ZStream
 import zio.test._
 
-import java.time.OffsetDateTime
+import shard.ShardManager.{PodWithMetadata, ShardManagerState}
+import shard.interfaces.{Pods, PodsHealth, Storage}
 
 object ShardManagerSpec extends ZIOSpecDefault {
   private val role = Role.default
@@ -113,9 +114,7 @@ object ShardManagerSpec extends ZIOSpecDefault {
           val result =
             (1 to 30).foldLeft(state) { case (state, podNumber) =>
               val podAddress                   = PodAddress("", podNumber)
-              val s1                           = state.copy(pods =
-                state.pods.updated(podAddress, PodWithMetadata(Pod(podAddress, "v1", role), OffsetDateTime.now()))
-              )
+              val s1                           = state.copy(pods = state.pods.updated(podAddress, PodWithMetadata(Pod(podAddress, "v1", role), OffsetDateTime.now())))
               val (assignments, unassignments) = ShardManager.decideAssignmentsForUnbalancedShards(s1, 1d)
               val s2                           = unassignments.foldLeft(s1) { case (state, (_, shards)) =>
                 shards.foldLeft(state) { case (state, shard) =>
@@ -220,9 +219,7 @@ object ShardManagerSpec extends ZIOSpecDefault {
                    }
               _ <- TestClock.adjust(10 minutes)
               // busy wait for the forked daemon fibers to do their job
-              _ <- ZIO.iterate(Map.empty[ShardId, Option[PodAddress]])(_.isEmpty)(_ =>
-                     ZIO.serviceWithZIO[Storage](_.getAssignments(role))
-                   )
+              _ <- ZIO.iterate(Map.empty[ShardId, Option[PodAddress]])(_.isEmpty)(_ => ZIO.serviceWithZIO[Storage](_.getAssignments(role)))
               _ <- ZIO.iterate(Set.empty[Pod])(_.isEmpty)(_ => ZIO.serviceWithZIO[Storage](_.getPods))
               // simulate non-persistent storage restart
               _ <- ZIO.serviceWithZIO[Storage](s => s.saveAssignments(role, Map.empty) *> s.savePods(Set.empty))
@@ -260,7 +257,7 @@ object ShardManagerSpec extends ZIOSpecDefault {
             // and the pods write on shutdown never returns, even interrupted, which must not hold back the release
             storage    = Storage.memory >>> ZLayer.fromFunction((memory: Storage) =>
                            new Storage {
-                             export memory.{ assignmentsStream, getAssignments, getPods }
+                             export memory.{assignmentsStream, getAssignments, getPods}
                              def savePods(pods: Set[Pod]): Task[Unit]                                                   =
                                ZIO.ifZIO(closing.get)(ZIO.never.uninterruptible, memory.savePods(pods))
                              def saveAssignments(role: Role, assignments: Map[ShardId, Option[PodAddress]]): Task[Unit] =
@@ -270,9 +267,7 @@ object ShardManagerSpec extends ZIOSpecDefault {
                                  case false                 =>
                                    blocked
                                      .modify(done => (role == pod4.role && !done, done || role == pod4.role))
-                                     .flatMap(block =>
-                                       if (block) ZIO.never.uninterruptible else memory.saveAssignments(role, assignments)
-                                     )
+                                     .flatMap(block => if (block) ZIO.never.uninterruptible else memory.saveAssignments(role, assignments))
                                }
                            }
                          )
@@ -337,7 +332,7 @@ object ShardManagerSpec extends ZIOSpecDefault {
   // assigning shards to stuckPod never completes
   val stuckPods: ULayer[Pods] = Pods.noop.project(noop =>
     new Pods {
-      export noop.{ ping, sendMessage, sendStream, sendStreamAndReceiveStream, unassignShards }
+      export noop.{ping, sendMessage, sendStream, sendStreamAndReceiveStream, unassignShards}
       def assignShards(pod: PodAddress, role: Role, shards: Set[ShardId]): Task[Unit] =
         if (pod == stuckPod.address) ZIO.never else noop.assignShards(pod, role, shards)
     }

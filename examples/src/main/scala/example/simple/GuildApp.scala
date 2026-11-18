@@ -1,10 +1,11 @@
 package example.simple
 
-import shard._
-import shard.interfaces._
 import example.simple.GuildBehavior._
 import example.simple.GuildBehavior.GuildMessage.Join
-import zio.{ Config => _, _ }
+import zio.{Config => _, _}
+
+import shard._
+import shard.interfaces._
 
 object GuildApp extends ZIOAppDefault {
   val program =

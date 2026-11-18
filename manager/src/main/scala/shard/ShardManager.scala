@@ -1,18 +1,19 @@
 package shard
 
-import shard.ShardManager._
-import shard.interfaces._
-
 import java.time.OffsetDateTime
+
+import scala.annotation.tailrec
 import scala.util.Random
+
 import zio._
 import zio.stream.ZStream
 
-import scala.annotation.tailrec
+import shard.ShardManager._
+import shard.interfaces._
 
 /**
- * A component in charge of assigning and unassigning shards to/from pods
- */
+  * A component in charge of assigning and unassigning shards to/from pods
+  */
 class ShardManager private (
   stateRef: Ref.Synchronized[Map[Role, ShardManagerState]],
   rebalanceSemaphores: Role => UIO[Semaphore],
@@ -67,9 +68,11 @@ class ShardManager private (
     podAddress: PodAddress,
     matches: PodWithMetadata => Boolean
   ): (Option[(Pod, Set[ShardId])], Map[Role, ShardManagerState]) = {
-    val found = states.iterator.flatMap { case (role, state) =>
-      state.pods.get(podAddress).filter(matches).map(pod => (role, state, pod.pod))
-    }.nextOption()
+    val found = states.iterator
+      .flatMap { case (role, state) =>
+        state.pods.get(podAddress).filter(matches).map(pod => (role, state, pod.pod))
+      }
+      .nextOption()
     found.fold((Option.empty[(Pod, Set[ShardId])], states)) { case (role, state, pod) =>
       val shards      = state.shards.collect { case (shard, Some(p)) if p == podAddress => shard }.toSet
       val shardsAfter = state.shards ++ shards.map(_ -> None)
@@ -111,9 +114,7 @@ class ShardManager private (
     stateRef.modifyZIO { before =>
       val (result, after) = f(before)
       ZIO
-        .foreachDiscard(after)((role, state) =>
-          ZIO.unlessDiscard(before.get(role).exists(_ eq state))(recordGauges(role, before.get(role), state))
-        )
+        .foreachDiscard(after)((role, state) => ZIO.unlessDiscard(before.get(role).exists(_ eq state))(recordGauges(role, before.get(role), state)))
         .as((result, after))
     }.uninterruptible
 
@@ -158,12 +159,18 @@ class ShardManager private (
                                            .fold(_ => Set(podAddress), _ => Set.empty[PodAddress])
                                        )
                                        .map(_.flatten)
-      shardsToRemove               = assignments.collect {
-                                       case (podAddress, shards) if failedPingedPods.contains(podAddress) => shards
-                                     }.toSet.flatten ++
-                                       unassignments.collect {
+      shardsToRemove               = assignments
+                                       .collect {
                                          case (podAddress, shards) if failedPingedPods.contains(podAddress) => shards
-                                       }.toSet.flatten
+                                       }
+                                       .toSet
+                                       .flatten ++
+                                       unassignments
+                                         .collect {
+                                           case (podAddress, shards) if failedPingedPods.contains(podAddress) => shards
+                                         }
+                                         .toSet
+                                         .flatten
       readyAssignments             = assignments.view.mapValues(_ diff shardsToRemove).filterNot(_._2.isEmpty).toMap
       readyUnassignments           = unassignments.view.mapValues(_ diff shardsToRemove).filterNot(_._2.isEmpty).toMap
       // do the unassignments first
@@ -258,8 +265,8 @@ class ShardManager private (
 object ShardManager {
 
   /**
-   * A layer that starts the Shard Manager process
-   */
+    * A layer that starts the Shard Manager process
+    */
   val live: ZLayer[PodsHealth & Pods & Storage & ManagerConfig, Throwable, ShardManager] =
     ZLayer.scoped {
       for {
@@ -443,7 +450,7 @@ object ShardManager {
           // don't assign too many shards to the same pods, unless we need rebalance immediately
           .filter { case (podAddress, _) =>
             rebalanceImmediately ||
-            assignments.count { case (_, p) => p == podAddress } < state.shards.size * rebalanceRate
+              assignments.count { case (_, p) => p == podAddress } < state.shards.size * rebalanceRate
           }
           // don't assign to a pod that was unassigned in the same rebalance
           .filterNot { case (podAddress, _) => unassignedPods.contains(podAddress) }
@@ -461,9 +468,7 @@ object ShardManager {
             // otherwise, create a new assignment
             else {
               val unassigned =
-                oldPodAddress.fold(shardsPerPod)(oldPodAddress =>
-                  shardsPerPod.updatedWith(oldPodAddress)(_.map(_ - shard))
-                )
+                oldPodAddress.fold(shardsPerPod)(oldPodAddress => shardsPerPod.updatedWith(oldPodAddress)(_.map(_ - shard)))
               (unassigned.updated(podAddress, shards + shard), (shard, podAddress) :: assignments)
             }
           case None                       => (shardsPerPod, assignments)

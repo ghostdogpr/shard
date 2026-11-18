@@ -1,15 +1,16 @@
 package shard
 
+import java.util.concurrent.TimeUnit
+
+import io.grpc._
+import io.grpc.protobuf.services.ProtoReflectionServiceV1
+import proteus.server.{GrpcContext, ServerService, ZioServerBackend}
+import zio.{Config => _, _}
+import zio.stream.ZStream
+
 import shard.interfaces.Pods.BinaryMessage
 import shard.protocol.Sharding
 import shard.protocol.Sharding._
-import io.grpc._
-import io.grpc.protobuf.services.ProtoReflectionServiceV1
-import proteus.server.{ GrpcContext, ServerService, ZioServerBackend }
-import zio.stream.ZStream
-import zio.{ Config => _, _ }
-
-import java.util.concurrent.TimeUnit
 
 object GrpcShardingService {
 
@@ -38,13 +39,11 @@ object GrpcShardingService {
     ServerService(using backend)
       .rpc(
         Sharding.assignShards,
-        (request: AssignShardsRequest) =>
-          checkRole(request.role, role) *> sharding.assign(request.shards.toSet).as(AssignShardsResponse())
+        (request: AssignShardsRequest) => checkRole(request.role, role) *> sharding.assign(request.shards.toSet).as(AssignShardsResponse())
       )
       .rpc(
         Sharding.unassignShards,
-        (request: UnassignShardsRequest) =>
-          checkRole(request.role, role) *> sharding.unassign(request.shards.toSet).as(UnassignShardsResponse())
+        (request: UnassignShardsRequest) => checkRole(request.role, role) *> sharding.unassign(request.shards.toSet).as(UnassignShardsResponse())
       )
       .rpc(
         Sharding.send,
@@ -64,8 +63,8 @@ object GrpcShardingService {
       .build(Sharding.service)
 
   /**
-   * Start a gRPC server on the given port with the given services, stopped when the scope ends.
-   */
+    * Start a gRPC server on the given port with the given services, stopped when the scope ends.
+    */
   private[shard] def serve(port: Int, config: GrpcConfig)(
     services: ZioServerBackend[Any, StatusException, GrpcContext] => List[ServerServiceDefinition]
   ): RIO[Scope, Unit] =
@@ -92,17 +91,15 @@ object GrpcShardingService {
     } yield ()
 
   /**
-   * A layer that creates a gRPC server that exposes the Pods API.
-   */
+    * A layer that creates a gRPC server that exposes the Pods API.
+    */
   val live: ZLayer[Config & Sharding & GrpcConfig, Throwable, Unit] =
     ZLayer.scoped[Config & Sharding & GrpcConfig] {
       for {
         config     <- ZIO.service[Config]
         grpcConfig <- ZIO.service[GrpcConfig]
         sharding   <- ZIO.service[Sharding]
-        _          <- serve(config.shardingPort, grpcConfig)(backend =>
-                        List(buildServiceDefinition(sharding, config.role, backend))
-                      )
+        _          <- serve(config.shardingPort, grpcConfig)(backend => List(buildServiceDefinition(sharding, config.role, backend)))
       } yield ()
     }
 }
