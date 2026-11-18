@@ -1,0 +1,2 @@
+# Align the build and CI with the rest of the stack (#47), which reformatted the code with the shared scalafmt config
+42184a531cbfd4c127509a88b5e8ccca8d94939a
