@@ -18,6 +18,7 @@ docs/.vitepress/cache
 *.lock
 
 package-lock.json
+!docs/package-lock.json
 node_modules/
 .DS_Store
 docs/.vitepress/dist
