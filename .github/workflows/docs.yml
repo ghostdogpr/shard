@@ -6,14 +6,20 @@ on:
 
   workflow_dispatch:
 
+  pull_request:
+    paths:
+      - 'docs/**'
+      - '.github/workflows/docs.yml'
+
 permissions:
   contents: read
   pages: write
   id-token: write
 
+# Pull requests get their own group so that a PR build never cancels a pending deployment.
 concurrency:
-  group: pages
-  cancel-in-progress: false
+  group: ${{ github.event_name == 'pull_request' && format('docs-pr-{0}', github.ref) || 'pages' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   build:
@@ -40,21 +46,26 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v6
         with:
-          node-version: 20
+          node-version: 24
+          cache: npm
+          cache-dependency-path: docs/package-lock.json
       - name: Setup Pages
+        if: github.event_name != 'pull_request'
         uses: actions/configure-pages@v6
       - name: Install dependencies
-        run: npm install
+        run: npm ci
         working-directory: docs
       - name: Build with VitePress
         run: npm run docs:build
         working-directory: docs
       - name: Upload artifact
+        if: github.event_name != 'pull_request'
         uses: actions/upload-pages-artifact@v5
         with:
           path: docs/.vitepress/dist
 
   deploy:
+    if: github.event_name != 'pull_request'
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
