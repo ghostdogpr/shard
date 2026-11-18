@@ -17,11 +17,11 @@ inThisBuild(
   List(
     scalaVersion := scala3,
     organization := "com.github.ghostdogpr",
-    homepage     := Some(url("https://ghostdogpr.github.io/shard/")),
+    homepage     := Some(uri("https://ghostdogpr.github.io/shard/")),
     licenses     := List(License.Apache2),
     scmInfo      := Some(
       ScmInfo(
-        url("https://github.com/ghostdogpr/shard"),
+        uri("https://github.com/ghostdogpr/shard"),
         "scm:git:git@github.com:ghostdogpr/shard.git"
       )
     ),
@@ -30,7 +30,7 @@ inThisBuild(
         "ghostdogpr",
         "Pierre Ricadat",
         "ghostdogpr@gmail.com",
-        url("https://github.com/ghostdogpr")
+        uri("https://github.com/ghostdogpr")
       )
     )
   )
