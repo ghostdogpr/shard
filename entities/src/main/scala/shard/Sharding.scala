@@ -252,9 +252,9 @@ class Sharding private (
 
   private[shard] val refreshAssignments: ZIO[Scope, Throwable, Unit] =
     for {
-      // first, get the assignments from the shard manager directly, failing the layer if it can't be reached
+      // first, get the assignments from the shard manager directly
       _         <- replaceAssignments
-                     .tapError(error => ZIO.logWarning(s"Failed to get shard assignments from the Shard Manager: $error"))
+                     .tapErrorCause(ZIO.logWarningCause("Failed to get shard assignments from the Shard Manager", _))
                      .retry(config.initialAssignmentsRetrySchedule)
       refreshed <- Ref.make(false)
       _         <- (
@@ -266,11 +266,10 @@ class Sharding private (
                        // then, get assignments changes from Redis
                        storage.assignmentsStream(config.role).mapZIO(updateAssignments(_)).runDrain
                    )
-                     .tapError(error => ZIO.logWarning(s"Failed to refresh shard assignments: $error"))
+                     .tapErrorCause(ZIO.logWarningCause("Failed to refresh shard assignments", _))
                      .retry(Schedule.fixed(config.refreshAssignmentsRetryInterval))
                      .interruptible
-                     .forkDaemon
-                     .withFinalizer(_.interrupt)
+                     .forkScoped
     } yield ()
 
   private[shard] def isShuttingDown: UIO[Boolean] =

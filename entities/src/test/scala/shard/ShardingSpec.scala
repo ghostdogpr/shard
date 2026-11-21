@@ -313,38 +313,14 @@ object ShardingSpec extends ZIOSpecDefault {
         } yield assertTrue(pods.contains(Set(third)))
       },
       test("The Sharding layer fails when the Shard Manager can't be reached") {
-        val config = Config.default.copy(initialAssignmentsRetrySchedule = Schedule.recurs(2))
-        for {
-          calls  <- Ref.make(0)
-          result <- ZIO
-                      .service[Sharding]
-                      .provide(
-                        Sharding.live,
-                        Pods.noop,
-                        ZLayer.succeed(unreachableUntil(Int.MaxValue, calls)),
-                        Storage.memory,
-                        ZLayer.succeed(config)
-                      )
-                      .exit
-          tried  <- calls.get
-        } yield assertTrue(result == Exit.fail(unreachable), tried == 3)
+        startUnreachable(failures = Int.MaxValue, retries = 2).map { case (result, tried) =>
+          assertTrue(result == Exit.fail(unreachable), tried == 3)
+        }
       },
       test("The Sharding layer starts when the Shard Manager becomes reachable before the end of its retries") {
-        val config = Config.default.copy(initialAssignmentsRetrySchedule = Schedule.recurs(5))
-        for {
-          calls  <- Ref.make(0)
-          result <- ZIO
-                      .service[Sharding]
-                      .provide(
-                        Sharding.live,
-                        Pods.noop,
-                        ZLayer.succeed(unreachableUntil(2, calls)),
-                        Storage.memory,
-                        ZLayer.succeed(config)
-                      )
-                      .exit
-          tried  <- calls.get
-        } yield assertTrue(result.isSuccess, tried == 3)
+        startUnreachable(failures = 2, retries = 5).map { case (result, tried) =>
+          assertTrue(result.isSuccess, tried == 3)
+        }
       },
       test("Assigning shards that a pod already has doesn't change its shards gauge") {
         // a role of its own, since the gauge is shared by all the pods of a role in this JVM
@@ -368,15 +344,28 @@ object ShardingSpec extends ZIOSpecDefault {
 
   private val unreachable = new Exception("Shard Manager unreachable")
 
-  // a Shard Manager whose first calls to getAssignments fail
-  private def unreachableUntil(failures: Int, calls: Ref[Int]): ShardManagerClient =
-    new ShardManagerClient {
-      def register(podAddress: PodAddress, role: Role): Task[Unit]           = ZIO.unit
-      def unregister(podAddress: PodAddress): Task[Unit]                     = ZIO.unit
-      def notifyUnhealthyPod(podAddress: PodAddress): Task[Unit]             = ZIO.unit
-      def getAssignments(role: Role): Task[Map[ShardId, Option[PodAddress]]] =
-        calls.updateAndGet(_ + 1).flatMap(n => if (n <= failures) ZIO.fail(unreachable) else ZIO.succeed(Map.empty))
-    }
+  private def startUnreachable(failures: Int, retries: Int): UIO[(Exit[Throwable, Sharding], Int)] =
+    for {
+      calls  <- Ref.make(0)
+      manager = new ShardManagerClient {
+                  def register(podAddress: PodAddress, role: Role): Task[Unit]           = ZIO.unit
+                  def unregister(podAddress: PodAddress): Task[Unit]                     = ZIO.unit
+                  def notifyUnhealthyPod(podAddress: PodAddress): Task[Unit]             = ZIO.unit
+                  def getAssignments(role: Role): Task[Map[ShardId, Option[PodAddress]]] =
+                    calls.updateAndGet(_ + 1).flatMap(n => if (n <= failures) ZIO.fail(unreachable) else ZIO.succeed(Map.empty))
+                }
+      result <- ZIO
+                  .service[Sharding]
+                  .provide(
+                    Sharding.live,
+                    Pods.noop,
+                    ZLayer.succeed(manager),
+                    Storage.memory,
+                    ZLayer.succeed(Config.default.copy(initialAssignmentsRetrySchedule = Schedule.recurs(retries)))
+                  )
+                  .exit
+      tried  <- calls.get
+    } yield (result, tried)
 
   // a Shard Manager that gives the shards of a pod that unregisters to another pod
   private def takingShardsBack(assignments: Ref[Map[ShardId, Option[PodAddress]]]): ShardManagerClient =
