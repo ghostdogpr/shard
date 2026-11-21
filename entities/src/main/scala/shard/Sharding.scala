@@ -250,26 +250,24 @@ class Sharding private (
         )
       )
 
-  private[shard] val refreshAssignments: ZIO[Scope, Throwable, Unit] =
+  private[shard] val refreshAssignments: ZIO[Scope, Nothing, Unit] =
     for {
-      // first, get the assignments from the shard manager directly
-      _         <- replaceAssignments
-                     .tapErrorCause(ZIO.logWarningCause("Failed to get shard assignments from the Shard Manager", _))
-                     .retry(config.initialAssignmentsRetrySchedule)
-      refreshed <- Ref.make(false)
-      _         <- (
-                     // after a failure, get the assignments from the shard manager again
-                     // (after a reconnection, a snapshot may predate an assign/unassign it hasn't recorded yet)
-                     ZIO.whenZIO(refreshed.getAndSet(true))(
-                       shardManager.getAssignments(config.role).flatMap(updateAssignments(_))
-                     ) *>
-                       // then, get assignments changes from Redis
-                       storage.assignmentsStream(config.role).mapZIO(updateAssignments(_)).runDrain
-                   )
-                     .tapErrorCause(ZIO.logWarningCause("Failed to refresh shard assignments", _))
-                     .retry(Schedule.fixed(config.refreshAssignmentsRetryInterval))
-                     .interruptible
-                     .forkScoped
+      latch <- Promise.make[Nothing, Unit]
+      _     <- (
+                 // first, get the assignments from the shard manager directly
+                 // (after a reconnection, a snapshot may predate an assign/unassign it hasn't recorded yet)
+                 ZIO.ifZIO(latch.isDone)(
+                   shardManager.getAssignments(config.role).flatMap(updateAssignments(_)),
+                   replaceAssignments *> latch.succeed(()).unit
+                 ) *>
+                   // then, get assignments changes from Redis
+                   storage.assignmentsStream(config.role).mapZIO(updateAssignments(_)).runDrain
+               )
+                 .tapErrorCause(ZIO.logWarningCause("Failed to get shard assignments", _))
+                 .retry(Schedule.fixed(config.refreshAssignmentsRetryInterval))
+                 .interruptible
+                 .forkScoped
+      _     <- latch.await
     } yield ()
 
   private[shard] def isShuttingDown: UIO[Boolean] =

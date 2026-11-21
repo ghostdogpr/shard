@@ -312,15 +312,27 @@ object ShardingSpec extends ZIOSpecDefault {
                              )
         } yield assertTrue(pods.contains(Set(third)))
       },
-      test("The Sharding layer fails when the Shard Manager can't be reached") {
-        startUnreachable(failures = Int.MaxValue, retries = 2).map { case (result, tried) =>
-          assertTrue(result == Exit.fail(unreachable), tried == 3)
-        }
-      },
-      test("The Sharding layer starts when the Shard Manager becomes reachable before the end of its retries") {
-        startUnreachable(failures = 2, retries = 5).map { case (result, tried) =>
-          assertTrue(result.isSuccess, tried == 3)
-        }
+      test("A pod waits for the Shard Manager at startup and logs each failure to get the assignments") {
+        val config      = Config.default.copy(refreshAssignmentsRetryInterval = 10.millis)
+        val unreachable = new Exception("Shard Manager unreachable")
+        for {
+          calls    <- Ref.make(0)
+          manager   = new ShardManagerClient {
+                        def register(podAddress: PodAddress, role: Role): Task[Unit]           = ZIO.unit
+                        def unregister(podAddress: PodAddress): Task[Unit]                     = ZIO.unit
+                        def notifyUnhealthyPod(podAddress: PodAddress): Task[Unit]             = ZIO.unit
+                        def getAssignments(role: Role): Task[Map[ShardId, Option[PodAddress]]] =
+                          calls.updateAndGet(_ + 1).flatMap(n => if (n <= 2) ZIO.fail(unreachable) else ZIO.succeed(Map.empty))
+                      }
+          _        <- ZIO
+                        .service[Sharding]
+                        .provide(Sharding.live, Pods.noop, ZLayer.succeed(manager), Storage.memory, ZLayer.succeed(config))
+          // counted outside of assertTrue, which can't render log entries
+          warnings <- ZTestLogger.logOutput.map(_.count { log =>
+                        log.logLevel == LogLevel.Warning && log.message() == "Failed to get shard assignments" &&
+                          log.cause.failureOption.contains(unreachable)
+                      })
+        } yield assertTrue(warnings == 2)
       },
       test("Assigning shards that a pod already has doesn't change its shards gauge") {
         // a role of its own, since the gauge is shared by all the pods of a role in this JVM
@@ -341,31 +353,6 @@ object ShardingSpec extends ZIOSpecDefault {
     ) @@ sequential @@ withLiveClock @@ TestAspect.timeout(60.seconds)
 
   val otherPod: PodAddress = PodAddress("other", 1)
-
-  private val unreachable = new Exception("Shard Manager unreachable")
-
-  private def startUnreachable(failures: Int, retries: Int): UIO[(Exit[Throwable, Sharding], Int)] =
-    for {
-      calls  <- Ref.make(0)
-      manager = new ShardManagerClient {
-                  def register(podAddress: PodAddress, role: Role): Task[Unit]           = ZIO.unit
-                  def unregister(podAddress: PodAddress): Task[Unit]                     = ZIO.unit
-                  def notifyUnhealthyPod(podAddress: PodAddress): Task[Unit]             = ZIO.unit
-                  def getAssignments(role: Role): Task[Map[ShardId, Option[PodAddress]]] =
-                    calls.updateAndGet(_ + 1).flatMap(n => if (n <= failures) ZIO.fail(unreachable) else ZIO.succeed(Map.empty))
-                }
-      result <- ZIO
-                  .service[Sharding]
-                  .provide(
-                    Sharding.live,
-                    Pods.noop,
-                    ZLayer.succeed(manager),
-                    Storage.memory,
-                    ZLayer.succeed(Config.default.copy(initialAssignmentsRetrySchedule = Schedule.recurs(retries)))
-                  )
-                  .exit
-      tried  <- calls.get
-    } yield (result, tried)
 
   // a Shard Manager that gives the shards of a pod that unregisters to another pod
   private def takingShardsBack(assignments: Ref[Map[ShardId, Option[PodAddress]]]): ShardManagerClient =

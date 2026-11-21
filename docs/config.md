@@ -44,7 +44,6 @@ Use one or more integers separated by dots, such as `"123"` or `"1.2.3"`. All po
 - `unhealthyPodReportInterval`: interval to report unhealthy pods to the Shard Manager (this exists to prevent calling the Shard Manager for each failed message)
 - `simulateRemotePods`: disable optimizations when sending a message to an entity hosted on the local shards (this will force serialization of all messages)
 - `unregisterRetrySchedule`: retry schedule for unregistering the pod from the Shard Manager when it stops
-- `initialAssignmentsRetrySchedule`: retry schedule for getting the shard assignments from the Shard Manager when the pod starts. The `Sharding` layer fails once the schedule is exhausted, so that a pod that can't reach the Shard Manager doesn't wait forever. By default, it waits 5 seconds between attempts and retries 12 times. Use `Schedule.spaced(5.seconds)` to wait until the Shard Manager is reachable.
 - `entityInterceptor`: an `EntityInterceptor[AnyMessage]` applied to the entities of every type, around the interceptor of each type (see [Interceptors](entities.md#interceptors)). It is a no-op by default.
 
 ## Shard Manager Configuration
