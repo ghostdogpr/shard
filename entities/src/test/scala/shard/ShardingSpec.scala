@@ -312,6 +312,28 @@ object ShardingSpec extends ZIOSpecDefault {
                              )
         } yield assertTrue(pods.contains(Set(third)))
       },
+      test("A pod waits for the Shard Manager at startup and logs each failure to get the assignments") {
+        val config      = Config.default.copy(refreshAssignmentsRetryInterval = 10.millis)
+        val unreachable = new Exception("Shard Manager unreachable")
+        for {
+          calls    <- Ref.make(0)
+          manager   = new ShardManagerClient {
+                        def register(podAddress: PodAddress, role: Role): Task[Unit]           = ZIO.unit
+                        def unregister(podAddress: PodAddress): Task[Unit]                     = ZIO.unit
+                        def notifyUnhealthyPod(podAddress: PodAddress): Task[Unit]             = ZIO.unit
+                        def getAssignments(role: Role): Task[Map[ShardId, Option[PodAddress]]] =
+                          calls.updateAndGet(_ + 1).flatMap(n => if (n <= 2) ZIO.fail(unreachable) else ZIO.succeed(Map.empty))
+                      }
+          _        <- ZIO
+                        .service[Sharding]
+                        .provide(Sharding.live, Pods.noop, ZLayer.succeed(manager), Storage.memory, ZLayer.succeed(config))
+          // counted outside of assertTrue, which can't render log entries
+          warnings <- ZTestLogger.logOutput.map(_.count { log =>
+                        log.logLevel == LogLevel.Warning && log.message() == "Failed to get shard assignments" &&
+                          log.cause.failureOption.contains(unreachable)
+                      })
+        } yield assertTrue(warnings == 2)
+      },
       test("Assigning shards that a pod already has doesn't change its shards gauge") {
         // a role of its own, since the gauge is shared by all the pods of a role in this JVM
         val config = Config.default.copy(role = Role("gauge"))

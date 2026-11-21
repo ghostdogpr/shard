@@ -263,10 +263,10 @@ class Sharding private (
                    // then, get assignments changes from Redis
                    storage.assignmentsStream(config.role).mapZIO(updateAssignments(_)).runDrain
                )
+                 .tapErrorCause(ZIO.logWarningCause("Failed to get shard assignments", _))
                  .retry(Schedule.fixed(config.refreshAssignmentsRetryInterval))
                  .interruptible
-                 .forkDaemon
-                 .withFinalizer(_.interrupt)
+                 .forkScoped
       _     <- latch.await
     } yield ()
 
