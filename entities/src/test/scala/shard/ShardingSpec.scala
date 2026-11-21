@@ -9,6 +9,7 @@ import zio.test.TestAspect.{sequential, withLiveClock}
 
 import shard.CounterActor._
 import shard.CounterActor.CounterMessage._
+import shard.FaultyPods.Fault
 import shard.Messenger.MessengerTimeout
 import shard.WorkerActor._
 import shard.WorkerActor.WorkerMessage._
@@ -38,6 +39,12 @@ object ShardingSpec extends ZIOSpecDefault {
         LocalShardManagerClient.live,
         Storage.memory,
         ZLayer.succeed(Config.default.copy(entityInterceptor = logging))
+      ),
+      suite("transport faults")(transportFaults*).provideSome[Scope](
+        FaultyPods.localSharding,
+        LocalShardManagerClient.live,
+        Storage.memory,
+        ZLayer.succeed(Config.default.copy(simulateRemotePods = true))
       ),
       suite("registered pods")(
         test("Registered pods are read from the storage") {
@@ -461,6 +468,56 @@ object ShardingSpec extends ZIOSpecDefault {
         _.saveAssignments(config.role, (1 to config.numberOfShards).map(_ -> Some(pod)).toMap)
       )
     )
+
+  // a failed message is sent again, whether or not it may have been delivered
+  val transportFaults: List[Spec[Sharding & FaultyPods & Scope, Any]] =
+    List(
+      runsOnceTest("A message that never left the sender is sent again and runs once")(Fault.FailBeforeSending),
+      runsOnceTest("A message that its pod doesn't host is sent again and runs once")(Fault.NotHosted),
+      test("A message whose connection dropped after it was sent is sent again and runs twice") {
+        for {
+          counter <- startCounter()
+          _       <- FaultyPods.inject(Fault.DropAfterSending)
+          _       <- counter.send("c1")(IncrementCounter())
+          // the dropped message runs in the background
+          value   <- (Clock.sleep(10.millis) *> counter.send("c1")(GetCounter())).repeatUntil(_ == 2).timeout(5.seconds)
+        } yield assertTrue(value.contains(2))
+      },
+      test("A message whose pod was killed while its handler ran is sent again and runs again") {
+        for {
+          state      <- startWorker()
+          worker     <- Sharding.messenger(Worker)
+          subscribed <- Promise.make[Nothing, Unit]
+          // the killed run, then the run of the message sent again
+          runs       <- state.running.changes.tap(_ => subscribed.succeed(())).filter(_ > 0).take(2).runDrain.fork
+          _          <- subscribed.await
+          _          <- FaultyPods.inject(Fault.KillWhileRunning(state.running.changes.filter(_ > 0).runHead))
+          block      <- worker.send("w1")(Block()).fork
+          ran        <- runs.join.timeout(5.seconds)
+          _          <- worker.send("w1")(Unblock())
+          _          <- block.join
+        } yield assertTrue(ran.isDefined)
+      },
+      test("A message whose pod was killed after its handler finished is sent again and runs twice") {
+        for {
+          counter <- startCounter()
+          _       <- FaultyPods.inject(Fault.KillAfterFinished)
+          _       <- counter.send("c1")(IncrementCounter())
+          value   <- counter.send("c1")(GetCounter())
+        } yield assertTrue(value == 2)
+      }
+    )
+
+  private def runsOnceTest(name: String)(fault: Fault): Spec[Sharding & FaultyPods & Scope, Any] =
+    test(name) {
+      for {
+        counter <- startCounter()
+        _       <- FaultyPods.inject(fault)
+        _       <- counter.send("c1")(IncrementCounter())
+        pending <- FaultyPods.pending
+        value   <- counter.send("c1")(GetCounter())
+      } yield assertTrue(pending == 0, value == 1)
+    }
 
   // tests relying on the in-process transport's chunking, delivery order and synchronous cancellation
   val inProcess: String = "in-process"

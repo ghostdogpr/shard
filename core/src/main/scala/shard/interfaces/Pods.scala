@@ -29,18 +29,22 @@ trait Pods {
   def ping(pod: PodAddress): Task[Unit]
 
   /**
-    * Send a message to a pod
+    * Send a message to a pod.
+    * Fails with `Pods.NotSent` only if the message was certainly not delivered, which makes sending it again safe.
+    * Any other failure means that the message may have been delivered.
     */
   def sendMessage(pod: PodAddress, message: BinaryMessage): Task[BinaryReply]
 
   /**
-    * Send a stream of messages to a pod
+    * Send a stream of messages to a pod.
+    * Fails with `Pods.NotSent` only if none of the messages was delivered.
     */
   def sendStream(pod: PodAddress, messages: ZStream[Any, Nothing, BinaryMessage]): Task[BinaryReply]
 
   /**
     * Send a stream of messages to a pod and receive a stream of replies.
     * The first message is the request and the next ones are its inputs.
+    * Fails with `Pods.NotSent` only if none of the messages was delivered.
     */
   def sendStreamAndReceiveStream(
     pod: PodAddress,
@@ -73,6 +77,11 @@ object Pods {
       ): ZStream[Any, Throwable, BinaryReply]                                                            =
         ZStream.empty
     })
+
+  /**
+    * The pod can't be reached, and the message was certainly not delivered, for example because the connection was refused.
+    */
+  final case class NotSent(pod: PodAddress) extends Exception(s"Pod $pod is unavailable, the message was not delivered")
 
   /**
     * A message sent to an entity or topic.

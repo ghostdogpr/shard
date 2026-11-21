@@ -359,8 +359,9 @@ class Sharding private (
 
   private def fromTransport(error: Throwable): IO[Any, Nothing] =
     error match {
-      case PodUnavailable(pod)          => reportUnhealthy(pod) *> ZIO.fail(Sharding.Retry(error))
-      case _: EntityNotManagedByThisPod => ZIO.fail(Sharding.Retry(error))
+      case Pods.NotSent(pod)            => reportUnhealthy(pod) *> ZIO.fail(Sharding.Retry.NotSent(pod))
+      case PodUnavailable(pod)          => reportUnhealthy(pod) *> ZIO.fail(Sharding.Retry.MaybeDelivered(pod))
+      case _: EntityNotManagedByThisPod => ZIO.fail(Sharding.Retry.NotHosted)
       case error: ClusterError          => ZIO.fail(error)
       case other                        => ZIO.fail(TransportError(other.toString))
     }
@@ -383,7 +384,7 @@ class Sharding private (
     send: PodAddress => IO[Any, A]
   ): IO[Any, A] =
     podOf(entityType, entityId).flatMap(pod =>
-      send(pod).catchSome { case Sharding.Retry(_) =>
+      send(pod).catchSome { case _: Sharding.Retry =>
         refreshStaleAssignments.unless(pod == address) *> Clock.sleep(200.millis) *> sendToEntity(entityType, entityId)(
           send
         )
@@ -408,7 +409,7 @@ class Sharding private (
           case true  => ZStream.fail(StreamCancelled)
         })
 
-      send(pod).mapChunksZIO(chunk => started.set(true).when(chunk.nonEmpty).as(chunk)).catchSome { case Sharding.Retry(_) | StreamCancelled =>
+      send(pod).mapChunksZIO(chunk => started.set(true).when(chunk.nonEmpty).as(chunk)).catchSome { case _: Sharding.Retry | StreamCancelled =>
         ZStream.execute(refreshStaleAssignments.unless(pod == address)) ++ retryUnless(
           started.get.zipWith(inputRead)(_ || _)
         )
@@ -602,13 +603,16 @@ class Sharding private (
         getPods.flatMap(pods =>
           ZIO
             .foreachPar(pods.toList) { pod =>
+              // retry as long as the pod is registered
+              def retry(unavailable: PodAddress): IO[Any, Any] =
+                Clock.sleep(200.millis) *> getPods
+                  .flatMap(pods => if (pods.contains(pod)) trySend else ZIO.fail(PodUnavailable(unavailable)))
+
               def trySend: IO[Any, Any] =
                 deliver(topicType, topic, pod, message, expectsReply).catchSome {
-                  case Sharding.Retry(error: PodUnavailable)        =>
-                    // retry as long as the pod is registered
-                    Clock.sleep(200.millis) *> getPods
-                      .flatMap(pods => if (pods.contains(pod)) trySend else ZIO.fail(error))
-                  case Sharding.Retry(_: EntityNotManagedByThisPod) =>
+                  case Sharding.Retry.NotSent(unavailable)        => retry(unavailable)
+                  case Sharding.Retry.MaybeDelivered(unavailable) => retry(unavailable)
+                  case Sharding.Retry.NotHosted                   =>
                     // the pod is shutting down
                     ZIO.fail(PodUnavailable(pod))
                 }
@@ -681,8 +685,13 @@ object Sharding {
     }
   }
 
-  // a transport failure after which the message can be sent again (private so that typed errors are never retried)
-  final private[shard] case class Retry(error: Throwable)
+  // a failure after which the message can be sent again (private so that typed errors are never retried)
+  private[shard] enum Retry {
+    case NotSent(pod: PodAddress)
+    case MaybeDelivered(pod: PodAddress)
+    // the pod doesn't host the entity, or stopped it before a reply stream started
+    case NotHosted
+  }
 
   // acknowledges a message that doesn't expect a reply
   private val ack: BinaryReply = BinaryReply.Success(Array.emptyByteArray)

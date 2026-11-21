@@ -36,11 +36,14 @@ object LocalSharding {
     * This layer will only work in a single JVM and is not suitable for production use.
     */
   val live: RLayer[ShardManagerClient & Storage & Config, Sharding] =
+    withPods(identity)
+
+  private[shard] def withPods(wrap: Pods => Pods): RLayer[ShardManagerClient & Storage & Config, Sharding] =
     ZLayer.fromZIO(Promise.make[Nothing, Sharding]).flatMap { env =>
       val sharding = env.get
       ZLayer
         .makeSome[ShardManagerClient & Storage & Config, Sharding](
-          ZLayer.succeed(localPods(sharding)),
+          ZLayer.succeed(wrap(localPods(sharding))),
           Sharding.live
         )
         .tap(env => sharding.succeed(env.get))

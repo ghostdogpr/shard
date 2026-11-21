@@ -1,6 +1,9 @@
 package shard
 
-import io.grpc.{Attributes, Metadata}
+import java.net.{InetSocketAddress, Socket}
+import java.util.concurrent.CompletableFuture
+
+import io.grpc.{Attributes, Metadata, Server, ServerBuilder, ServerCall, ServerCallHandler, ServerServiceDefinition}
 import proteus.server.GrpcContext
 import zio.{Config => _, _}
 import zio.stream.{SubscriptionRef, ZStream}
@@ -13,8 +16,9 @@ import shard.Messenger.MessengerTimeout
 import shard.errors._
 import shard.interfaces.{MessageCodec, Pods, Storage}
 import shard.interfaces.MessageCodec.Codec
+import shard.interfaces.Pods.BinaryMessage
 import shard.protocol.{Sharding => ProtocolSharding}
-import shard.protocol.Sharding.{PingShardsRequest, PingShardsResponse}
+import shard.protocol.Sharding.{PingShardsRequest, PingShardsResponse, SendResponse}
 
 object GrpcShardingSpec extends ZIOSpecDefault {
   import GrpcShardingSpec.AccountActor._
@@ -104,7 +108,7 @@ object GrpcShardingSpec extends ZIOSpecDefault {
             for {
               _           <- Sharding.registerTopic(Incrementer)(IncrementerActor.behavior)
               _           <- Sharding.registerScoped
-              unavailable  = PodAddress("localhost", 1)
+              unavailable <- refusingPod
               // a shard id that is not used, so that the pod only receives broadcasts
               _           <- ZIO.serviceWithZIO[Storage](_.saveAssignments(Config.default.role, Map(301 -> Some(unavailable))))
               _           <- (Clock.sleep(10.millis) *> Sharding.getPods).repeatUntil(_.contains(unavailable))
@@ -119,11 +123,36 @@ object GrpcShardingSpec extends ZIOSpecDefault {
               )
             )
           } @@ TestAspect.timeout(10.seconds),
+          test("A message to a pod that can't be connected to fails with NotSent, for every kind of call") {
+            val message = BinaryMessage("a1", Account.name, Array.emptyByteArray, expectsReply = true)
+            for {
+              refusing <- refusingPod
+              pods     <- grpcPods
+              send     <- pods.sendMessage(refusing, message).flip
+              stream   <- pods.sendStream(refusing, ZStream(message)).flip
+              duplex   <- pods.sendStreamAndReceiveStream(refusing, ZStream(message)).runDrain.flip
+              unknown   = PodAddress("unknown.invalid", 1)
+              resolve  <- pods.sendMessage(unknown, message).flip
+            } yield assertTrue(send == Pods.NotSent(refusing), stream == send, duplex == send, resolve == Pods.NotSent(unknown))
+          },
+          test("A message whose connection drops after it was received fails with PodUnavailable") {
+            val message = BinaryMessage("a1", Account.name, Array.emptyByteArray, expectsReply = true)
+            for {
+              received <- ZIO.succeed(new CompletableFuture[Unit]())
+              pods     <- grpcPods
+              server   <- silentServer(received)
+              pod       = PodAddress("localhost", server.getPort)
+              send     <- pods.sendMessage(pod, message).flip.fork
+              _        <- ZIO.fromCompletableFuture(received)
+              _        <- ZIO.succeed(server.shutdownNow())
+              error    <- send.join
+            } yield assertTrue(error == PodUnavailable(pod))
+          } @@ TestAspect.timeout(10.seconds),
           test("Releasing GrpcPods closes its connections, including those opened from uninterruptible code or after") {
             for {
               self     <- ZIO.serviceWith[Config](config => PodAddress(config.selfHost, config.shardingPort))
               scope    <- Scope.make
-              pods     <- scope.extend((ZLayer.succeed(GrpcConfig.default) >>> GrpcPods.live).build).map(_.get[Pods])
+              pods     <- scope.extend(grpcPods)
               _        <- pods.ping(self).uninterruptible
               // the pod rejects shards of another role
               other     = Role("other")
@@ -144,6 +173,30 @@ object GrpcShardingSpec extends ZIOSpecDefault {
         )
       )
     ) @@ sequential @@ withLiveClock @@ TestAspect.timeout(60.seconds)
+
+  private val grpcPods: RIO[Scope, Pods] =
+    (ZLayer.succeed(GrpcConfig.default) >>> GrpcPods.live).build.map(_.get[Pods])
+
+  // a port that refuses connections, since it is bound to a socket that doesn't listen
+  private val refusingPod: RIO[Scope, PodAddress] =
+    ZIO
+      .fromAutoCloseable(ZIO.attempt { val socket = new Socket(); socket.bind(new InetSocketAddress("127.0.0.1", 0)); socket })
+      .map(socket => PodAddress("127.0.0.1", socket.getLocalPort))
+
+  private def silentServer(received: CompletableFuture[Unit]): RIO[Scope, Server] = {
+    val method  = ProtocolSharding.send.toMethodDescriptor(ProtocolSharding.service)
+    val handler = new ServerCallHandler[BinaryMessage, SendResponse] {
+      def startCall(call: ServerCall[BinaryMessage, SendResponse], headers: Metadata): ServerCall.Listener[BinaryMessage] = {
+        call.request(1)
+        new ServerCall.Listener[BinaryMessage] {
+          override def onMessage(message: BinaryMessage): Unit = received.complete(()): Unit
+        }
+      }
+    }
+    val service = ServerServiceDefinition.builder(method.getServiceName).addMethod(method, handler).build()
+    ZIO
+      .acquireRelease(ZIO.attempt(ServerBuilder.forPort(0).addService(service).build().start()))(server => ZIO.succeed(server.shutdownNow()))
+  }
 
   private def overGrpc(config: Config)(spec: Spec[Sharding & Storage & Config & Scope, Any]): Spec[Scope, Any] =
     spec.provideSomeShared[Scope](

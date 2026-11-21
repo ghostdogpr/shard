@@ -456,7 +456,7 @@ final private[shard] class EntityManager[Msg[_, _]] private (
         )(ZIO.when(_)(release(entity, stream = true)))
         .map(running =>
           if (running) Streams.interruptWhen(stream, entity.closing.await *> ZIO.fail(StreamCancelled))
-          else ZStream.fail(Sharding.Retry(EntityNotManagedByThisPod(entity.entityId)))
+          else ZStream.fail(Sharding.Retry.NotHosted)
         )
     )
 

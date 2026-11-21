@@ -38,7 +38,7 @@ private[shard] object Replies {
         ZStream.succeed(foldCause[BinaryReply](cause, defect, BinaryReply.Interrupted) {
           case StreamCancelled           => BinaryReply.Interrupted
           // the entity is stopping: the sender sends the message again
-          case _: Sharding.Retry         => BinaryReply.EntityNotManagedByThisPod
+          case Sharding.Retry.NotHosted  => BinaryReply.EntityNotManagedByThisPod
           case error: SerializationError => BinaryReply.SerializationError(error.message)
           case error                     =>
             attempt("encode a stream failure")(BinaryReply.StreamFailure(codec.streamError.encode(error)))
@@ -77,7 +77,7 @@ private[shard] object Replies {
       case BinaryReply.MailboxFull                                         => Exit.fail(MailboxFull(entityType, entityId))
       case BinaryReply.Discarded                                           => Exit.fail(MessageDiscarded(entityType, entityId))
       case BinaryReply.EntityNotManagedByThisPod                           =>
-        Exit.fail(Sharding.Retry(EntityNotManagedByThisPod(entityId)))
+        Exit.fail(Sharding.Retry.NotHosted)
       case other @ (BinaryReply.Element(_) | BinaryReply.StreamFailure(_)) =>
         Exit.die(new RuntimeException(s"Unexpected stream reply $other to a unary message to $entityType $entityId"))
     }
