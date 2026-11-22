@@ -17,7 +17,7 @@ trait Messenger[Msg[_, _]] {
 
   /**
     * Send a message and wait for its reply.
-    * The message may be processed more than once if its pod becomes unavailable.
+    * The message may be processed more than once if its pod becomes unavailable, unless it is `AtMostOnce`.
     */
   def send[E, A](entityId: String)(message: Msg[E, A])(using Unary[A]): IO[E | ClusterError, A]
 

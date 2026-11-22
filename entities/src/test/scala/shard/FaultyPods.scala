@@ -33,6 +33,7 @@ final class FaultyPods private (faults: Queue[Fault]) {
             pods.sendMessage(pod, message).interruptible.fork.flatMap(running *> _.interrupt) *> ZIO.fail(PodUnavailable(pod))
           case Some(Fault.KillAfterFinished)         => pods.sendMessage(pod, message) *> ZIO.fail(PodUnavailable(pod))
           case Some(Fault.NotHosted)                 => ZIO.succeed(BinaryReply.EntityNotManagedByThisPod)
+          case Some(Fault.KillAfterAcknowledging)    => ZIO.succeed(BinaryReply.Success(Array.emptyByteArray))
         }
     }
 }
@@ -48,6 +49,8 @@ object FaultyPods {
     // the pod dies after the handler finished, before the reply is sent
     case KillAfterFinished
     case NotHosted
+    // the pod acknowledges a message that expects no reply, then dies before running it
+    case KillAfterAcknowledging
   }
 
   def inject(faults: Fault*): URIO[FaultyPods, Unit] =

@@ -211,7 +211,7 @@ Left(GuildFull(5))
 
 #### Going further
 A messenger can also send a message without waiting for its reply (`sendDiscard`), send a message whose reply is a stream (`stream`), or send a stream of messages (`sendStream`).
-See the [Entities and Messaging](entities.md) section for these, as well as entity options, errors and delivery guarantees.
+See the [Entities and Messaging](entities.md) section for these, as well as entity options and errors, and [Delivery guarantees](delivery-guarantees.md) for what happens to a message when a pod fails.
 
 #### One more thing...
 `Sharding` also exposes 2 methods that can be interesting for some use cases:

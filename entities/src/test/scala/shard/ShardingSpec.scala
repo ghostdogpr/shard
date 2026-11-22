@@ -11,6 +11,8 @@ import shard.CounterActor._
 import shard.CounterActor.CounterMessage._
 import shard.FaultyPods.Fault
 import shard.Messenger.MessengerTimeout
+import shard.OnceCounterActor._
+import shard.OnceCounterActor.OnceCounterMessage._
 import shard.WorkerActor._
 import shard.WorkerActor.WorkerMessage._
 import shard.errors._
@@ -381,6 +383,36 @@ object ShardingSpec extends ZIOSpecDefault {
           ZLayer.succeed(config)
         )
       },
+      test("A pod reads the assignments from the storage again when an at-most-once message fails with DeliveryUnknown") {
+        val config                       = Config.default.copy(refreshAssignmentsRetryInterval = Duration.Zero)
+        def all(pod: Option[PodAddress]) = (1 to config.numberOfShards).map(_ -> pod).toMap
+        for {
+          snapshot <- Ref.make(all(Some(otherPod)))
+          read     <- Promise.make[Nothing, Unit]
+          storage   = new Storage {
+                        def getAssignments(role: Role): Task[Map[ShardId, Option[PodAddress]]]               =
+                          read.succeed(()).as(all(Some(otherPod)))
+                        def saveAssignments(role: Role, value: Map[ShardId, Option[PodAddress]]): Task[Unit] = ZIO.unit
+                        def assignmentsStream(role: Role)                                                    = ZStream.never
+                        def getPods: Task[Set[Pod]]                                                          = ZIO.succeed(Set.empty)
+                        def savePods(pods: Set[Pod]): Task[Unit]                                             = ZIO.unit
+                      }
+          result   <- (for {
+                        error <- Sharding.messenger(OnceCounter).flatMap(_.send("c1")(Increment())).flip
+                        _     <- read.await
+                      } yield error)
+                        .timeout(5.seconds)
+                        .provide(
+                          Sharding.live,
+                          ZLayer.succeed(
+                            stubPods(onSend = pod => ZIO.fail(PodUnavailable(pod)), onStream = (pod, _) => ZStream.fail(PodUnavailable(pod)))
+                          ),
+                          ZLayer.succeed(takingShardsBack(snapshot)),
+                          ZLayer.succeed(storage),
+                          ZLayer.succeed(config)
+                        )
+        } yield assertTrue(result.contains(DeliveryUnknown(OnceCounter.name, "c1")))
+      },
       test("Assigning shards that a pod already has doesn't change its shards gauge") {
         // a role of its own, since the gauge is shared by all the pods of a role in this JVM
         val config = Config.default.copy(role = Role("gauge"))
@@ -469,19 +501,40 @@ object ShardingSpec extends ZIOSpecDefault {
       )
     )
 
-  // a failed message is sent again, whether or not it may have been delivered
   val transportFaults: List[Spec[Sharding & FaultyPods & Scope, Any]] =
     List(
-      runsOnceTest("A message that never left the sender is sent again and runs once")(Fault.FailBeforeSending),
-      runsOnceTest("A message that its pod doesn't host is sent again and runs once")(Fault.NotHosted),
-      test("A message whose connection dropped after it was sent is sent again and runs twice") {
+      runsOnceTest("A message that never left the sender is sent again and runs once, even at most once")(
+        Fault.FailBeforeSending
+      ),
+      runsOnceTest("A message that its pod doesn't host is sent again and runs once, even at most once")(Fault.NotHosted),
+      test("A message whose connection dropped after it was sent is sent again and runs twice, unless it is at most once") {
         for {
-          counter <- startCounter()
-          _       <- FaultyPods.inject(Fault.DropAfterSending)
-          _       <- counter.send("c1")(IncrementCounter())
-          // the dropped message runs in the background
-          value   <- (Clock.sleep(10.millis) *> counter.send("c1")(GetCounter())).repeatUntil(_ == 2).timeout(5.seconds)
-        } yield assertTrue(value.contains(2))
+          counter   <- startCounter()
+          once      <- startOnceCounter
+          _         <- FaultyPods.inject(Fault.DropAfterSending)
+          _         <- counter.send("c1")(IncrementCounter())
+          // the dropped messages run in the background
+          value     <- (Clock.sleep(10.millis) *> counter.send("c1")(GetCounter())).repeatUntil(_ == 2).timeout(5.seconds)
+          // each at-most-once call is first sent again safely, then dropped
+          _         <- FaultyPods.inject(
+                         Fault.FailBeforeSending,
+                         Fault.DropAfterSending,
+                         Fault.FailBeforeSending,
+                         Fault.DropAfterSending
+                       )
+          sent      <- once.send("c1")(Increment()).flip
+          discarded <- once.sendDiscard("c1")(Increment()).flip
+          pending   <- FaultyPods.pending
+          onceValue <- (Clock.sleep(10.millis) *> once.send("c1")(Get())).repeatUntil(_ == 2).timeout(5.seconds)
+          last      <- Clock.sleep(100.millis) *> once.send("c1")(Get())
+        } yield assertTrue(
+          value.contains(2),
+          sent == DeliveryUnknown(OnceCounter.name, "c1"),
+          discarded == sent,
+          pending == 0,
+          onceValue.contains(2),
+          last == 2
+        )
       },
       test("A message whose pod was killed while its handler ran is sent again and runs again") {
         for {
@@ -498,25 +551,64 @@ object ShardingSpec extends ZIOSpecDefault {
           _          <- block.join
         } yield assertTrue(ran.isDefined)
       },
-      test("A message whose pod was killed after its handler finished is sent again and runs twice") {
+      killedWhileRunningTest("An at-most-once message whose pod was killed while its handler ran fails with DeliveryUnknown")(
+        kills = 1
+      ),
+      killedWhileRunningTest("An at-most-once message that brings its pod down every time fails with DeliveryUnknown")(
+        kills = 3
+      ),
+      test("A message whose pod was killed after its handler finished is sent again and runs twice, unless it is at most once") {
         for {
-          counter <- startCounter()
-          _       <- FaultyPods.inject(Fault.KillAfterFinished)
-          _       <- counter.send("c1")(IncrementCounter())
-          value   <- counter.send("c1")(GetCounter())
-        } yield assertTrue(value == 2)
+          counter   <- startCounter()
+          once      <- startOnceCounter
+          _         <- FaultyPods.inject(Fault.KillAfterFinished)
+          _         <- counter.send("c1")(IncrementCounter())
+          value     <- counter.send("c1")(GetCounter())
+          _         <- FaultyPods.inject(Fault.KillAfterFinished)
+          error     <- once.send("c1")(Increment()).flip
+          onceValue <- once.send("c1")(Get())
+        } yield assertTrue(value == 2, error == DeliveryUnknown(OnceCounter.name, "c1"), onceValue == 1)
+      },
+      test("A sendDiscard acknowledged by a pod that dies before running it is lost, even at most once") {
+        for {
+          counter   <- startCounter()
+          once      <- startOnceCounter
+          _         <- FaultyPods.inject(Fault.KillAfterAcknowledging, Fault.KillAfterAcknowledging)
+          _         <- counter.sendDiscard("c1")(IncrementCounter())
+          _         <- once.sendDiscard("c1")(Increment())
+          pending   <- FaultyPods.pending
+          value     <- counter.send("c1")(GetCounter())
+          onceValue <- once.send("c1")(Get())
+        } yield assertTrue(pending == 0, value == 0, onceValue == 0)
       }
     )
 
   private def runsOnceTest(name: String)(fault: Fault): Spec[Sharding & FaultyPods & Scope, Any] =
     test(name) {
       for {
-        counter <- startCounter()
-        _       <- FaultyPods.inject(fault)
-        _       <- counter.send("c1")(IncrementCounter())
+        counter   <- startCounter()
+        once      <- startOnceCounter
+        _         <- ZIO.foreachDiscard(
+                       List(counter.send("c1")(IncrementCounter()), once.send("c1")(Increment()), once.sendDiscard("c1")(Increment()))
+                     )(FaultyPods.inject(fault) *> _)
+        pending   <- FaultyPods.pending
+        value     <- counter.send("c1")(GetCounter())
+        onceValue <- once.send("c1")(Get())
+      } yield assertTrue(pending == 0, value == 1, onceValue == 2)
+    }
+
+  private def killedWhileRunningTest(name: String)(kills: Int): Spec[Sharding & FaultyPods & Scope, Any] =
+    test(name) {
+      for {
+        state   <- startWorker()
+        worker  <- Sharding.messenger(Worker)
+        _       <- FaultyPods.inject(List.fill(kills)(Fault.KillWhileRunning(state.running.changes.filter(_ > 0).runHead))*)
+        error   <- worker.send("w1")(GatedOnce()).flip
+        running <- state.running.get
         pending <- FaultyPods.pending
-        value   <- counter.send("c1")(GetCounter())
-      } yield assertTrue(pending == 0, value == 1)
+        _       <- state.gate.succeed(())
+        _       <- state.completed.changes.takeUntil(_ == 1).runDrain
+      } yield assertTrue(error == DeliveryUnknown(Worker.name, "w1"), running == 1, pending == kills - 1)
     }
 
   // tests relying on the in-process transport's chunking, delivery order and synchronous cancellation
@@ -534,7 +626,12 @@ object ShardingSpec extends ZIOSpecDefault {
           _       <- counter.send("c2")(IncrementCounter())
           c1      <- counter.send("c1")(GetCounter())
           c2      <- counter.send("c2")(GetCounter())
-        } yield assertTrue(c1 == 2, c2 == 1)
+          once    <- startOnceCounter
+          _       <- once.sendDiscard("c1")(Increment())
+          _       <- once.sendDiscard("c1")(Increment())
+          _       <- once.send("c1")(Increment())
+          o1      <- once.send("c1")(Get())
+        } yield assertTrue(c1 == 2, c2 == 1, o1 == 3)
       },
       test("Typed failure") {
         for {
@@ -551,7 +648,9 @@ object ShardingSpec extends ZIOSpecDefault {
           _       <- counter.send("c1")(IncrementCounter())
           error   <- counter.send("c1")(Die()).flip
           c1      <- counter.send("c1")(GetCounter()) // counter should be restarted
-        } yield assertTrue(error == EntityDefect("Entity died with java.lang.Exception: boom"), c1 == 0)
+          once    <- startOnceCounter
+          crashed <- once.send("c1")(Crash()).flip
+        } yield assertTrue(error == EntityDefect("Entity died with java.lang.Exception: boom"), c1 == 0, crashed == error)
       },
       test("A message that both fails and dies is a defect") {
         for {
@@ -732,22 +831,21 @@ object ShardingSpec extends ZIOSpecDefault {
           _      <- state.finalized.changes.takeUntil(_ == 1).runDrain
         } yield assertTrue(before == 0)
       },
-      test("Messages still running are interrupted after entityTerminationTimeout, even Uninterruptible ones") {
+      test("Messages still running are interrupted after entityTerminationTimeout, even Uninterruptible and at-most-once ones") {
+        val messages = List[(String, WorkerMessage[Nothing, Unit])]("w1" -> Block(), "w3" -> LongUninterruptible(), "w4" -> GatedOnce())
         for {
           state  <- startWorker()
           worker <- Sharding.messenger(Worker, MessengerTimeout.NoTimeout)
-          fiber  <- worker.send("w1")(Block()).flip.fork
-          fiber2 <- worker.send("w3")(LongUninterruptible()).flip.fork
-          _      <- state.running.get.repeatUntil(_ == 2)
-          result <- (Sharding.terminateLocalEntity(Worker, "w1") *>
-                      Sharding.terminateLocalEntity(Worker, "w3") *>
-                      fiber.join.zip(fiber2.join)).timed
+          fibers <- ZIO.foreach(messages)((id, message) => worker.send(id)(message).flip.fork)
+          _      <- state.running.get.repeatUntil(_ == messages.size)
+          result <- (ZIO.foreachDiscard(messages)((id, _) => Sharding.terminateLocalEntity(Worker, id)) *>
+                      ZIO.foreach(fibers)(_.join)).timed
           after  <- state.running.get
           // replies are sent before the entities' finalizers run
-          _      <- state.finalized.changes.takeUntil(_ == 2).runDrain
+          _      <- state.finalized.changes.takeUntil(_ == messages.size).runDrain
         } yield assertTrue(
           result._1 >= Config.default.entityTerminationTimeout,
-          result._2 == (EntityInterrupted(Worker.name, "w1"), EntityInterrupted(Worker.name, "w3")),
+          result._2 == messages.map((id, _) => EntityInterrupted(Worker.name, id)),
           after == 0
         )
       },
@@ -952,7 +1050,7 @@ object ShardingSpec extends ZIOSpecDefault {
           _      <- state.completed.changes.takeUntil(_ == 1).runDrain
         } yield assertCompletes
       },
-      test("Uninterruptible messages are processed even if their sender stopped waiting before they started") {
+      test("Uninterruptible and at-most-once messages are processed even if their sender stopped waiting before they started") {
         for {
           state   <- startWorker()
           worker  <- Sharding.messenger(Worker)
@@ -961,11 +1059,14 @@ object ShardingSpec extends ZIOSpecDefault {
           blocked <- worker.send("w1")(Block()).fork
           _       <- state.running.get.repeatUntil(_ == 1)
           error   <- timed.send("w1")(SlowUninterruptible()).flip
+          // sent again after the timeout, an at-most-once message runs again
+          once    <- timed.send("w1")(GatedOnce()).flip.repeatN(1)
+          _       <- state.gate.succeed(())
           _       <- worker.send("w1")(Unblock())
           _       <- blocked.join
-          _       <- worker.send("w1")(Ping()) // processed after SlowUninterruptible
+          _       <- worker.send("w1")(Ping()) // processed after the others
           done    <- state.completed.get
-        } yield assertTrue(error == SendTimeout(Worker.name, "w1"), done == 1)
+        } yield assertTrue(error == SendTimeout(Worker.name, "w1"), once == error, done == 3)
       },
       test("Concurrent messages run alongside the others") {
         for {
@@ -1738,6 +1839,7 @@ object WorkerActor {
     case CompleteNow()         extends WorkerMessage[Nothing, Unit]
     // counts as running until the test opens the gate, then counts as completed
     case Gated()               extends WorkerMessage[Nothing, Unit] with Uninterruptible
+    case GatedOnce()           extends WorkerMessage[Nothing, Unit] with AtMostOnce
     // number of the entity, counting from 1 each time it starts
     case Instance()            extends WorkerMessage[Nothing, Int]
     // logs "message"
@@ -1806,7 +1908,7 @@ object WorkerActor {
           case GatedStream()         => ZIO.succeed(Streamed(ZStream.fromZIO(running(state.gate.await).as(instance))))
           case Complete()            => Clock.sleep(10.millis) *> state.completed.update(_ + 1)
           case CompleteNow()         => state.completed.update(_ + 1)
-          case Gated()               => running(state.gate.await) *> state.completed.update(_ + 1)
+          case Gated() | GatedOnce() => running(state.gate.await) *> state.completed.update(_ + 1)
           case Instance()            => ZIO.succeed(instance)
           case Log()                 => ZIO.log("message")
           case ForkGated()           => (state.gate.await *> state.completed.update(_ + 1)).fork.unit
@@ -1823,4 +1925,31 @@ object WorkerActor {
             )
         }
     }
+}
+
+object OnceCounterActor {
+  enum OnceCounterMessage[E, A] extends AtMostOnce {
+    case Increment() extends OnceCounterMessage[Nothing, Unit]
+    case Get()       extends OnceCounterMessage[Nothing, Int]
+    case Crash()     extends OnceCounterMessage[Nothing, Unit]
+  }
+
+  object OnceCounter extends EntityType[OnceCounterMessage]("once-counter")
+
+  // doesn't register the pod, unlike `startCounter`
+  val startOnceCounter: RIO[Sharding & Scope, Messenger[OnceCounterMessage]] =
+    Sharding.registerEntity(OnceCounter)(_ =>
+      Ref
+        .make(0)
+        .map(count =>
+          new OnceCounter.Handler {
+            def handle[E, A](message: OnceCounterMessage[E, A]): IO[E, A] =
+              message match {
+                case Increment() => count.update(_ + 1)
+                case Get()       => count.get
+                case Crash()     => ZIO.die(new Exception("boom"))
+              }
+          }
+        )
+    ) *> Sharding.messenger(OnceCounter)
 }

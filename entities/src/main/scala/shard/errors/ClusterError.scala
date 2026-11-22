@@ -39,6 +39,13 @@ final case class EntityInterrupted(entityType: String, entityId: String)
   extends ClusterError(s"Processing of a message by $entityType $entityId was interrupted")
 
 /**
+  * An `AtMostOnce` message may or may not have been processed: its pod became unavailable after it was sent,
+  * so it was not sent again.
+  */
+final case class DeliveryUnknown(entityType: String, entityId: String)
+  extends ClusterError(s"Message to $entityType $entityId may or may not have been processed")
+
+/**
   * The entity was not running and `loadEntity` rejected the message.
   */
 final case class MessageDiscarded(entityType: String, entityId: String)

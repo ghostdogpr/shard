@@ -380,14 +380,16 @@ class Sharding private (
         }
     }
 
-  private def sendToEntity[A](entityType: EntityType[?], entityId: String)(
+  private def sendToEntity[A](entityType: EntityType[?], entityId: String, atMostOnce: Boolean)(
     send: PodAddress => IO[Any, A]
   ): IO[Any, A] =
     podOf(entityType, entityId).flatMap(pod =>
-      send(pod).catchSome { case _: Sharding.Retry =>
-        refreshStaleAssignments.unless(pod == address) *> Clock.sleep(200.millis) *> sendToEntity(entityType, entityId)(
-          send
-        )
+      send(pod).catchSome { case retry: Sharding.Retry =>
+        refreshStaleAssignments.unless(pod == address) *> (retry match {
+          case Sharding.Retry.MaybeDelivered(_) if atMostOnce => ZIO.fail(DeliveryUnknown(entityType.name, entityId))
+          case _                                              =>
+            Clock.sleep(200.millis) *> sendToEntity(entityType, entityId, atMostOnce)(send)
+        })
       }
     )
 
@@ -531,14 +533,18 @@ class Sharding private (
 
       def send[E, A](entityId: String)(message: Msg[E, A])(using Unary[A]): IO[E | ClusterError, A] = {
         val sent = withTimeout(timeout, entityType, entityId)(
-          sendToEntity(entityType, entityId)(deliver(entityType, entityId, _, message, expectsReply = true))
+          sendToEntity(entityType, entityId, message.isInstanceOf[AtMostOnce])(
+            deliver(entityType, entityId, _, message, expectsReply = true)
+          )
         )
         (if (timeout.isDefined) sent.interruptible else sent).asInstanceOf[IO[E | ClusterError, A]]
       }
 
       def sendDiscard[E, A](entityId: String)(message: Msg[E, A])(using Unary[A]): IO[ClusterError, Unit] =
         withTimeout(timeout, entityType, entityId)(
-          sendToEntity(entityType, entityId)(deliver(entityType, entityId, _, message, expectsReply = false))
+          sendToEntity(entityType, entityId, message.isInstanceOf[AtMostOnce])(
+            deliver(entityType, entityId, _, message, expectsReply = false)
+          )
         ).catchSome { case _: MessageDiscarded => ZIO.unit } // the entity is not running: nothing to do
           .unit
           .asInstanceOf[IO[ClusterError, Unit]]
@@ -573,7 +579,7 @@ class Sharding private (
       def sendStream[E1](entityId: String)(
         messages: ZStream[Any, E1, Msg[Nothing, Unit]]
       ): IO[E1 | ClusterError, Unit] =
-        sendToEntity(entityType, entityId)(deliverMessages(entityType, entityId, _, messages))
+        sendToEntity(entityType, entityId, atMostOnce = false)(deliverMessages(entityType, entityId, _, messages))
           .asInstanceOf[IO[E1 | ClusterError, Unit]]
     }
 

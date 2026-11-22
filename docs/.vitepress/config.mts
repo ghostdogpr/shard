@@ -35,6 +35,7 @@ export default defineConfig({
         items: [
           { text: 'Getting started', link: '/getting-started' },
           { text: 'Entities and messaging', link: '/entities' },
+          { text: 'Delivery guarantees', link: '/delivery-guarantees' },
           { text: 'Architecture', link: '/architecture' },
           { text: 'Configuration', link: '/config' },
           { text: 'Customization', link: '/customization' },

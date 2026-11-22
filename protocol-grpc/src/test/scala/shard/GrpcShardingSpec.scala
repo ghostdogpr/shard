@@ -13,6 +13,7 @@ import zio.test.TestAspect.{sequential, withLiveClock}
 import shard.BroadcastingSpec.IncrementerActor
 import shard.BroadcastingSpec.IncrementerActor.{Incrementer, IncrementerMessage}
 import shard.Messenger.MessengerTimeout
+import shard.WorkerActor._
 import shard.errors._
 import shard.interfaces.{MessageCodec, Pods, Storage}
 import shard.interfaces.MessageCodec.Codec
@@ -147,6 +148,33 @@ object GrpcShardingSpec extends ZIOSpecDefault {
               _        <- ZIO.succeed(server.shutdownNow())
               error    <- send.join
             } yield assertTrue(error == PodUnavailable(pod))
+          } @@ TestAspect.timeout(10.seconds),
+          test("An at-most-once message whose pod dies while its handler runs fails with DeliveryUnknown") {
+            ZIO
+              .scoped {
+                for {
+                  state   <- startWorker()
+                  _       <- ZIO.addFinalizer(state.gate.succeed(()))
+                  server  <- ZIO.scopeWith(_.fork)
+                  _       <- server.extend(GrpcShardingService.live.build)
+                  worker  <- Sharding.messenger(Worker)
+                  send    <- worker.send("w1")(WorkerMessage.GatedOnce()).flip.fork
+                  _       <- state.running.changes.filter(_ > 0).runHead
+                  _       <- server.close(Exit.unit)
+                  error   <- send.join
+                  running <- state.running.get
+                  _       <- state.gate.succeed(())
+                  _       <- state.completed.changes.takeUntil(_ == 1).runDrain
+                } yield assertTrue(error == DeliveryUnknown(Worker.name, "w1"), running == 1)
+              }
+              .provide(
+                ShardManagerClient.local,
+                Storage.memory,
+                ZLayer.succeed(Config.default.copy(shardingPort = 14331, simulateRemotePods = true)),
+                ZLayer.succeed(GrpcConfig.default.copy(shutdownTimeout = Duration.Zero)),
+                GrpcPods.live,
+                Sharding.live
+              )
           } @@ TestAspect.timeout(10.seconds),
           test("Releasing GrpcPods closes its connections, including those opened from uninterruptible code or after") {
             for {
