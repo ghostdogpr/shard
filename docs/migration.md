@@ -203,7 +203,17 @@ Metrics are prefixed with `shard.` instead of `shardcake.` (e.g. `shard.entities
 ## Upgrading a running cluster
 
 Shardcake pods and Shard pods can't be part of the same cluster: the protocol between pods, the Shard Manager API and the stored data are all different.
-A rolling update from Shardcake to Shard is therefore not possible. Instead, run the new version as a separate cluster next to the old one (a **blue/green** deployment), then switch to it.
+A rolling update from Shardcake to Shard is therefore not possible. There are two ways to upgrade, depending on whether you can accept a downtime.
+
+### Stop and start
+
+The simplest way is to stop the whole Shardcake cluster (its Shard Manager and all its pods), then start the Shard one. Stopping the old pods lets their entities finish their messages and run their finalizers, so entities start from their last saved state in the new cluster. Messages can't be sent from the moment the old pods stop until the new ones are registered, so this upgrade has a downtime.
+
+With the default keys, the new cluster can use the same storage as the old one. The assignment keys are different (`shard_assignments` and `shard_assignments:<role>`), and the Shard Manager ignores the pods saved by Shardcake in `pods`, which are replaced when the first Shard pod registers.
+
+### Blue/green deployment
+
+To avoid a downtime, or to keep it as short as possible, run the new version as a separate cluster next to the old one (a **blue/green** deployment), then switch to it.
 
 The new cluster needs:
 - Its own Shard Manager, with a different address than the old one. Point the new pods to it with `shardManagerHost` and `shardManagerPort`.
