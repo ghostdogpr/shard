@@ -446,7 +446,7 @@ final private[shard] class EntityManager[Msg[_, _]] private (
 
   /**
     * Keep the entity running while a stream it returned is open, and cancel the stream when the entity stops.
-    * A stream started while the entity is stopping fails with `Sharding.Retry`.
+    * A stream started while the entity is stopping fails with `StreamCancelled`.
     */
   private def track(entity: RunningEntity[Msg], stream: ZStream[Any, Any, Any]): ZStream[Any, Any, Any] =
     ZStream.unwrapScoped(
@@ -456,7 +456,7 @@ final private[shard] class EntityManager[Msg[_, _]] private (
         )(ZIO.when(_)(release(entity, stream = true)))
         .map(running =>
           if (running) Streams.interruptWhen(stream, entity.closing.await *> ZIO.fail(StreamCancelled))
-          else ZStream.fail(Sharding.Retry.NotHosted)
+          else ZStream.fail(StreamCancelled)
         )
     )
 

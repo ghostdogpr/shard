@@ -113,11 +113,11 @@ Besides the error type declared by the message, calls can fail with a `ClusterEr
 - `MailboxFull`: the mailbox of the entity is full, the message was not processed.
 - `SendTimeout`: `send` or `broadcast` got no reply, or `sendDiscard` got no acknowledgment, within the timeout.
 - `PodUnavailable`: a pod is not responsive (only returned by `broadcast`, since messages to entities are retried).
-- `StreamCancelled`: a stream of replies was interrupted after it started (e.g. the entity was rebalanced).
+- `StreamCancelled`: a stream of replies was interrupted after it started (e.g. the entity was rebalanced), or before that for an `AtMostOnce` message (e.g. its entity stopped).
 - `InvalidShardId`: the shard ID computed for an entity is invalid.
 - `EntityInterrupted`: the entity was stopped before the message was fully processed (e.g. it exceeded `entityTerminationTimeout`). The message may have been partially processed.
 - `MessageDiscarded`: the entity was not running and `loadEntity` rejected the message.
-- `DeliveryUnknown`: an `AtMostOnce` message may or may not have been processed, because its pod became unavailable after it was sent. It was not sent again.
+- `DeliveryUnknown`: an `AtMostOnce` message may or may not have been processed, for example because its pod became unavailable after it was sent. It was not sent again.
 - `EntityDefect`: the entity died while processing the message (or failed to start).
 - `SerializationError`: a message, reply, stream element or stream input failed to be encoded or decoded.
 - `TransportError`: an unexpected failure of the transport between pods.

@@ -14,4 +14,7 @@ Each message has a delivery guarantee, which decides whether it is sent again wh
 - The message is sent again only if it certainly wasn't processed: it never left the sender (e.g. the connection was refused), or its pod answered that it doesn't host the entity.
 - If its pod becomes unavailable after it was sent, the call fails with `DeliveryUnknown`.
 - Each call is a new attempt: calling again after a `SendTimeout` or a `DeliveryUnknown` may process the message again.
-- During a rolling update that marks a message `AtMostOnce`, a sender on the previous version can still send the message again, and for `send`, a receiver on the previous version can still interrupt it when its sender times out.
+- For a message whose reply is a stream, the handler that returns the stream runs at most once. Until the first element is received, or for a `duplex` until its inputs start being read, the rules above apply, except that the stream fails with `StreamCancelled` if its entity stops. After that, it behaves as with best effort. `streamAutoRestart` and `duplexAutoRestart` restart it on `StreamCancelled`, as a new call, but not on `DeliveryUnknown`.
+- A `sendStream` is sent again from the start only while none of its `AtMostOnce` messages was sent. After that, a failure that would send it again makes it fail with `DeliveryUnknown`.
+- An `AtMostOnce` message sent to a topic is processed at most once on each pod. With `broadcast`, the result for a pod where it may or may not have been processed is `DeliveryUnknown`.
+- During a rolling update that marks a message `AtMostOnce`, the guarantee may not hold while some pods still run the previous version: the message can be processed more than once, or interrupted when its sender times out.

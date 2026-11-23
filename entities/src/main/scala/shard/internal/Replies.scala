@@ -37,8 +37,6 @@ private[shard] object Replies {
       .catchAllCause(cause =>
         ZStream.succeed(foldCause[BinaryReply](cause, defect, BinaryReply.Interrupted) {
           case StreamCancelled           => BinaryReply.Interrupted
-          // the entity is stopping: the sender sends the message again
-          case Sharding.Retry.NotHosted  => BinaryReply.EntityNotManagedByThisPod
           case error: SerializationError => BinaryReply.SerializationError(error.message)
           case error                     =>
             attempt("encode a stream failure")(BinaryReply.StreamFailure(codec.streamError.encode(error)))

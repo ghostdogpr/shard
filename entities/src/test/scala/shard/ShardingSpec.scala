@@ -7,6 +7,8 @@ import zio.stream.{SubscriptionRef, ZChannel, ZStream}
 import zio.test._
 import zio.test.TestAspect.{sequential, withLiveClock}
 
+import shard.BroadcastingSpec.IncrementerActor
+import shard.BroadcastingSpec.IncrementerActor.{Incrementer, IncrementerMessage}
 import shard.CounterActor._
 import shard.CounterActor.CounterMessage._
 import shard.FaultyPods.Fault
@@ -515,25 +517,24 @@ object ShardingSpec extends ZIOSpecDefault {
           _         <- counter.send("c1")(IncrementCounter())
           // the dropped messages run in the background
           value     <- (Clock.sleep(10.millis) *> counter.send("c1")(GetCounter())).repeatUntil(_ == 2).timeout(5.seconds)
-          // each at-most-once call is first sent again safely, then dropped
-          _         <- FaultyPods.inject(
-                         Fault.FailBeforeSending,
-                         Fault.DropAfterSending,
-                         Fault.FailBeforeSending,
-                         Fault.DropAfterSending
+          calls      = List(
+                         Fault.DropAfterSending -> once.send("c1")(Increment()),
+                         Fault.DropAfterSending -> once.sendDiscard("c1")(Increment()),
+                         Fault.DropAfterSending -> once.stream("c1")(IncrementAndStream()).runDrain,
+                         Fault.DropAfter(1)     -> once.sendStream("c1")(ZStream(Increment()))
                        )
-          sent      <- once.send("c1")(Increment()).flip
-          discarded <- once.sendDiscard("c1")(Increment()).flip
+          // each at-most-once call is first sent again safely, then dropped
+          _         <- FaultyPods.inject(calls.flatMap((fault, _) => List(Fault.FailBeforeSending, fault))*)
+          errors    <- ZIO.foreach(calls)(_._2.flip)
           pending   <- FaultyPods.pending
-          onceValue <- (Clock.sleep(10.millis) *> once.send("c1")(Get())).repeatUntil(_ == 2).timeout(5.seconds)
+          onceValue <- (Clock.sleep(10.millis) *> once.send("c1")(Get())).repeatUntil(_ == 4).timeout(5.seconds)
           last      <- Clock.sleep(100.millis) *> once.send("c1")(Get())
         } yield assertTrue(
           value.contains(2),
-          sent == DeliveryUnknown(OnceCounter.name, "c1"),
-          discarded == sent,
+          errors == List.fill(4)(DeliveryUnknown(OnceCounter.name, "c1")),
           pending == 0,
-          onceValue.contains(2),
-          last == 2
+          onceValue.contains(4),
+          last == 4
         )
       },
       test("A message whose pod was killed while its handler ran is sent again and runs again") {
@@ -564,10 +565,16 @@ object ShardingSpec extends ZIOSpecDefault {
           _         <- FaultyPods.inject(Fault.KillAfterFinished)
           _         <- counter.send("c1")(IncrementCounter())
           value     <- counter.send("c1")(GetCounter())
-          _         <- FaultyPods.inject(Fault.KillAfterFinished)
+          _         <- FaultyPods.inject(Fault.KillAfterFinished, Fault.KillAfterFinished)
           error     <- once.send("c1")(Increment()).flip
+          streamed  <- once.stream("c1")(IncrementAndStream()).runDrain.flip
           onceValue <- once.send("c1")(Get())
-        } yield assertTrue(value == 2, error == DeliveryUnknown(OnceCounter.name, "c1"), onceValue == 1)
+        } yield assertTrue(
+          value == 2,
+          error == DeliveryUnknown(OnceCounter.name, "c1"),
+          streamed == error,
+          onceValue == 2
+        )
       },
       test("A sendDiscard acknowledged by a pod that dies before running it is lost, even at most once") {
         for {
@@ -580,6 +587,41 @@ object ShardingSpec extends ZIOSpecDefault {
           value     <- counter.send("c1")(GetCounter())
           onceValue <- once.send("c1")(Get())
         } yield assertTrue(pending == 0, value == 0, onceValue == 0)
+      },
+      test("A sendStream whose connection dropped is sent again from the start only while none of its at-most-once messages was sent") {
+        for {
+          state  <- startWorker()
+          worker <- Sharding.messenger(Worker)
+          // the messages are in separate chunks, since a chunk counts as sent once the transport pulls it
+          _      <- FaultyPods.inject(Fault.FailBeforeSending, Fault.DropAfter(1))
+          _      <- worker.sendStream("w1")(ZStream(CompleteNow()) ++ ZStream(CompleteNowOnce()))
+          _      <- FaultyPods.inject(Fault.DropAfter(2))
+          error  <- worker.sendStream("w1")(ZStream(CompleteNow()) ++ ZStream(CompleteNowOnce()) ++ ZStream(CompleteNow())).flip
+          _      <- worker.send("w1")(Ping())
+          done   <- state.completed.get
+        } yield assertTrue(error == DeliveryUnknown(Worker.name, "w1"), done == 5) // 1 + 2 for the first stream, 2 for the second
+      },
+      test("A topic message whose connection dropped is sent again to its pod, unless it is at most once") {
+        for {
+          _           <- Sharding.registerTopic(Incrementer)(IncrementerActor.behavior)
+          broadcaster <- Sharding.broadcaster(Incrementer)
+          count        = broadcaster.broadcast("t1")(IncrementerMessage.GetIncrement()).map(_.values.toList)
+          _           <- FaultyPods.inject(Fault.DropAfterSending)
+          sent        <- broadcaster.broadcast("t1")(IncrementerMessage.BroadcastIncrement())
+          value       <- (Clock.sleep(10.millis) *> count).repeatUntil(_ == List(Exit.succeed(2))).timeout(5.seconds)
+          _           <- FaultyPods.inject(Fault.FailBeforeSending, Fault.DropAfterSending)
+          once        <- broadcaster.broadcast("t1")(IncrementerMessage.IncrementOnce())
+          pending     <- FaultyPods.pending
+          onceValue   <- (Clock.sleep(10.millis) *> count).repeatUntil(_ == List(Exit.succeed(3))).timeout(5.seconds)
+          last        <- Clock.sleep(100.millis) *> count
+        } yield assertTrue(
+          sent.values.toList == List(Exit.unit),
+          value.isDefined,
+          once.values.toList == List(Exit.fail(DeliveryUnknown(Incrementer.name, "t1"))),
+          pending == 0,
+          onceValue.isDefined,
+          last == List(Exit.succeed(3))
+        )
       }
     )
 
@@ -589,12 +631,18 @@ object ShardingSpec extends ZIOSpecDefault {
         counter   <- startCounter()
         once      <- startOnceCounter
         _         <- ZIO.foreachDiscard(
-                       List(counter.send("c1")(IncrementCounter()), once.send("c1")(Increment()), once.sendDiscard("c1")(Increment()))
+                       List(
+                         counter.send("c1")(IncrementCounter()),
+                         once.send("c1")(Increment()),
+                         once.sendDiscard("c1")(Increment()),
+                         once.stream("c1")(IncrementAndStream()).runDrain,
+                         once.sendStream("c1")(ZStream(Increment()))
+                       )
                      )(FaultyPods.inject(fault) *> _)
         pending   <- FaultyPods.pending
         value     <- counter.send("c1")(GetCounter())
         onceValue <- once.send("c1")(Get())
-      } yield assertTrue(pending == 0, value == 1, onceValue == 2)
+      } yield assertTrue(pending == 0, value == 1, onceValue == 4)
     }
 
   private def killedWhileRunningTest(name: String)(kills: Int): Spec[Sharding & FaultyPods & Scope, Any] =
@@ -794,8 +842,9 @@ object ShardingSpec extends ZIOSpecDefault {
           items  <- fiber.join
         } yield assertTrue(items == Chunk(2))
       },
-      autoRestartTest("Response stream auto restart")(
-        _.streamAutoRestart("c1", 0)(from => StreamingChanges(from))((_, n) => n + 1)
+      autoRestartTest("Response stream auto restart, even at most once")(
+        (counter, id) => counter.streamAutoRestart(id, 0)(from => StreamingChanges(from))((_, n) => n + 1),
+        (counter, id) => counter.streamAutoRestart(id, 0)(from => ChangesOnce(from))((_, n) => n + 1)
       ),
       test("Entity manual termination") {
         for {
@@ -1320,9 +1369,12 @@ object ShardingSpec extends ZIOSpecDefault {
                 (ZStream(IncrementCounter()) ++ ZStream.fail("oops")).ensuring(ZIO.die(new Exception("cleanup")))
               )
               .exit
+          once    <- startOnceCounter
+          failed  <- once.sendStream("c1")(ZStream(Increment()) ++ ZStream.fail("oops")).flip
           logged  <- unhandledFailures
         } yield assertTrue(
           error == "oops",
+          failed == error,
           c0 == 2,
           died.causeOption.flatMap(_.dieOption).exists(_.getMessage == "boom"),
           cleanup.causeOption.flatMap(_.dieOption).exists(_.getMessage == "cleanup"),
@@ -1359,20 +1411,23 @@ object ShardingSpec extends ZIOSpecDefault {
           error   <- counter.duplex("c1")(ThrowingDuplex(), ZStream(1)).runCollect.flip
         } yield assertTrue(error == EntityDefect("Entity died with java.lang.Exception: boom"))
       },
-      autoRestartTest("Duplex auto restart")(
-        _.duplexAutoRestart("c1", 0)(from => AddAndStreamChanges(from), _ => ZStream.empty)((_, n) => n + 1)
+      autoRestartTest("Duplex auto restart, even at most once")(
+        (counter, id) => counter.duplexAutoRestart(id, 0)(from => AddAndStreamChanges(from), _ => ZStream.empty)((_, n) => n + 1),
+        (counter, id) => counter.duplexAutoRestart(id, 0)(from => AddAndChangesOnce(from), _ => ZStream.empty)((_, n) => n + 1)
       ),
-      test("A stream message processed while the entity is stopping is sent again") {
+      test("A stream message processed while the entity is stopping is sent again, unless it is at most once") {
         for {
           state  <- startWorker()
           worker <- Sharding.messenger(Worker)
           _      <- worker.sendDiscard("w1")(SlowUninterruptible())
           fiber  <- worker.stream("w1")(QuickStream()).runCollect.fork
+          once   <- worker.stream("w1")(QuickStreamOnce()).runCollect.flip.fork
           _      <- Clock.sleep(100.millis)
-          // the stream message is processed while the entity drains its mailbox
+          // the stream messages are processed while the entity drains its mailbox
           _      <- Sharding.terminateLocalEntity(Worker, "w1")
           items  <- fiber.join
-        } yield assertTrue(items == Chunk(1, 2, 3))
+          error  <- once.join
+        } yield assertTrue(items == Chunk(1, 2, 3), error == StreamCancelled)
       },
       test("A stream of messages faster than the entity fails when its mailbox is full") {
         for {
@@ -1703,22 +1758,27 @@ object ShardingSpec extends ZIOSpecDefault {
     * Test that an auto-restarting stream resumes where it ended when the entity restarts.
     */
   private def autoRestartTest(name: String)(
-    autoRestart: Messenger[CounterMessage] => ZStream[Any, Any, Int]
+    autoRestarts: ((Messenger[CounterMessage], String) => ZStream[Any, Any, Int])*
   ): Spec[Sharding & Scope, Any] =
     test(name) {
       for {
         counter <- startCounter()
-        latch   <- Promise.make[Nothing, Unit]
-        fiber   <- autoRestart(counter).tap(_ => latch.succeed(())).take(4).runCollect.fork
-        _       <- latch.await
-        _       <- counter.send("c1")(IncrementCounter())
-        _       <- Sharding.terminateLocalEntity(Counter, "c1") // restarted from 0, the stream resumes from 2
-        _       <- counter.send("c1")(Subscriptions()).repeatUntil(_ == 1)
-        _       <- counter.send("c1")(IncrementCounter())
-        _       <- counter.send("c1")(IncrementCounter())
-        _       <- counter.send("c1")(IncrementCounter())
-        items   <- fiber.join
-      } yield assertTrue(items == Chunk(0, 1, 2, 3))
+        items   <- ZIO.foreach(autoRestarts.zipWithIndex) { (autoRestart, i) =>
+                     val id = s"c$i"
+                     for {
+                       latch <- Promise.make[Nothing, Unit]
+                       fiber <- autoRestart(counter, id).tap(_ => latch.succeed(())).take(4).runCollect.fork
+                       _     <- latch.await
+                       _     <- counter.send(id)(IncrementCounter())
+                       _     <- Sharding.terminateLocalEntity(Counter, id) // restarted from 0, the stream resumes from 2
+                       _     <- counter.send(id)(Subscriptions()).repeatUntil(_ == 1)
+                       _     <- counter.send(id)(IncrementCounter())
+                       _     <- counter.send(id)(IncrementCounter())
+                       _     <- counter.send(id)(IncrementCounter())
+                       items <- fiber.join
+                     } yield items
+                   }
+      } yield assertTrue(items.forall(_ == Chunk(0, 1, 2, 3)))
     }
 }
 
@@ -1733,12 +1793,14 @@ object CounterActor {
     case FailAndDie()                       extends CounterMessage[CounterError, Unit]
     case Die()                              extends CounterMessage[Nothing, Unit]
     case StreamingChanges(from: Int = 0)    extends CounterMessage[Nothing, Streamed[Nothing, Int]]
+    case ChangesOnce(from: Int = 0)         extends CounterMessage[Nothing, Streamed[Nothing, Int]] with AtMostOnce
     // 1 to 1000, then dies
     case DyingStream()                      extends CounterMessage[Nothing, Streamed[Nothing, Int]]
     case Chunked()                          extends CounterMessage[Nothing, Streamed[Nothing, Int]]
     // fails with a cause that has both a failure and a defect
     case FailingAndDyingStream()            extends CounterMessage[CounterError, Streamed[CounterError, Int]]
     case AddAndStreamChanges(from: Int = 0) extends CounterMessage[Nothing, Duplex[Int, Nothing, Int]]
+    case AddAndChangesOnce(from: Int = 0)   extends CounterMessage[Nothing, Duplex[Int, Nothing, Int]] with AtMostOnce
     // replies with each input doubled, and ends when the inputs end
     case Doubled()                          extends CounterMessage[Nothing, Duplex[Int, Nothing, Int]]
     // replies only once its inputs end
@@ -1788,6 +1850,7 @@ object CounterActor {
           case FailAndDie()              => ZIO.fail(CounterError("failed")).ensuring(ZIO.die(new Exception("boom")))
           case Die()                     => ZIO.die(new Exception("boom"))
           case StreamingChanges(from)    => ZIO.succeed(Streamed(changes.filter(_ >= from).ensuring(state.set(-1))))
+          case ChangesOnce(from)         => handle(StreamingChanges(from))
           case DyingStream()             =>
             ZIO.succeed(Streamed(ZStream.fromIterable(1 to 1000) ++ ZStream.die(new Exception("boom"))))
           case Chunked()                 => ZIO.succeed(Streamed(ZStream.fromChunks(Chunk(1, 2, 3), Chunk(4, 5))))
@@ -1808,6 +1871,7 @@ object CounterActor {
                   .ensuring(state.set(-1))
               )
             )
+          case AddAndChangesOnce(from)   => handle(AddAndStreamChanges(from))
           case Doubled()                 => ZIO.succeed(Duplex[Int, Nothing, Int](_.map(_ * 2)))
           case Sum()                     => ZIO.succeed(Duplex[Int, Nothing, Int](input => ZStream.fromZIO(input.runSum)))
           case ThrowingDuplex()          => ZIO.succeed(Duplex[Int, Nothing, Int](_ => throw new Exception("boom")))
@@ -1831,12 +1895,14 @@ object WorkerActor {
     case LongUninterruptible() extends WorkerMessage[Nothing, Unit] with Uninterruptible
     case SlowStream()          extends WorkerMessage[Nothing, Streamed[Nothing, Int]] with Uninterruptible
     case QuickStream()         extends WorkerMessage[Nothing, Streamed[Nothing, Int]]
+    case QuickStreamOnce()     extends WorkerMessage[Nothing, Streamed[Nothing, Int]] with AtMostOnce
     // counts as running until the test opens the gate, then emits the number of the entity
     case GatedStream()         extends WorkerMessage[Nothing, Streamed[Nothing, Int]]
     // takes 10ms, then counts as completed
     case Complete()            extends WorkerMessage[Nothing, Unit]
     // counts as completed right away
     case CompleteNow()         extends WorkerMessage[Nothing, Unit]
+    case CompleteNowOnce()     extends WorkerMessage[Nothing, Unit] with AtMostOnce
     // counts as running until the test opens the gate, then counts as completed
     case Gated()               extends WorkerMessage[Nothing, Unit] with Uninterruptible
     case GatedOnce()           extends WorkerMessage[Nothing, Unit] with AtMostOnce
@@ -1897,27 +1963,27 @@ object WorkerActor {
 
       def handle[E, A](message: WorkerMessage[E, A]): IO[E, A] =
         message match {
-          case Block()               => running(unblock.await)
-          case LongUninterruptible() => running(Clock.sleep(10.seconds))
-          case Unblock()             => unblock.succeed(()).unit
-          case Ping()                => ZIO.unit
-          case Running()             => state.running.get
-          case SlowUninterruptible() => Clock.sleep(500.millis) *> state.completed.update(_ + 1)
-          case SlowStream()          => Clock.sleep(500.millis).as(Streamed(ZStream(1, 2, 3)))
-          case QuickStream()         => ZIO.succeed(Streamed(ZStream(1, 2, 3)))
-          case GatedStream()         => ZIO.succeed(Streamed(ZStream.fromZIO(running(state.gate.await).as(instance))))
-          case Complete()            => Clock.sleep(10.millis) *> state.completed.update(_ + 1)
-          case CompleteNow()         => state.completed.update(_ + 1)
-          case Gated() | GatedOnce() => running(state.gate.await) *> state.completed.update(_ + 1)
-          case Instance()            => ZIO.succeed(instance)
-          case Log()                 => ZIO.log("message")
-          case ForkGated()           => (state.gate.await *> state.completed.update(_ + 1)).fork.unit
-          case JoinGatedCleanup()    =>
+          case Block()                           => running(unblock.await)
+          case LongUninterruptible()             => running(Clock.sleep(10.seconds))
+          case Unblock()                         => unblock.succeed(()).unit
+          case Ping()                            => ZIO.unit
+          case Running()                         => state.running.get
+          case SlowUninterruptible()             => Clock.sleep(500.millis) *> state.completed.update(_ + 1)
+          case SlowStream()                      => Clock.sleep(500.millis).as(Streamed(ZStream(1, 2, 3)))
+          case QuickStream() | QuickStreamOnce() => ZIO.succeed(Streamed(ZStream(1, 2, 3)))
+          case GatedStream()                     => ZIO.succeed(Streamed(ZStream.fromZIO(running(state.gate.await).as(instance))))
+          case Complete()                        => Clock.sleep(10.millis) *> state.completed.update(_ + 1)
+          case CompleteNow() | CompleteNowOnce() => state.completed.update(_ + 1)
+          case Gated() | GatedOnce()             => running(state.gate.await) *> state.completed.update(_ + 1)
+          case Instance()                        => ZIO.succeed(instance)
+          case Log()                             => ZIO.log("message")
+          case ForkGated()                       => (state.gate.await *> state.completed.update(_ + 1)).fork.unit
+          case JoinGatedCleanup()                =>
             ZIO.never.onInterrupt(state.gate.await *> state.completed.update(_ + 1)).fork.flatMap(_.join)
-          case Completed()           => state.completed.get
-          case SetContextAndBlock()  => context.set("set") *> ZIO.never
-          case Context()             => context.get
-          case ForkOnInterrupt()     =>
+          case Completed()                       => state.completed.get
+          case SetContextAndBlock()              => context.set("set") *> ZIO.never
+          case Context()                         => context.get
+          case ForkOnInterrupt()                 =>
             running(ZIO.never).onInterrupt(
               state.gate.await.interruptible
                 .onInterrupt(state.finalized.get.flatMap(finalized => state.completed.set(if (finalized == 0) 1 else 2)))
@@ -1929,9 +1995,10 @@ object WorkerActor {
 
 object OnceCounterActor {
   enum OnceCounterMessage[E, A] extends AtMostOnce {
-    case Increment() extends OnceCounterMessage[Nothing, Unit]
-    case Get()       extends OnceCounterMessage[Nothing, Int]
-    case Crash()     extends OnceCounterMessage[Nothing, Unit]
+    case Increment()          extends OnceCounterMessage[Nothing, Unit]
+    case Get()                extends OnceCounterMessage[Nothing, Int]
+    case Crash()              extends OnceCounterMessage[Nothing, Unit]
+    case IncrementAndStream() extends OnceCounterMessage[Nothing, Streamed[Nothing, Int]]
   }
 
   object OnceCounter extends EntityType[OnceCounterMessage]("once-counter")
@@ -1945,9 +2012,10 @@ object OnceCounterActor {
           new OnceCounter.Handler {
             def handle[E, A](message: OnceCounterMessage[E, A]): IO[E, A] =
               message match {
-                case Increment() => count.update(_ + 1)
-                case Get()       => count.get
-                case Crash()     => ZIO.die(new Exception("boom"))
+                case Increment()          => count.update(_ + 1)
+                case Get()                => count.get
+                case Crash()              => ZIO.die(new Exception("boom"))
+                case IncrementAndStream() => count.updateAndGet(_ + 1).map(n => Streamed(ZStream(n)))
               }
           }
         )

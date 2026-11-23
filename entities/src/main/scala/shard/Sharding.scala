@@ -380,16 +380,15 @@ class Sharding private (
         }
     }
 
-  private def sendToEntity[A](entityType: EntityType[?], entityId: String, atMostOnce: Boolean)(
+  private def sendToEntity[A](entityType: EntityType[?], entityId: String, mayHaveRun: Sharding.Retry => UIO[Boolean])(
     send: PodAddress => IO[Any, A]
   ): IO[Any, A] =
     podOf(entityType, entityId).flatMap(pod =>
       send(pod).catchSome { case retry: Sharding.Retry =>
-        refreshStaleAssignments.unless(pod == address) *> (retry match {
-          case Sharding.Retry.MaybeDelivered(_) if atMostOnce => ZIO.fail(DeliveryUnknown(entityType.name, entityId))
-          case _                                              =>
-            Clock.sleep(200.millis) *> sendToEntity(entityType, entityId, atMostOnce)(send)
-        })
+        refreshStaleAssignments.unless(pod == address) *> ZIO.ifZIO(mayHaveRun(retry))(
+          ZIO.fail(DeliveryUnknown(entityType.name, entityId)),
+          Clock.sleep(200.millis) *> sendToEntity(entityType, entityId, mayHaveRun)(send)
+        )
       }
     )
 
@@ -397,24 +396,24 @@ class Sharding private (
     * Receive a stream from the pod that hosts an entity, retrying if the pod can't be reached or no longer hosts it.
     * Until a reply was received or the inputs were read, it is also sent again if the entity stops.
     * After that, the stream fails with `StreamCancelled` instead of retrying.
+    * An `AtMostOnce` message is sent again only if it certainly wasn't processed: otherwise the stream fails with
+    * `DeliveryUnknown`, or with `StreamCancelled` if its entity stopped.
     */
   private def streamFromEntity(
     entityType: EntityType[?],
     entityId: String,
+    message: Any,
     inputRead: UIO[Boolean] = ZIO.succeed(false)
   )(send: PodAddress => ZStream[Any, Any, Any]): ZStream[Any, Any, Any] =
     ZStream.unwrap((Ref.make(false) <*> podOf(entityType, entityId)).map { case (started, pod) =>
-      def retryUnless(cancelled: UIO[Boolean]): ZStream[Any, Any, Any] =
-        ZStream.unwrap(cancelled.map {
-          case false =>
-            ZStream.execute(Clock.sleep(200.millis)) ++ streamFromEntity(entityType, entityId, inputRead)(send)
-          case true  => ZStream.fail(StreamCancelled)
-        })
-
-      send(pod).mapChunksZIO(chunk => started.set(true).when(chunk.nonEmpty).as(chunk)).catchSome { case _: Sharding.Retry | StreamCancelled =>
-        ZStream.execute(refreshStaleAssignments.unless(pod == address)) ++ retryUnless(
-          started.get.zipWith(inputRead)(_ || _)
-        )
+      send(pod).mapChunksZIO(chunk => started.set(true).when(chunk.nonEmpty).as(chunk)).catchSome {
+        case error: (Sharding.Retry | StreamCancelled.type) =>
+          ZStream.execute(refreshStaleAssignments.unless(pod == address)) ++ ZStream.unwrap(started.get.zipWith(inputRead)(_ || _).map {
+            case false if !Sharding.mayHaveRun(message, error) =>
+              ZStream.execute(Clock.sleep(200.millis)) ++ streamFromEntity(entityType, entityId, message, inputRead)(send)
+            case false if error != StreamCancelled             => ZStream.fail(DeliveryUnknown(entityType.name, entityId))
+            case _                                             => ZStream.fail(StreamCancelled)
+          })
       }
     })
 
@@ -533,7 +532,7 @@ class Sharding private (
 
       def send[E, A](entityId: String)(message: Msg[E, A])(using Unary[A]): IO[E | ClusterError, A] = {
         val sent = withTimeout(timeout, entityType, entityId)(
-          sendToEntity(entityType, entityId, message.isInstanceOf[AtMostOnce])(
+          sendToEntity(entityType, entityId, retry => ZIO.succeed(Sharding.mayHaveRun(message, retry)))(
             deliver(entityType, entityId, _, message, expectsReply = true)
           )
         )
@@ -542,7 +541,7 @@ class Sharding private (
 
       def sendDiscard[E, A](entityId: String)(message: Msg[E, A])(using Unary[A]): IO[ClusterError, Unit] =
         withTimeout(timeout, entityType, entityId)(
-          sendToEntity(entityType, entityId, message.isInstanceOf[AtMostOnce])(
+          sendToEntity(entityType, entityId, retry => ZIO.succeed(Sharding.mayHaveRun(message, retry)))(
             deliver(entityType, entityId, _, message, expectsReply = false)
           )
         ).catchSome { case _: MessageDiscarded => ZIO.unit } // the entity is not running: nothing to do
@@ -552,7 +551,7 @@ class Sharding private (
       def stream[E, E2, A](entityId: String)(
         message: Msg[E, Streamed[E2, A]]
       ): ZStream[Any, E | E2 | ClusterError, A] =
-        streamFromEntity(entityType, entityId)(
+        streamFromEntity(entityType, entityId, message)(
           deliverStream(entityType, entityId, _, message, ZStream.empty, _ => ZIO.unit)
         )
           .asInstanceOf[ZStream[Any, E | E2 | ClusterError, A]]
@@ -566,7 +565,7 @@ class Sharding private (
             // set before the first pull, since the input may consume elements while buffering a chunk
             val safeInput = Streams.failInto(ZStream.execute(inputRead.set(true)) ++ input, inputFailure)
             Streams.interruptWhen(
-              streamFromEntity(entityType, entityId, inputRead.get)(
+              streamFromEntity(entityType, entityId, message, inputRead.get)(
                 deliverStream(entityType, entityId, _, message, safeInput, inputFailure.fail(_))
               ),
               inputFailure.await
@@ -579,7 +578,20 @@ class Sharding private (
       def sendStream[E1](entityId: String)(
         messages: ZStream[Any, E1, Msg[Nothing, Unit]]
       ): IO[E1 | ClusterError, Unit] =
-        sendToEntity(entityType, entityId, atMostOnce = false)(deliverMessages(entityType, entityId, _, messages))
+        Ref
+          .make(false)
+          .flatMap { atMostOnceSent =>
+            val tracked = messages.mapChunksZIO(chunk => atMostOnceSent.set(true).when(chunk.exists(_.isInstanceOf[AtMostOnce])).as(chunk))
+            // the messages before a rejected one were delivered, so only a stream that never left is certainly not processed
+            sendToEntity(
+              entityType,
+              entityId,
+              {
+                case Sharding.Retry.NotSent(_) => ZIO.succeed(false)
+                case _                         => atMostOnceSent.get
+              }
+            )(pod => atMostOnceSent.set(false) *> deliverMessages(entityType, entityId, pod, tracked))
+          }
           .asInstanceOf[IO[E1 | ClusterError, Unit]]
     }
 
@@ -616,9 +628,10 @@ class Sharding private (
 
               def trySend: IO[Any, Any] =
                 deliver(topicType, topic, pod, message, expectsReply).catchSome {
-                  case Sharding.Retry.NotSent(unavailable)        => retry(unavailable)
-                  case Sharding.Retry.MaybeDelivered(unavailable) => retry(unavailable)
-                  case Sharding.Retry.NotHosted                   =>
+                  case error: Sharding.Retry if Sharding.mayHaveRun(message, error) => ZIO.fail(DeliveryUnknown(topicType.name, topic))
+                  case Sharding.Retry.NotSent(unavailable)                          => retry(unavailable)
+                  case Sharding.Retry.MaybeDelivered(unavailable)                   => retry(unavailable)
+                  case Sharding.Retry.NotHosted                                     =>
                     // the pod is shutting down
                     ZIO.fail(PodUnavailable(pod))
                 }
@@ -695,9 +708,14 @@ object Sharding {
   private[shard] enum Retry {
     case NotSent(pod: PodAddress)
     case MaybeDelivered(pod: PodAddress)
-    // the pod doesn't host the entity, or stopped it before a reply stream started
     case NotHosted
   }
+
+  private def mayHaveRun(message: Any, error: Retry | StreamCancelled.type): Boolean =
+    message.isInstanceOf[AtMostOnce] && (error match {
+      case Retry.MaybeDelivered(_) | StreamCancelled => true
+      case Retry.NotSent(_) | Retry.NotHosted        => false
+    })
 
   // acknowledges a message that doesn't expect a reply
   private val ack: BinaryReply = BinaryReply.Success(Array.emptyByteArray)

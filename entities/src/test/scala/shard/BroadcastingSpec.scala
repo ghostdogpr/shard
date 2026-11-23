@@ -65,6 +65,7 @@ object BroadcastingSpec extends ZIOSpecDefault {
   object IncrementerActor {
     enum IncrementerMessage[E, A] {
       case BroadcastIncrement() extends IncrementerMessage[Nothing, Unit]
+      case IncrementOnce()      extends IncrementerMessage[Nothing, Unit] with AtMostOnce
       case GetIncrement()       extends IncrementerMessage[Nothing, Int]
       case Fail()               extends IncrementerMessage[String, Unit]
       case Hang()               extends IncrementerMessage[Nothing, Unit]
@@ -80,10 +81,10 @@ object BroadcastingSpec extends ZIOSpecDefault {
             new Incrementer.Handler {
               def handle[E, A](message: IncrementerMessage[E, A]): IO[E, A] =
                 message match {
-                  case IncrementerMessage.BroadcastIncrement() => ref.update(_ + 1)
-                  case IncrementerMessage.GetIncrement()       => ref.get
-                  case IncrementerMessage.Fail()               => ZIO.fail("failed")
-                  case IncrementerMessage.Hang()               => ZIO.never
+                  case IncrementerMessage.BroadcastIncrement() | IncrementerMessage.IncrementOnce() => ref.update(_ + 1)
+                  case IncrementerMessage.GetIncrement()                                            => ref.get
+                  case IncrementerMessage.Fail()                                                    => ZIO.fail("failed")
+                  case IncrementerMessage.Hang()                                                    => ZIO.never
                 }
             }
           )
