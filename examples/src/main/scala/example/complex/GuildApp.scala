@@ -6,6 +6,7 @@ import sage.backend.SageClient
 import zio.{Config => _, _}
 
 import shard._
+import shard.interfaces.MessageStorage
 
 object GuildApp extends ZIOAppDefault {
   val config: ZLayer[Any, SecurityException, Config] =
@@ -38,6 +39,7 @@ object GuildApp extends ZIOAppDefault {
         ZLayer.succeed(RedisConfig.default),
         redis,
         StorageRedis.live,
+        MessageStorage.none,
         ShardManagerClient.live,
         GrpcPods.live,
         Sharding.live,

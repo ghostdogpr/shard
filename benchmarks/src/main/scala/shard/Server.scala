@@ -7,7 +7,7 @@ import scala.annotation.unused
 import zio.{Config => _, _}
 import zio.stream.ZStream
 
-import shard.interfaces.{ShardManagerClient, Storage}
+import shard.interfaces.{MessageStorage, ShardManagerClient, Storage}
 import shard.kryo.given
 
 object Server {
@@ -63,6 +63,7 @@ object Server {
   val sharding: ZLayer[Config, Throwable, Sharding & GrpcConfig] =
     ZLayer.makeSome[Config, Sharding & GrpcConfig](
       memory,
+      MessageStorage.none,
       grpcConfig,
       shardManagerClient,
       GrpcPods.live,

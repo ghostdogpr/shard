@@ -18,7 +18,7 @@ import shard.OnceCounterActor.OnceCounterMessage._
 import shard.WorkerActor._
 import shard.WorkerActor.WorkerMessage._
 import shard.errors._
-import shard.interfaces.{Pods, ShardManagerClient, Storage}
+import shard.interfaces.{MessageStorage, Pods, ShardManagerClient, Storage}
 import shard.interfaces.Pods.{BinaryMessage, BinaryReply}
 import shard.internal.LocalShardManagerClient
 import shard.javaSerialization.given
@@ -30,25 +30,53 @@ object ShardingSpec extends ZIOSpecDefault {
         LocalSharding.live,
         LocalShardManagerClient.live,
         Storage.memory,
+        MessageStorage.memory,
         ZLayer.succeed(Config.default)
       ),
       suite("simulate remote pods (forces serialization on every hop)")(tests*).provideSomeShared[Scope](
         LocalSharding.live,
         LocalShardManagerClient.live,
         Storage.memory,
+        MessageStorage.memory,
         ZLayer.succeed(Config.default.copy(simulateRemotePods = true))
       ),
       suite("interceptor in Config")(defaultInterceptor).provideSomeShared[Scope](
         LocalSharding.live,
         LocalShardManagerClient.live,
         Storage.memory,
+        MessageStorage.memory,
         ZLayer.succeed(Config.default.copy(entityInterceptor = logging))
       ),
       suite("transport faults")(transportFaults*).provideSome[Scope](
         FaultyPods.localSharding,
         LocalShardManagerClient.live,
         Storage.memory,
+        MessageStorage.memory,
         ZLayer.succeed(Config.default.copy(simulateRemotePods = true))
+      ),
+      suite("message storage")(
+        test("With MessageStorage.none, an at-least-once message fails with EntityDefect") {
+          for {
+            errors <- keyedErrors(MessageStorage.none)
+          } yield assertTrue(
+            errors == List.fill(2)(
+              List.fill(2)(
+                EntityDefect(
+                  "Message storage died with java.lang.RuntimeException: MessageStorage.none stores no messages, so it can't run AtLeastOnce messages"
+                )
+              ) -> 0
+            )
+          )
+        },
+        test(
+          "When message storage can't be reached, an at-least-once message fails with StorageUnavailable, and runs again if its result wasn't saved"
+        ) {
+          val unavailable = List.fill(2)(StorageUnavailable(Counter.name, "c1"))
+          for {
+            errors  <- keyedErrors(unreachableStorage)
+            unsaved <- keyedErrors(unsavedResults)
+          } yield assertTrue(errors == List.fill(2)(unavailable -> 0), unsaved == List.fill(2)(unavailable -> 2))
+        }
       ),
       suite("registered pods")(
         test("Registered pods are read from the storage") {
@@ -63,6 +91,7 @@ object ShardingSpec extends ZIOSpecDefault {
         LocalSharding.live,
         LocalShardManagerClient.live,
         Storage.memory,
+        MessageStorage.memory,
         ZLayer.succeed(Config.default)
       ),
       suite("shards taken back by the Shard Manager")(
@@ -109,6 +138,7 @@ object ShardingSpec extends ZIOSpecDefault {
         Pods.noop, // messages sent to other pods without expecting a reply succeed
         LocalShardManagerClient.live,
         Storage.memory,
+        MessageStorage.memory,
         ZLayer.succeed(Config.default)
       ),
       test(
@@ -137,6 +167,7 @@ object ShardingSpec extends ZIOSpecDefault {
                            reconnected.await.timeout(5.seconds) <*
                            release.succeed(())).provide(
                            Sharding.live,
+                           MessageStorage.none,
                            Pods.noop,
                            ZLayer.succeed(takingShardsBack(assignments)),
                            ZLayer.succeed(storage),
@@ -161,6 +192,7 @@ object ShardingSpec extends ZIOSpecDefault {
           Pods.noop,
           LocalShardManagerClient.live,
           Storage.memory,
+          MessageStorage.memory,
           ZLayer.succeed(Config.default.copy(entityTerminationTimeout = 100.millis))
         )
       },
@@ -178,6 +210,7 @@ object ShardingSpec extends ZIOSpecDefault {
           LocalSharding.live,
           LocalShardManagerClient.live,
           Storage.memory,
+          MessageStorage.memory,
           ZLayer.succeed(Config.default.copy(entityTerminationTimeout = 100.millis))
         )
       },
@@ -216,6 +249,7 @@ object ShardingSpec extends ZIOSpecDefault {
                            interrupt <- stopped.isDone
                          } yield (singleton, interrupt)).provide(
                            Sharding.live,
+                           MessageStorage.none,
                            Pods.noop,
                            ZLayer.succeed(manager),
                            ZLayer.succeed(storage),
@@ -241,6 +275,7 @@ object ShardingSpec extends ZIOSpecDefault {
                            own      <- sharding.thisPodAssignments
                          } yield own).provide(
                            Sharding.live,
+                           MessageStorage.none,
                            Pods.noop,
                            ZLayer.succeed(takingShardsBack(assignments)),
                            ZLayer.succeed(storage),
@@ -268,6 +303,7 @@ object ShardingSpec extends ZIOSpecDefault {
                           ZLayer.succeed(pods),
                           ZLayer.succeed(takingShardsBack(snapshot)),
                           Storage.memory,
+                          MessageStorage.memory,
                           ZLayer.succeed(Config.default)
                         )
           sent     <- attempts.get
@@ -294,6 +330,7 @@ object ShardingSpec extends ZIOSpecDefault {
                            .timeout(5.seconds)
                            .provide(
                              Sharding.live,
+                             MessageStorage.none,
                              ZLayer.succeed(refusingPods),
                              ZLayer.succeed(takingShardsBack(snapshot)),
                              ZLayer.succeed(storage),
@@ -333,6 +370,7 @@ object ShardingSpec extends ZIOSpecDefault {
                              .timeout(5.seconds)
                              .provide(
                                Sharding.live,
+                               MessageStorage.none,
                                ZLayer.succeed(refusingPods),
                                ZLayer.succeed(takingShardsBack(snapshot)),
                                ZLayer.succeed(storage),
@@ -354,7 +392,7 @@ object ShardingSpec extends ZIOSpecDefault {
                       }
           _        <- ZIO
                         .service[Sharding]
-                        .provide(Sharding.live, Pods.noop, ZLayer.succeed(manager), Storage.memory, ZLayer.succeed(config))
+                        .provide(Sharding.live, MessageStorage.none, Pods.noop, ZLayer.succeed(manager), Storage.memory, ZLayer.succeed(config))
           // counted outside of assertTrue, which can't render log entries
           warnings <- ZTestLogger.logOutput.map(_.count { log =>
                         log.logLevel == LogLevel.Warning && log.message() == "Failed to get shard assignments" &&
@@ -382,6 +420,7 @@ object ShardingSpec extends ZIOSpecDefault {
           LocalSharding.live,
           LocalShardManagerClient.live,
           Storage.memory,
+          MessageStorage.memory,
           ZLayer.succeed(config)
         )
       },
@@ -406,6 +445,7 @@ object ShardingSpec extends ZIOSpecDefault {
                         .timeout(5.seconds)
                         .provide(
                           Sharding.live,
+                          MessageStorage.none,
                           ZLayer.succeed(
                             stubPods(onSend = pod => ZIO.fail(PodUnavailable(pod)), onStream = (pod, _) => ZStream.fail(PodUnavailable(pod)))
                           ),
@@ -428,12 +468,51 @@ object ShardingSpec extends ZIOSpecDefault {
           LocalSharding.live,
           LocalShardManagerClient.live,
           Storage.memory,
+          MessageStorage.memory,
           ZLayer.succeed(config)
         )
       }
     ) @@ sequential @@ withLiveClock @@ TestAspect.timeout(60.seconds)
 
   val otherPod: PodAddress = PodAddress("other", 1)
+
+  // sends a keyed message twice, locally and with simulated remote pods, and returns its errors and the counter's value
+  private def keyedErrors(messageStorage: ULayer[MessageStorage]): IO[Any, List[(List[ClusterError], Int)]] =
+    ZIO.foreach(List(false, true))(simulateRemotePods =>
+      ZIO
+        .scoped(
+          startCounter()
+            .flatMap(counter => ZIO.foreach(List(1, 2))(_ => counter.send("c1")(KeyedIncrement("a")).flip) <*> counter.send("c1")(GetCounter()))
+        )
+        .provide(
+          LocalSharding.live,
+          LocalShardManagerClient.live,
+          Storage.memory,
+          messageStorage,
+          ZLayer.succeed(Config.default.copy(simulateRemotePods = simulateRemotePods))
+        )
+    )
+
+  private val unreachableStorage: ULayer[MessageStorage] =
+    ZLayer.succeed(new MessageStorage {
+      private val unreachable = ZIO.fail(new Exception("connection refused"))
+
+      def store(role: Role, key: MessageStorage.Key, body: Array[Byte]): Task[MessageStorage.Stored]                                       = unreachable
+      def saveResult(role: Role, key: MessageStorage.Key, result: MessageStorage.Result, retention: Duration): Task[MessageStorage.Result] =
+        unreachable
+      def remove(role: Role, key: MessageStorage.Key): Task[Unit]                                                                          = unreachable
+    })
+
+  private val unsavedResults: ULayer[MessageStorage] =
+    MessageStorage.memory.project(memory =>
+      new MessageStorage {
+        def store(role: Role, key: MessageStorage.Key, body: Array[Byte]): Task[MessageStorage.Stored]                                       =
+          memory.store(role, key, body)
+        def saveResult(role: Role, key: MessageStorage.Key, result: MessageStorage.Result, retention: Duration): Task[MessageStorage.Result] =
+          ZIO.fail(new Exception("connection refused"))
+        def remove(role: Role, key: MessageStorage.Key): Task[Unit]                                                                          = memory.remove(role, key)
+      }
+    )
 
   // a Shard Manager that gives the shards of a pod that unregisters to another pod
   private def takingShardsBack(assignments: Ref[Map[ShardId, Option[PodAddress]]]): ShardManagerClient =
@@ -536,6 +615,17 @@ object ShardingSpec extends ZIOSpecDefault {
           onceValue.contains(4),
           last == 4
         )
+      },
+      test("An at-least-once message whose connection dropped, or whose pod was killed after it finished, is sent again and runs once") {
+        for {
+          counter <- startCounter()
+          _       <- FaultyPods.inject(Fault.DropAfterSending)
+          dropped <- counter.send("c1")(KeyedIncrement("a"))
+          _       <- FaultyPods.inject(Fault.KillAfterFinished)
+          killed  <- counter.send("c1")(KeyedIncrement("b"))
+          pending <- FaultyPods.pending
+          value   <- counter.send("c1")(GetCounter())
+        } yield assertTrue(dropped == 1, killed == 2, pending == 0, value == 2)
       },
       test("A message whose pod was killed while its handler ran is sent again and runs again") {
         for {
@@ -689,6 +779,76 @@ object ShardingSpec extends ZIOSpecDefault {
           c1      <- counter.send("c1")(GetCounter()) // the entity is still running
           logged  <- unhandledFailures
         } yield assertTrue(error == CounterError("failed"), c1 == 1, logged.isEmpty)
+      },
+      test("An at-least-once message runs once for its key, and the next sends of the key, from any case, get its result") {
+        for {
+          counter <- startCounter()
+          first   <- counter.send("k1")(KeyedIncrement("a"))
+          again   <- counter.send("k1")(KeyedIncrement("a"))
+          shared  <- counter.send("k1")(KeyedDecrement("a"))
+          other   <- counter.send("k1")(KeyedIncrement("b"))
+          entity  <- counter.send("k2")(KeyedIncrement("a"))
+          failed  <- counter.send("k1")(KeyedFail("c")).flip
+          refused <- counter.send("k1")(KeyedFail("c")).flip
+          value   <- counter.send("k1")(GetCounter())
+          // a defect saves no result
+          died    <- counter.send("k3")(KeyedDie("d")).flip.repeatN(1)
+        } yield assertTrue(
+          first == 1,
+          again == 1,
+          shared == 1,
+          other == 2,
+          entity == 1,
+          failed == CounterError("failed at 3"),
+          refused == failed,
+          value == 3,
+          died == EntityDefect("Entity died with java.lang.Exception: boom")
+        )
+      },
+      test("A send of an at-least-once message whose key is running waits for that run") {
+        for {
+          state  <- startWorker()
+          worker <- Sharding.messenger(Worker)
+          first  <- worker.send("w1")(GatedKeyed("a")).fork
+          _      <- state.running.changes.takeUntil(_ == 1).runDrain
+          second <- worker.send("w1")(GatedKeyed("a")).fork
+          // gives the second send time to arrive during the run
+          _      <- Clock.sleep(200.millis)
+          _      <- state.gate.succeed(())
+          a      <- first.join
+          b      <- second.join
+          done   <- state.completed.get
+        } yield assertTrue(a == 1, b == 1, done == 1)
+      },
+      test("After its retention, the key of an at-least-once message is free") {
+        for {
+          counter <- startCounter(EntityOptions(retention = 500.millis))
+          first   <- counter.send("r1")(KeyedIncrement("a"))
+          kept    <- counter.send("r1")(KeyedIncrement("a"))
+          _       <- Clock.sleep(600.millis)
+          later   <- counter.send("r1")(KeyedIncrement("a"))
+        } yield assertTrue(first == 1, kept == 1, later == 2)
+      },
+      test("A message can't have both AtMostOnce and AtLeastOnce") {
+        for {
+          both     <- typeCheck("enum M[E, A] { case X(k: String) extends M[Nothing, Int] with AtMostOnce with AtLeastOnce(k) }")
+          onParent <- typeCheck("enum M[E, A] extends AtMostOnce { case X(k: String) extends M[Nothing, Int] with AtLeastOnce(k) }")
+        } yield assertTrue(both.left.exists(_.contains("DeliveryGuarantee")), onParent.left.exists(_.contains("DeliveryGuarantee")))
+      },
+      test("An at-least-once message sent with sendDiscard, a stream call, sendStream or to a topic runs as best effort") {
+        for {
+          counter     <- startCounter()
+          _           <- Sharding.registerTopic(Incrementer)(IncrementerActor.behavior)
+          broadcaster <- Sharding.broadcaster(Incrementer)
+          _           <- counter.sendDiscard("c3")(KeyedIncrement("a")).repeatN(1)
+          streamed    <- counter.stream("c1")(KeyedStream("a")).runCollect.repeatN(1)
+          _           <- counter.sendStream("c2")(ZStream(KeyedIncrementNoReply("a"))).repeatN(1)
+          _           <- broadcaster.broadcast("t1")(IncrementerMessage.KeyedIncrement("a")).repeatN(1)
+          _           <- broadcaster.broadcastDiscard("t1")(IncrementerMessage.KeyedIncrement("a"))
+          discarded   <- counter.send("c3")(GetCounter())
+          value       <- counter.send("c2")(GetCounter())
+          increments  <- broadcaster.broadcast("t1")(IncrementerMessage.GetIncrement())
+        } yield assertTrue(discarded == 2, streamed == Chunk(2), value == 2, increments.values.toList == List(Exit.succeed(3)))
       },
       test("Defect stops the entity") {
         for {
@@ -1099,7 +1259,7 @@ object ShardingSpec extends ZIOSpecDefault {
           _      <- state.completed.changes.takeUntil(_ == 1).runDrain
         } yield assertCompletes
       },
-      test("Uninterruptible and at-most-once messages are processed even if their sender stopped waiting before they started") {
+      test("Uninterruptible and delivery guarantee messages are processed even if their sender stopped waiting before they started") {
         for {
           state   <- startWorker()
           worker  <- Sharding.messenger(Worker)
@@ -1108,14 +1268,16 @@ object ShardingSpec extends ZIOSpecDefault {
           blocked <- worker.send("w1")(Block()).fork
           _       <- state.running.get.repeatUntil(_ == 1)
           error   <- timed.send("w1")(SlowUninterruptible()).flip
-          // sent again after the timeout, an at-most-once message runs again
+          // sent again after the timeout, an at-most-once message runs again, and an at-least-once one gets its result
           once    <- timed.send("w1")(GatedOnce()).flip.repeatN(1)
+          keyed   <- timed.send("w1")(GatedKeyed("timed")).flip.repeatN(1)
           _       <- state.gate.succeed(())
           _       <- worker.send("w1")(Unblock())
           _       <- blocked.join
           _       <- worker.send("w1")(Ping()) // processed after the others
           done    <- state.completed.get
-        } yield assertTrue(error == SendTimeout(Worker.name, "w1"), once == error, done == 3)
+          result  <- worker.send("w1")(GatedKeyed("timed"))
+        } yield assertTrue(error == SendTimeout(Worker.name, "w1"), once == error, keyed == error, done == 4, result == 4)
       },
       test("Concurrent messages run alongside the others") {
         for {
@@ -1810,6 +1972,15 @@ object CounterActor {
     case TriggerTerminate()                 extends CounterMessage[Nothing, Unit]
     // number of streams of changes that started on this entity
     case Subscriptions()                    extends CounterMessage[Nothing, Int]
+    // increment or decrement the counter and return it
+    case KeyedIncrement(key: String)        extends CounterMessage[Nothing, Int] with AtLeastOnce(key)
+    case KeyedDecrement(key: String)        extends CounterMessage[Nothing, Int] with AtLeastOnce(key)
+    // increments the counter, then fails with its value
+    case KeyedFail(key: String)             extends CounterMessage[CounterError, Unit] with AtLeastOnce(key)
+    case KeyedDie(key: String)              extends CounterMessage[Nothing, Unit] with AtLeastOnce(key)
+    case KeyedIncrementNoReply(key: String) extends CounterMessage[Nothing, Unit] with AtLeastOnce(key)
+    // increments the counter, then streams its value
+    case KeyedStream(key: String)           extends CounterMessage[Nothing, Streamed[Nothing, Int]] with AtLeastOnce(key)
   }
 
   object Counter extends EntityType[CounterMessage]("counter")
@@ -1877,6 +2048,12 @@ object CounterActor {
           case ThrowingDuplex()          => ZIO.succeed(Duplex[Int, Nothing, Int](_ => throw new Exception("boom")))
           case TriggerTerminate()        => sharding.terminateLocalEntity(Counter, entityId)
           case Subscriptions()           => subscriptions.get
+          case KeyedIncrement(_)         => state.updateAndGet(_ + 1)
+          case KeyedDecrement(_)         => state.updateAndGet(_ - 1)
+          case KeyedFail(_)              => state.updateAndGet(_ + 1).flatMap(n => ZIO.fail(CounterError(s"failed at $n")))
+          case KeyedDie(_)               => handle(Die())
+          case KeyedIncrementNoReply(_)  => state.update(_ + 1)
+          case KeyedStream(_)            => state.updateAndGet(_ + 1).map(n => Streamed(ZStream(n)))
         }
     }
 
@@ -1885,44 +2062,46 @@ object CounterActor {
 object WorkerActor {
   enum WorkerMessage[E, A] {
     // waits until Unblock
-    case Block()               extends WorkerMessage[Nothing, Unit]
-    case Unblock()             extends WorkerMessage[Nothing, Unit] with Concurrent
-    case Ping()                extends WorkerMessage[Nothing, Unit]
+    case Block()                 extends WorkerMessage[Nothing, Unit]
+    case Unblock()               extends WorkerMessage[Nothing, Unit] with Concurrent
+    case Ping()                  extends WorkerMessage[Nothing, Unit]
     // number of Block messages running
-    case Running()             extends WorkerMessage[Nothing, Int] with Concurrent
-    case SlowUninterruptible() extends WorkerMessage[Nothing, Unit] with Uninterruptible
+    case Running()               extends WorkerMessage[Nothing, Int] with Concurrent
+    case SlowUninterruptible()   extends WorkerMessage[Nothing, Unit] with Uninterruptible
     // counts as running for 10s
-    case LongUninterruptible() extends WorkerMessage[Nothing, Unit] with Uninterruptible
-    case SlowStream()          extends WorkerMessage[Nothing, Streamed[Nothing, Int]] with Uninterruptible
-    case QuickStream()         extends WorkerMessage[Nothing, Streamed[Nothing, Int]]
-    case QuickStreamOnce()     extends WorkerMessage[Nothing, Streamed[Nothing, Int]] with AtMostOnce
+    case LongUninterruptible()   extends WorkerMessage[Nothing, Unit] with Uninterruptible
+    case SlowStream()            extends WorkerMessage[Nothing, Streamed[Nothing, Int]] with Uninterruptible
+    case QuickStream()           extends WorkerMessage[Nothing, Streamed[Nothing, Int]]
+    case QuickStreamOnce()       extends WorkerMessage[Nothing, Streamed[Nothing, Int]] with AtMostOnce
     // counts as running until the test opens the gate, then emits the number of the entity
-    case GatedStream()         extends WorkerMessage[Nothing, Streamed[Nothing, Int]]
+    case GatedStream()           extends WorkerMessage[Nothing, Streamed[Nothing, Int]]
     // takes 10ms, then counts as completed
-    case Complete()            extends WorkerMessage[Nothing, Unit]
+    case Complete()              extends WorkerMessage[Nothing, Unit]
     // counts as completed right away
-    case CompleteNow()         extends WorkerMessage[Nothing, Unit]
-    case CompleteNowOnce()     extends WorkerMessage[Nothing, Unit] with AtMostOnce
+    case CompleteNow()           extends WorkerMessage[Nothing, Unit]
+    case CompleteNowOnce()       extends WorkerMessage[Nothing, Unit] with AtMostOnce
     // counts as running until the test opens the gate, then counts as completed
-    case Gated()               extends WorkerMessage[Nothing, Unit] with Uninterruptible
-    case GatedOnce()           extends WorkerMessage[Nothing, Unit] with AtMostOnce
+    case Gated()                 extends WorkerMessage[Nothing, Unit] with Uninterruptible
+    case GatedOnce()             extends WorkerMessage[Nothing, Unit] with AtMostOnce
+    // same, then returns the number of messages completed
+    case GatedKeyed(key: String) extends WorkerMessage[Nothing, Int] with AtLeastOnce(key)
     // number of the entity, counting from 1 each time it starts
-    case Instance()            extends WorkerMessage[Nothing, Int]
+    case Instance()              extends WorkerMessage[Nothing, Int]
     // logs "message"
-    case Log()                 extends WorkerMessage[Nothing, Unit]
+    case Log()                   extends WorkerMessage[Nothing, Unit]
     // forks a fiber that counts as completed once the test opens the gate
-    case ForkGated()           extends WorkerMessage[Nothing, Unit]
+    case ForkGated()             extends WorkerMessage[Nothing, Unit]
     // counts as running until interrupted, then forks a fiber that sets completed to 1 if it is interrupted before the
     // entity's finalizers run, or to 2 after
-    case ForkOnInterrupt()     extends WorkerMessage[Nothing, Unit]
+    case ForkOnInterrupt()       extends WorkerMessage[Nothing, Unit]
     // forks a fiber that counts as completed once interrupted and the test opens the gate, then waits for it
-    case JoinGatedCleanup()    extends WorkerMessage[Nothing, Unit]
+    case JoinGatedCleanup()      extends WorkerMessage[Nothing, Unit]
     // number of completed messages
-    case Completed()           extends WorkerMessage[Nothing, Int]
+    case Completed()             extends WorkerMessage[Nothing, Int]
     // sets `context`, then waits until interrupted
-    case SetContextAndBlock()  extends WorkerMessage[Nothing, Unit]
+    case SetContextAndBlock()    extends WorkerMessage[Nothing, Unit]
     // the value of `context`
-    case Context()             extends WorkerMessage[Nothing, String]
+    case Context()               extends WorkerMessage[Nothing, String]
   }
 
   object Worker extends EntityType[WorkerMessage]("worker")
@@ -1975,6 +2154,7 @@ object WorkerActor {
           case Complete()                        => Clock.sleep(10.millis) *> state.completed.update(_ + 1)
           case CompleteNow() | CompleteNowOnce() => state.completed.update(_ + 1)
           case Gated() | GatedOnce()             => running(state.gate.await) *> state.completed.update(_ + 1)
+          case GatedKeyed(_)                     => running(state.gate.await) *> state.completed.updateAndGet(_ + 1)
           case Instance()                        => ZIO.succeed(instance)
           case Log()                             => ZIO.log("message")
           case ForkGated()                       => (state.gate.await *> state.completed.update(_ + 1)).fork.unit

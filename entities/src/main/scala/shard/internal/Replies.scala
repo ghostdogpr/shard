@@ -3,13 +3,14 @@ package shard.internal
 import zio._
 import zio.stream.ZStream
 
-import shard.Sharding
+import shard.{RecipientType, Sharding}
 import shard.errors._
 import shard.interfaces.MessageCodec.{Codec, ReplyCodec}
 import shard.interfaces.Pods.BinaryReply
+import shard.interfaces.Pods.BinaryReply.DeliveryError
 
 /**
-  * Conversions between the results of messages and their binary replies.
+  * Conversions between messages, their results and their binary form.
   */
 private[shard] object Replies {
 
@@ -64,12 +65,21 @@ private[shard] object Replies {
     replies.map(toExit).flattenExitOption
   }
 
+  def decodeMessage[Msg[_, _]](recipientType: RecipientType[Msg], body: Array[Byte]): IO[SerializationError, (Msg[Any, Any], ReplyCodec)] =
+    ZIO
+      .attempt {
+        val decoded = recipientType.codec.decodeMessage(body)
+        (decoded, recipientType.codec.replyCodec(decoded))
+      }
+      .mapError(serializationError("decode a message", _))
+
   def decodeReply(reply: BinaryReply, codec: ReplyCodec, entityType: String, entityId: String): Exit[Any, Any] =
     reply match {
       case BinaryReply.Success(body)                                       => decode(codec.value, body, "a reply")
       case BinaryReply.Failure(body)                                       =>
         decode(codec.error, body, "a failure").flatMapExit(Exit.fail)
-      case BinaryReply.Defect(msg)                                         => Exit.fail(EntityDefect(msg))
+      case BinaryReply.Defect(_, Some(DeliveryError.StorageUnavailable))   => Exit.fail(StorageUnavailable(entityType, entityId))
+      case BinaryReply.Defect(msg, None)                                   => Exit.fail(EntityDefect(msg))
       case BinaryReply.SerializationError(msg)                             => Exit.fail(SerializationError(msg))
       case BinaryReply.Interrupted                                         => Exit.fail(EntityInterrupted(entityType, entityId))
       case BinaryReply.MailboxFull                                         => Exit.fail(MailboxFull(entityType, entityId))

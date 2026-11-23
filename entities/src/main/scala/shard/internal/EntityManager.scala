@@ -8,7 +8,8 @@ import zio.stream.ZStream
 import shard._
 import shard.errors.{EntityNotManagedByThisPod, MailboxFull, MessageDiscarded, StreamCancelled}
 import shard.interfaces.MessageCodec.ReplyCodec
-import shard.interfaces.Pods.BinaryMessage
+import shard.interfaces.MessageStorage
+import shard.interfaces.Pods.{BinaryMessage, BinaryReply}
 
 private[shard] object EntityManager {
 
@@ -97,15 +98,17 @@ private[shard] object EntityManager {
     recipientType: RecipientType[Msg],
     makeHandler: String => URIO[Scope, EntityHandler[Msg]],
     sharding: Sharding,
+    messageStorage: MessageStorage,
     config: Config,
     options: EntityOptions[Msg]
   ): URIO[Scope, EntityManager[Msg]] =
     for {
-      entities   <- Ref.make(Entities[Msg](Map(), 0L))
-      closed     <- Ref.make(false)
-      registered <- ZIO.getFiberRefs
-      manager     = new EntityManager(recipientType, makeHandler, entities, closed, registered, sharding, config, options)
-      _          <- manager.reaper.interruptible.forkScoped
+      entities    <- Ref.make(Entities[Msg](Map(), 0L))
+      closed      <- Ref.make(false)
+      registered  <- ZIO.getFiberRefs
+      atLeastOnce <- AtLeastOnceDelivery.make(recipientType, config.role, messageStorage, options.retention)
+      manager      = new EntityManager(recipientType, makeHandler, entities, closed, registered, atLeastOnce, sharding, config, options)
+      _           <- manager.reaper.interruptible.forkScoped
     } yield manager
 }
 
@@ -119,6 +122,7 @@ final private[shard] class EntityManager[Msg[_, _]] private (
   entities: Ref[EntityManager.Entities[Msg]],
   closed: Ref[Boolean],
   registered: FiberRefs,
+  atLeastOnce: AtLeastOnceDelivery[Msg],
   sharding: Sharding,
   config: Config,
   options: EntityOptions[Msg]
@@ -190,20 +194,41 @@ final private[shard] class EntityManager[Msg[_, _]] private (
     )
 
   /**
-    * Deliver a message from another pod and give its result to `onExit` with the codec of its reply.
+    * Deliver a message from another pod that replies with a single value, and return its reply.
     * A message that expects no reply returns `ack` once it is in the mailbox.
     */
-  def receive[A](msg: BinaryMessage)(ack: => A)(onExit: (Exit[Any, Any], ReplyCodec) => A): Task[A] =
-    ZIO
-      .attempt {
-        val decoded = recipientType.codec.decodeMessage(msg.body)
-        (decoded, recipientType.codec.replyCodec(decoded))
-      }
-      .mapError(Replies.serializationError("decode a message", _))
+  def receiveUnary(msg: BinaryMessage, ack: BinaryReply): Task[BinaryReply] =
+    Replies
+      .decodeMessage(recipientType, msg.body)
+      .flatMap((decoded, codec) =>
+        if (msg.expectsReply) askEncoded(msg.entityId, decoded, msg.body, codec)
+        else enqueue(msg.entityId, decoded).as(ack)
+      )
+
+  /**
+    * Deliver a Streamed or Duplex message from another pod and give its result to `onExit` with the codec of its reply.
+    * A message that expects no reply returns `ack` once it is in the mailbox.
+    */
+  def receiveStreamRequest[A](msg: BinaryMessage)(ack: => A)(onExit: (Exit[Any, Any], ReplyCodec) => A): Task[A] =
+    Replies
+      .decodeMessage(recipientType, msg.body)
       .flatMap((decoded, codec) =>
         if (msg.expectsReply) ask(msg.entityId, decoded).map(onExit(_, codec))
         else enqueue(msg.entityId, decoded).as(ack)
       )
+
+  /**
+    * Add a message that replies with a single value to its entity's mailbox, and return its reply encoded with `codec`.
+    * An `AtLeastOnce` message to an entity runs once for its key, stored as `body` (see `AtLeastOnceDelivery`).
+    * A topic runs it as best effort.
+    */
+  def askEncoded[E, A](entityId: String, message: Msg[E, A], body: Array[Byte], codec: ReplyCodec): Task[BinaryReply] =
+    message match {
+      case keyed: AtLeastOnce if recipientType.isInstanceOf[EntityType[?]] =>
+        ZIO.unlessZIO(isOnLocalShards(entityId))(ZIO.fail(EntityNotManagedByThisPod(entityId))) *>
+          atLeastOnce.runOnce(entityId, keyed, body, codec)([E1, A1] => (m: Msg[E1, A1]) => ask(entityId, m))
+      case _                                                               => ask(entityId, message).map(Replies.encodeExit(_, codec))
+    }
 
   /**
     * Add a message to the entity's mailbox, or fail with `MailboxFull` if it is full.

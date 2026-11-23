@@ -20,6 +20,7 @@ Messages can extend marker traits that change how they are processed:
 - `Concurrent`: the message runs alongside the other messages, ignoring the `concurrency` option (useful for read-only messages).
 - `Uninterruptible`: the message is not interrupted when its sender stops waiting for it (e.g. after a timeout).
 - `AtMostOnce`: the message is processed at most once per call (see [At most once](delivery-guarantees.md#at-most-once-atmostonce)).
+- `AtLeastOnce(key)`: the message is stored before it runs, and every `send` with the same key gets its result (see [At least once](delivery-guarantees.md#at-least-once-atleastonce)).
 
 ## Handlers
 
@@ -41,6 +42,7 @@ Entity and topic types must all have different names.
 - `mailboxCapacity`: maximum number of messages waiting or being processed by an entity (4096 by default, `EntityOptions.Unbounded` for no limit). Beyond that, messages fail with `MailboxFull`.
 - `loadEntity`: whether a message should start the entity when it isn't running. If not, the message is discarded: `sendDiscard` succeeds and `send` fails with `MessageDiscarded`.
 - `interceptor`: wraps the entities and their messages, see [Interceptors](#interceptors).
+- `retention`: how long the result of an `AtLeastOnce` message is kept (24 hours by default), see [At least once](delivery-guarantees.md#at-least-once-atleastonce).
 
 ```scala
 Sharding.registerEntity(
@@ -105,7 +107,7 @@ for {
 
 `Sharding.messenger` takes an optional `MessengerTimeout`: `InheritConfigTimeout` (the default) uses `Config.sendTimeout`, `Timeout(duration)` sets a specific timeout, and `NoTimeout` waits forever.
 The timeout only applies to `send` and `sendDiscard`.
-When it is reached, the sender receives `SendTimeout`, and for `send` the processing of the message is interrupted (unless it is `Uninterruptible` or `AtMostOnce`).
+When it is reached, the sender receives `SendTimeout`, and for `send` the processing of the message is interrupted (unless it is `Uninterruptible`, `AtMostOnce` or `AtLeastOnce`).
 
 ## Errors
 
@@ -118,13 +120,14 @@ Besides the error type declared by the message, calls can fail with a `ClusterEr
 - `EntityInterrupted`: the entity was stopped before the message was fully processed (e.g. it exceeded `entityTerminationTimeout`). The message may have been partially processed.
 - `MessageDiscarded`: the entity was not running and `loadEntity` rejected the message.
 - `DeliveryUnknown`: an `AtMostOnce` message may or may not have been processed, for example because its pod became unavailable after it was sent. It was not sent again.
+- `StorageUnavailable`: message storage can't be reached, so the outcome of an `AtLeastOnce` message is unknown. It may have been processed: sending it again with the same key gets its result if that was stored, and processes it again otherwise.
 - `EntityDefect`: the entity died while processing the message (or failed to start).
 - `SerializationError`: a message, reply, stream element or stream input failed to be encoded or decoded.
 - `TransportError`: an unexpected failure of the transport between pods.
 
 ## Delivery guarantees
 
-Each message has a delivery guarantee, which decides whether it is sent again when its pod fails: best effort by default, or at most once for `AtMostOnce` messages. See [Delivery guarantees](delivery-guarantees.md) for what each one guarantees.
+Each message has a delivery guarantee, which decides whether it is sent again when its pod fails: best effort by default, at most once for `AtMostOnce` messages, or at least once for `AtLeastOnce` messages. See [Delivery guarantees](delivery-guarantees.md) for what each one guarantees.
 
 ## Streaming
 

@@ -117,9 +117,10 @@ object Pods {
     final case class StreamFailure(body: Array[Byte]) extends BinaryReply
 
     /**
-      * The message processing died with an unexpected error
+      * The message processing died with an unexpected error, or the message failed with `error`,
+      * which senders that don't know it see as a defect
       */
-    final case class Defect(message: String) extends BinaryReply
+    final case class Defect(message: String, error: Option[DeliveryError] = None) extends BinaryReply
 
     /**
       * The message processing was interrupted before completing (e.g. the entity was stopped)
@@ -145,5 +146,16 @@ object Pods {
       * A message, reply or stream element failed to be encoded or decoded
       */
     final case class SerializationError(message: String) extends BinaryReply
+
+    /**
+      * An error of a message with a delivery guarantee, sent in a `Defect` reply
+      */
+    enum DeliveryError {
+
+      /**
+        * Message storage can't be reached
+        */
+      case StorageUnavailable
+    }
   }
 }

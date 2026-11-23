@@ -8,7 +8,7 @@ import zio.stream.{ZSink, ZStream}
 import shard.Messenger.MessengerTimeout
 import shard.Sharding.ShardingRegistrationEvent
 import shard.errors._
-import shard.interfaces.{Pods, ShardManagerClient, Storage}
+import shard.interfaces.{MessageStorage, Pods, ShardManagerClient, Storage}
 import shard.interfaces.MessageCodec.{Codec, ReplyCodec}
 import shard.interfaces.Pods.{BinaryMessage, BinaryReply}
 import shard.internal.{EntityManager, Replies, Streams}
@@ -30,6 +30,7 @@ class Sharding private (
   shardManager: ShardManagerClient,
   pods: Pods,
   storage: Storage,
+  messageStorage: MessageStorage,
   eventsHub: Hub[ShardingRegistrationEvent]
 ) { self =>
   def getShardId(recipientType: RecipientType[?], entityId: String): ShardId =
@@ -287,11 +288,9 @@ class Sharding private (
   private def entityManager[Msg[_, _]](recipientType: RecipientType[Msg], entityId: String): Task[EntityManager[Msg]] =
     entityManager(recipientType.name, entityId).map(_.asInstanceOf[EntityManager[Msg]])
 
-  private def receive[A](msg: BinaryMessage)(onReply: BinaryReply => A)(
-    onExit: (Exit[Any, Any], ReplyCodec) => A
-  ): Task[A] =
+  private def receive[A](msg: BinaryMessage)(onReply: BinaryReply => A)(run: EntityManager[?] => Task[A]): Task[A] =
     entityManager(msg.entityType, msg.entityId)
-      .flatMap(_.receive(msg)(onReply(Sharding.ack))(onExit))
+      .flatMap(run)
       .catchSome {
         case _: MailboxFull               => ZIO.succeed(onReply(BinaryReply.MailboxFull))
         case _: MessageDiscarded          => ZIO.succeed(onReply(BinaryReply.Discarded))
@@ -300,7 +299,7 @@ class Sharding private (
       }
 
   private[shard] def sendToLocalEntity(msg: BinaryMessage): Task[BinaryReply] =
-    receive(msg)(identity)(Replies.encodeExit)
+    receive(msg)(identity)(_.receiveUnary(msg, Sharding.ack))
 
   /**
     * Deliver a stream of messages to a local entity, in order.
@@ -332,12 +331,12 @@ class Sharding private (
               Streams.interruptWhen(reply.run(decodedInput), inputFailure.await) ++
                 ZStream.execute(ZIO.whenZIODiscard(inputFailure.isDone)(inputFailure.await))
             })
-          ZStream.unwrap(receive(request)(ZStream.succeed(_)) {
+          ZStream.unwrap(receive(request)(ZStream.succeed(_))(_.receiveStreamRequest(request)(ZStream.succeed(Sharding.ack)) {
             case (Exit.Success(reply: StreamReply), codec) =>
               // without inputs, nothing can fail them: no need to watch for that on every element
               Replies.encodeStream(if (reply.usesInput) replies(reply, codec) else reply.run(ZStream.empty), codec)
             case (exit, codec)                             => ZStream.succeed(Replies.encodeExit(exit, codec))
-          })
+          }))
       }
     }
 
@@ -431,8 +430,10 @@ class Sharding private (
     pod: PodAddress,
     message: Msg[E, A],
     expectsReply: Boolean
-  ): IO[Any, Any] =
-    if (isLocal(pod))
+  ): IO[Any, Any] = {
+    val local = isLocal(pod)
+    // an AtLeastOnce message is stored before it runs, so it is encoded even for a local entity
+    if (local && !(expectsReply && message.isInstanceOf[AtLeastOnce]))
       if (expectsReply)
         entityManager(recipientType, entityId)
           .flatMap(_.ask(entityId, message))
@@ -441,14 +442,15 @@ class Sharding private (
       else entityManager(recipientType, entityId).flatMap(_.enqueue(entityId, message)).catchAll(fromTransport).unit
     else
       encode(recipientType, message).flatMap { case (body, codec) =>
-        pods
-          .sendMessage(pod, BinaryMessage(entityId, recipientType.name, body, expectsReply))
+        (if (local) entityManager(recipientType, entityId).flatMap(_.askEncoded(entityId, message, body, codec))
+         else pods.sendMessage(pod, BinaryMessage(entityId, recipientType.name, body, expectsReply)))
           .catchAll(fromTransport)
           .flatMap {
             case BinaryReply.Success(_) if !expectsReply => ZIO.unit
             case reply                                   => Replies.decodeReply(reply, codec, recipientType.name, entityId)
           }
       }
+  }
 
   private def deliverStream[Msg[_, _], E, A](
     entityType: EntityType[Msg],
@@ -678,7 +680,7 @@ class Sharding private (
                           )
                         else
                           EntityManager
-                            .make(recipientType, makeHandler, self, config, options)
+                            .make(recipientType, makeHandler, self, messageStorage, config, options)
                             .map(manager => (manager, map.updated(recipientType.name, Some(manager))))
                       )
                     )(manager => manager.close *> entityStates.update(_.updated(recipientType.name, None)))
@@ -732,13 +734,14 @@ object Sharding {
   /**
     * A layer that sets up sharding communication between pods.
     */
-  val live: ZLayer[Pods & ShardManagerClient & Storage & Config, Throwable, Sharding] =
+  val live: ZLayer[Pods & ShardManagerClient & Storage & MessageStorage & Config, Throwable, Sharding] =
     ZLayer.scoped {
       for {
         config                    <- ZIO.service[Config]
         pods                      <- ZIO.service[Pods]
         shardManager              <- ZIO.service[ShardManagerClient]
         storage                   <- ZIO.service[Storage]
+        messageStorage            <- ZIO.service[MessageStorage]
         shardsCache               <- Ref.make(Map.empty[ShardId, PodAddress])
         entityStates              <- Ref.Synchronized.make[Map[String, Option[EntityManager[?]]]](Map())
         singletons                <- Ref.Synchronized
@@ -768,6 +771,7 @@ object Sharding {
                                        shardManager,
                                        pods,
                                        storage,
+                                       messageStorage,
                                        eventsHub
                                      )
         _                         <- sharding.getShardingRegistrationEvents.mapZIO(event => ZIO.logInfo(event.toString)).runDrain.forkDaemon

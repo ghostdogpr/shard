@@ -5,7 +5,7 @@ import zio.stream.ZStream
 
 import shard.FaultyPods.Fault
 import shard.errors.PodUnavailable
-import shard.interfaces.{Pods, ShardManagerClient, Storage}
+import shard.interfaces.{MessageStorage, Pods, ShardManagerClient, Storage}
 import shard.interfaces.Pods.{BinaryMessage, BinaryReply}
 
 /**
@@ -88,7 +88,7 @@ object FaultyPods {
   val pending: URIO[FaultyPods, Int] =
     ZIO.serviceWithZIO[FaultyPods](_.pending)
 
-  val localSharding: RLayer[ShardManagerClient & Storage & Config, Sharding & FaultyPods] =
+  val localSharding: RLayer[ShardManagerClient & Storage & MessageStorage & Config, Sharding & FaultyPods] =
     ZLayer
       .fromZIO(Queue.unbounded[Fault].map(new FaultyPods(_)))
       .flatMap(env => LocalSharding.withPods(env.get.wrap) ++ ZLayer.succeedEnvironment(env))

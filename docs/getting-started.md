@@ -63,8 +63,9 @@ Shard is composed of 2 main components:
 - **Entities** will run on your application servers and process messages that are sent to them. Note that the entity behavior (including entity persistence) is entirely up to you.
 Shard only takes care of starting entities on the right pods as well as the communication between them.
 
-There are 4 pluggable parts that can be implemented with the technology of your choice.
+There are 5 pluggable parts that can be implemented with the technology of your choice.
 - The `Storage` trait defines where shard assignments will be stored. Shard provides an implementation using **Redis**.
+- The `MessageStorage` trait defines where `AtLeastOnce` messages and their results will be stored. Shard provides an implementation in memory for tests.
 - The `Pods` trait defines how to communicate with remote pods. Shard provides an implementation using **gRPC** as the protocol.
 - The `MessageCodec[Msg]` type class defines how to encode and decode messages of a given type. Shard provides backends using **Kryo** (reflective, no derivation) and **Proteus** (macro-derived, protobuf wire format).
 - The `PodsHealth` trait defines how to check if a pod is healthy or not. Shard provides an implementation using the **k8s API**.
@@ -192,6 +193,7 @@ def run: Task[Unit] =
     ZLayer.succeed(Config.default),
     ZLayer.succeed(GrpcConfig.default),
     Storage.memory,           // store data in memory
+    MessageStorage.none,      // no AtLeastOnce messages
     ShardManagerClient.live,  // client to communicate with the Shard Manager
     GrpcPods.live,            // use gRPC protocol
     GrpcShardingService.live, // expose gRPC service

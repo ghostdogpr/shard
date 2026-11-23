@@ -187,6 +187,8 @@ The Redis storage has a new default implementation, `shard-storage-sage`, which 
 
 `RedisConfig.assignmentsKey` takes a role (see [Roles](#roles)). The format of the stored pods changed, so Shardcake and Shard can't share the same data (see [below](#upgrading-a-running-cluster)).
 
+`Sharding.live` and `LocalSharding.live` also require a `MessageStorage` layer, which stores `AtLeastOnce` messages. Provide `MessageStorage.none` if you don't use them (see [Message Storage](customization.md#message-storage)).
+
 ## Custom implementations
 
 If you implemented the pluggable interfaces yourself:

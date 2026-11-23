@@ -57,6 +57,25 @@ They provide the same `StorageRedis.live` layer and `RedisConfig`, but require a
 - `shard-storage-redis` uses [redis4cats](https://redis4cats.profunktor.dev/) and requires a `Redis` object, an alias to `RedisCommands[Task, String, String] & PubSubCommands[Task, fs2Stream, String, String]`.
 - `shard-storage-redisson` uses [Redisson](https://redisson.org/) and requires a `RedissonClient`.
 
+## Message Storage
+
+The `MessageStorage` trait stores [`AtLeastOnce`](delivery-guarantees.md#at-least-once-atleastonce) messages and their results, separately for each `Role`.
+
+```scala
+trait MessageStorage {
+  def store(role: Role, key: Key, body: Array[Byte]): Task[Stored]
+  def saveResult(role: Role, key: Key, result: Result, retention: Duration): Task[Result]
+  def remove(role: Role, key: Key): Task[Unit]
+}
+```
+- `store` stores a message before it runs, unless a message with the same key is stored, and returns what was under the key: `New` if there was nothing and the message was stored, `Pending` with the message if it has no result yet, or `Done` with its result. A `Key` is the delivery key of a message with its entity type and entity ID.
+- `saveResult` saves the result of a message, the `BinaryReply.Success` or `BinaryReply.Failure` that it replied, unless its key already has one, keeps it for `retention`, and returns the result kept under the key. After that, the key is free again.
+- `remove` removes a stored message that has no result, when it was rejected before running (e.g. its mailbox was full).
+
+When one of these methods fails, the message fails with `StorageUnavailable`, and when it dies, with `EntityDefect`.
+
+`Sharding.live` requires a `MessageStorage`. If you don't send `AtLeastOnce` messages, use the `MessageStorage.none` layer, with which they fail with `EntityDefect`. For testing, you can use the `MessageStorage.memory` layer that keeps messages in memory, which only works with a single pod.
+
 ## Messaging Protocol
 
 The `Pods` trait defines how to communicate with remote pods.
@@ -77,6 +96,7 @@ trait Pods {
 }
 ```
 A pod must reject `assignShards` and `unassignShards` for a role other than its own, since its address may have previously belonged to a pod of another role.
+A `BinaryReply` must reach the sender with all its fields, including the `error` of a `Defect`, which tells errors such as `StorageUnavailable` from defects.
 
 For testing, you can use the `Pods.noop` layer that does nothing.
 
