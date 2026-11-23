@@ -14,6 +14,8 @@ import shard.interfaces.Pods.BinaryReply.DeliveryError
   */
 private[shard] object Replies {
 
+  val ack: BinaryReply = BinaryReply.Success(Array.emptyByteArray)
+
   /**
     * Convert the result of a message to the result seen by its sender.
     * An interruption becomes `interruptedError` and a defect becomes `EntityDefect`.

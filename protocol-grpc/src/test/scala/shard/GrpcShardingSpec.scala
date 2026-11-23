@@ -262,7 +262,7 @@ object GrpcShardingSpec extends ZIOSpecDefault {
       .acquireRelease(ZIO.attempt(ServerBuilder.forPort(0).addService(service).build().start()))(server => ZIO.succeed(server.shutdownNow()))
   }
 
-  private def overGrpc(config: Config)(spec: Spec[Sharding & Storage & Config & Scope, Any]): Spec[Scope, Any] =
+  private def overGrpc(config: Config)(spec: Spec[Sharding & Storage & MessageStorage & Config & Scope, Any]): Spec[Scope, Any] =
     spec.provideSomeShared[Scope](
       ShardManagerClient.local,
       Storage.memory,

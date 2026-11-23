@@ -19,8 +19,7 @@ trait MessageStorage {
   def store(role: Role, key: Key, body: Array[Byte]): Task[Stored]
 
   /**
-    * Save the result of a message, unless its key already has one, and return the result kept under its key.
-    * Once `retention` has passed, the result is removed and the key is free again.
+    * Save the result of a message unless its key has one, and return the result kept under its key until `retention` has passed.
     */
   def saveResult(role: Role, key: Key, result: Result, retention: Duration): Task[Result]
 

@@ -40,7 +40,7 @@ Entity and topic types must all have different names.
 - `maxIdleTime`: time without processing any message after which an entity is stopped (defaults to `Config.entityMaxIdleTime`). An entity with messages in progress or open streams is never stopped.
 - `concurrency`: maximum number of messages processed at the same time by an entity. The default is 1: messages are processed one at a time, in order.
 - `mailboxCapacity`: maximum number of messages waiting or being processed by an entity (4096 by default, `EntityOptions.Unbounded` for no limit). Beyond that, messages fail with `MailboxFull`.
-- `loadEntity`: whether a message should start the entity when it isn't running. If not, the message is discarded: `sendDiscard` succeeds and `send` fails with `MessageDiscarded`.
+- `loadEntity`: whether a message should start the entity when it isn't running. If not, the message is discarded: `sendDiscard` succeeds and `send` fails with `MessageDiscarded`. For an `AtLeastOnce` message, it only applies to a new key (see [At least once](delivery-guarantees.md#at-least-once-atleastonce)).
 - `interceptor`: wraps the entities and their messages, see [Interceptors](#interceptors).
 - `retention`: how long the result of an `AtLeastOnce` message is kept (24 hours by default), see [At least once](delivery-guarantees.md#at-least-once-atleastonce).
 

@@ -299,7 +299,7 @@ class Sharding private (
       }
 
   private[shard] def sendToLocalEntity(msg: BinaryMessage): Task[BinaryReply] =
-    receive(msg)(identity)(_.receiveUnary(msg, Sharding.ack))
+    receive(msg)(identity)(_.receiveUnary(msg))
 
   /**
     * Deliver a stream of messages to a local entity, in order.
@@ -308,7 +308,9 @@ class Sharding private (
   private[shard] def sendStreamToLocalEntity(messages: ZStream[Any, Throwable, BinaryMessage]): Task[BinaryReply] =
     Streams.run(
       messages,
-      ZSink.foldZIO(Sharding.ack)(_.isInstanceOf[BinaryReply.Success])((_, msg) => sendToLocalEntity(msg))
+      ZSink.foldZIO(Replies.ack)(_.isInstanceOf[BinaryReply.Success])((_, msg) =>
+        receive(msg)(identity)(_.receiveBestEffort(msg)(Replies.ack)(Replies.encodeExit))
+      )
     )
 
   /**
@@ -331,7 +333,7 @@ class Sharding private (
               Streams.interruptWhen(reply.run(decodedInput), inputFailure.await) ++
                 ZStream.execute(ZIO.whenZIODiscard(inputFailure.isDone)(inputFailure.await))
             })
-          ZStream.unwrap(receive(request)(ZStream.succeed(_))(_.receiveStreamRequest(request)(ZStream.succeed(Sharding.ack)) {
+          ZStream.unwrap(receive(request)(ZStream.succeed(_))(_.receiveBestEffort(request)(ZStream.succeed(Replies.ack)) {
             case (Exit.Success(reply: StreamReply), codec) =>
               // without inputs, nothing can fail them: no need to watch for that on every element
               Replies.encodeStream(if (reply.usesInput) replies(reply, codec) else reply.run(ZStream.empty), codec)
@@ -432,8 +434,8 @@ class Sharding private (
     expectsReply: Boolean
   ): IO[Any, Any] = {
     val local = isLocal(pod)
-    // an AtLeastOnce message is stored before it runs, so it is encoded even for a local entity
-    if (local && !(expectsReply && message.isInstanceOf[AtLeastOnce]))
+    // an AtLeastOnce message to an entity is stored before it runs, so it is encoded even for a local entity
+    if (local && !(message.isInstanceOf[AtLeastOnce] && recipientType.isInstanceOf[EntityType[?]]))
       if (expectsReply)
         entityManager(recipientType, entityId)
           .flatMap(_.ask(entityId, message))
@@ -442,7 +444,7 @@ class Sharding private (
       else entityManager(recipientType, entityId).flatMap(_.enqueue(entityId, message)).catchAll(fromTransport).unit
     else
       encode(recipientType, message).flatMap { case (body, codec) =>
-        (if (local) entityManager(recipientType, entityId).flatMap(_.askEncoded(entityId, message, body, codec))
+        (if (local) entityManager(recipientType, entityId).flatMap(_.deliverEncoded(entityId, message, body, codec, expectsReply))
          else pods.sendMessage(pod, BinaryMessage(entityId, recipientType.name, body, expectsReply)))
           .catchAll(fromTransport)
           .flatMap {
@@ -718,9 +720,6 @@ object Sharding {
       case Retry.MaybeDelivered(_) | StreamCancelled => true
       case Retry.NotSent(_) | Retry.NotHosted        => false
     })
-
-  // acknowledges a message that doesn't expect a reply
-  private val ack: BinaryReply = BinaryReply.Success(Array.emptyByteArray)
 
   private val unitReplyCodec: ReplyCodec = ReplyCodec(Codec.nothing, Codec.unit, Codec.nothing, Codec.nothing)
 

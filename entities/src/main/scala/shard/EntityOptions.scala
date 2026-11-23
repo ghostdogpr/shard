@@ -10,7 +10,7 @@ import zio.{durationInt, Duration}
   * @param mailboxCapacity maximum number of messages waiting or being processed by an entity, beyond which messages
   *                        fail with `MailboxFull`
   * @param loadEntity whether a message should start the entity when it isn't running (otherwise `send` fails with
-  *                   `MessageDiscarded`)
+  *                   `MessageDiscarded`). For an `AtLeastOnce` message, it only applies to a new key.
   * @param interceptor wraps the entities of this type and the processing of their messages (see `EntityInterceptor`)
   * @param retention how long the result of an `AtLeastOnce` message is kept, during which a `send` with the same key
   *                  gets it (default: 24 hours)

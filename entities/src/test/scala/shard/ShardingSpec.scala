@@ -60,7 +60,7 @@ object ShardingSpec extends ZIOSpecDefault {
             errors <- keyedErrors(MessageStorage.none)
           } yield assertTrue(
             errors == List.fill(2)(
-              List.fill(2)(
+              List.fill(3)(
                 EntityDefect(
                   "Message storage died with java.lang.RuntimeException: MessageStorage.none stores no messages, so it can't run AtLeastOnce messages"
                 )
@@ -71,11 +71,41 @@ object ShardingSpec extends ZIOSpecDefault {
         test(
           "When message storage can't be reached, an at-least-once message fails with StorageUnavailable, and runs again if its result wasn't saved"
         ) {
-          val unavailable = List.fill(2)(StorageUnavailable(Counter.name, "c1"))
+          val unavailable = StorageUnavailable(Counter.name, "c1")
           for {
             errors  <- keyedErrors(unreachableStorage)
             unsaved <- keyedErrors(unsavedResults)
-          } yield assertTrue(errors == List.fill(2)(unavailable -> 0), unsaved == List.fill(2)(unavailable -> 2))
+          } yield assertTrue(errors == List.fill(2)(List.fill(3)(unavailable) -> 0), unsaved == List.fill(2)(List.fill(2)(unavailable) -> 3))
+        },
+        test("A keyed sendDiscard that joins a run of its stored key fails if that run can't add the message to the mailbox") {
+          for {
+            memory  <- MessageStorage.memory.build.map(_.get)
+            entered <- Queue.unbounded[Unit]
+            permits <- Queue.unbounded[Unit]
+            _       <- memory.store(Role.default, MessageStorage.Key(Worker.name, "s1", "a"), Worker.codec.encodeMessage(GatedKeyed("a")))
+            result  <- ZIO
+                         .scoped(for {
+                           state     <- startWorker(EntityOptions(mailboxCapacity = 1))
+                           worker    <- Sharding.messenger(Worker)
+                           _         <- worker.sendDiscard("s1")(Gated())
+                           sent      <- worker.send("s1")(GatedKeyed("a")).flip.fork
+                           _         <- entered.take
+                           discarded <- worker.sendDiscard("s1")(GatedKeyed("a")).flip.fork
+                           // gives the sendDiscard time to join the send's run, with a spare permit in case it runs alone
+                           _         <- Clock.sleep(200.millis)
+                           _         <- permits.offerAll(List((), ()))
+                           errors    <- sent.join <*> discarded.join
+                           joined    <- entered.isEmpty
+                           _         <- state.gate.succeed(())
+                         } yield (errors, joined))
+                         .provide(
+                           LocalSharding.live,
+                           LocalShardManagerClient.live,
+                           Storage.memory,
+                           gatedStore(memory, entered, permits),
+                           ZLayer.succeed(Config.default)
+                         )
+          } yield assertTrue(result == ((MailboxFull(Worker.name, "s1"), MailboxFull(Worker.name, "s1")), true))
         }
       ),
       suite("registered pods")(
@@ -476,13 +506,19 @@ object ShardingSpec extends ZIOSpecDefault {
 
   val otherPod: PodAddress = PodAddress("other", 1)
 
-  // sends a keyed message twice, locally and with simulated remote pods, and returns its errors and the counter's value
+  // sends keyed messages with sendDiscard and send, locally and with simulated remote pods, and returns their errors and the counter's value
   private def keyedErrors(messageStorage: ULayer[MessageStorage]): IO[Any, List[(List[ClusterError], Int)]] =
     ZIO.foreach(List(false, true))(simulateRemotePods =>
       ZIO
         .scoped(
           startCounter()
-            .flatMap(counter => ZIO.foreach(List(1, 2))(_ => counter.send("c1")(KeyedIncrement("a")).flip) <*> counter.send("c1")(GetCounter()))
+            .flatMap(counter =>
+              for {
+                discarded <- counter.sendDiscard("c1")(KeyedIncrement("b")).flip.option
+                sent      <- ZIO.foreach(List(1, 2))(_ => counter.send("c1")(KeyedIncrement("a")).flip)
+                value     <- counter.send("c1")(GetCounter())
+              } yield (discarded.toList ++ sent, value)
+            )
         )
         .provide(
           LocalSharding.live,
@@ -513,6 +549,15 @@ object ShardingSpec extends ZIOSpecDefault {
         def remove(role: Role, key: MessageStorage.Key): Task[Unit]                                                                          = memory.remove(role, key)
       }
     )
+
+  private def gatedStore(memory: MessageStorage, entered: Queue[Unit], permits: Queue[Unit]): ULayer[MessageStorage] =
+    ZLayer.succeed(new MessageStorage {
+      def store(role: Role, key: MessageStorage.Key, body: Array[Byte]): Task[MessageStorage.Stored]                                       =
+        entered.offer(()) *> permits.take *> memory.store(role, key, body)
+      def saveResult(role: Role, key: MessageStorage.Key, result: MessageStorage.Result, retention: Duration): Task[MessageStorage.Result] =
+        memory.saveResult(role, key, result, retention)
+      def remove(role: Role, key: MessageStorage.Key): Task[Unit]                                                                          = memory.remove(role, key)
+    })
 
   // a Shard Manager that gives the shards of a pod that unregisters to another pod
   private def takingShardsBack(assignments: Ref[Map[ShardId, Option[PodAddress]]]): ShardManagerClient =
@@ -752,7 +797,7 @@ object ShardingSpec extends ZIOSpecDefault {
   // tests relying on the in-process transport's chunking, delivery order and synchronous cancellation
   val inProcess: String = "in-process"
 
-  val tests: List[Spec[Sharding & Scope, Any]] =
+  val tests: List[Spec[Sharding & MessageStorage & Scope, Any]] =
     List(
       test("Send message to entities") {
         for {
@@ -791,7 +836,6 @@ object ShardingSpec extends ZIOSpecDefault {
           failed  <- counter.send("k1")(KeyedFail("c")).flip
           refused <- counter.send("k1")(KeyedFail("c")).flip
           value   <- counter.send("k1")(GetCounter())
-          // a defect saves no result
           died    <- counter.send("k3")(KeyedDie("d")).flip.repeatN(1)
         } yield assertTrue(
           first == 1,
@@ -812,7 +856,6 @@ object ShardingSpec extends ZIOSpecDefault {
           first  <- worker.send("w1")(GatedKeyed("a")).fork
           _      <- state.running.changes.takeUntil(_ == 1).runDrain
           second <- worker.send("w1")(GatedKeyed("a")).fork
-          // gives the second send time to arrive during the run
           _      <- Clock.sleep(200.millis)
           _      <- state.gate.succeed(())
           a      <- first.join
@@ -829,26 +872,74 @@ object ShardingSpec extends ZIOSpecDefault {
           later   <- counter.send("r1")(KeyedIncrement("a"))
         } yield assertTrue(first == 1, kept == 1, later == 2)
       },
+      test("A keyed sendDiscard returns once its message is stored and queued, then runs in the background, and its repeats don't run it") {
+        for {
+          state   <- startWorker()
+          worker  <- Sharding.messenger(Worker)
+          _       <- worker.sendDiscard("d1")(GatedKeyed("a"))
+          _       <- state.running.changes.takeUntil(_ == 1).runDrain
+          running <- worker.sendDiscard("d1")(GatedKeyed("a")).exit
+          waiting <- worker.send("d1")(GatedKeyed("a")).fork
+          _       <- Clock.sleep(200.millis)
+          _       <- state.gate.succeed(())
+          result  <- waiting.join
+          saved   <- worker.sendDiscard("d1")(GatedKeyed("a")).exit
+          again   <- worker.send("d1")(GatedKeyed("a"))
+          _       <- worker.send("d1")(Ping())
+          done    <- state.completed.get
+        } yield assertTrue(running.isSuccess, result == 1, saved.isSuccess, again == 1, done == 1)
+      },
+      test("A keyed sendDiscard rejected by its entity, e.g. because its mailbox is full, isn't stored") {
+        for {
+          storage <- ZIO.service[MessageStorage]
+          state   <- startWorker(EntityOptions(mailboxCapacity = 1))
+          worker  <- Sharding.messenger(Worker)
+          _       <- worker.sendDiscard("f1")(Gated())
+          error   <- worker.sendDiscard("f1")(GatedKeyed("a")).flip
+          stored  <- storage.store(Role.default, MessageStorage.Key(Worker.name, "f1", "a"), Array.emptyByteArray)
+          _       <- state.gate.succeed(())
+        } yield assertTrue(error == MailboxFull(Worker.name, "f1"), stored == MessageStorage.Stored.New)
+      },
+      test("loadEntity applies only to the new keys of at-least-once messages") {
+        val key = "pending"
+        for {
+          storage   <- ZIO.service[MessageStorage]
+          counter   <- startCounter(EntityOptions(loadEntity = [E, A] => _ match { case KeyedIncrement(_) => false; case _ => true }))
+          _         <- ZIO.foreachDiscard(List("l1", "l2"))(entityId =>
+                         storage.store(Role.default, MessageStorage.Key(Counter.name, entityId, key), Counter.codec.encodeMessage(KeyedIncrement(key)))
+                       )
+          discarded <- counter.sendDiscard("l1")(KeyedIncrement("new")).exit
+          error     <- counter.send("l1")(KeyedIncrement("new")).flip
+          stored    <- storage.store(Role.default, MessageStorage.Key(Counter.name, "l1", "new"), Array.emptyByteArray)
+          pending   <- counter.send("l1")(KeyedIncrement(key))
+          _         <- counter.sendDiscard("l2")(KeyedIncrement(key))
+          value     <- counter.send("l2")(GetCounter())
+        } yield assertTrue(
+          discarded.isSuccess,
+          error == MessageDiscarded(Counter.name, "l1"),
+          stored == MessageStorage.Stored.New,
+          pending == 1,
+          value == 1
+        )
+      },
       test("A message can't have both AtMostOnce and AtLeastOnce") {
         for {
           both     <- typeCheck("enum M[E, A] { case X(k: String) extends M[Nothing, Int] with AtMostOnce with AtLeastOnce(k) }")
           onParent <- typeCheck("enum M[E, A] extends AtMostOnce { case X(k: String) extends M[Nothing, Int] with AtLeastOnce(k) }")
         } yield assertTrue(both.left.exists(_.contains("DeliveryGuarantee")), onParent.left.exists(_.contains("DeliveryGuarantee")))
       },
-      test("An at-least-once message sent with sendDiscard, a stream call, sendStream or to a topic runs as best effort") {
+      test("An at-least-once message sent with a stream call, sendStream or to a topic runs as best effort") {
         for {
           counter     <- startCounter()
           _           <- Sharding.registerTopic(Incrementer)(IncrementerActor.behavior)
           broadcaster <- Sharding.broadcaster(Incrementer)
-          _           <- counter.sendDiscard("c3")(KeyedIncrement("a")).repeatN(1)
           streamed    <- counter.stream("c1")(KeyedStream("a")).runCollect.repeatN(1)
           _           <- counter.sendStream("c2")(ZStream(KeyedIncrementNoReply("a"))).repeatN(1)
           _           <- broadcaster.broadcast("t1")(IncrementerMessage.KeyedIncrement("a")).repeatN(1)
           _           <- broadcaster.broadcastDiscard("t1")(IncrementerMessage.KeyedIncrement("a"))
-          discarded   <- counter.send("c3")(GetCounter())
           value       <- counter.send("c2")(GetCounter())
           increments  <- broadcaster.broadcast("t1")(IncrementerMessage.GetIncrement())
-        } yield assertTrue(discarded == 2, streamed == Chunk(2), value == 2, increments.values.toList == List(Exit.succeed(3)))
+        } yield assertTrue(streamed == Chunk(2), value == 2, increments.values.toList == List(Exit.succeed(3)))
       },
       test("Defect stops the entity") {
         for {
@@ -1268,7 +1359,6 @@ object ShardingSpec extends ZIOSpecDefault {
           blocked <- worker.send("w1")(Block()).fork
           _       <- state.running.get.repeatUntil(_ == 1)
           error   <- timed.send("w1")(SlowUninterruptible()).flip
-          // sent again after the timeout, an at-most-once message runs again, and an at-least-once one gets its result
           once    <- timed.send("w1")(GatedOnce()).flip.repeatN(1)
           keyed   <- timed.send("w1")(GatedKeyed("timed")).flip.repeatN(1)
           _       <- state.gate.succeed(())

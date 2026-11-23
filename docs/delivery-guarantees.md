@@ -37,6 +37,8 @@ enum AccountMessage[E, A] {
 - A defect (`EntityDefect`), an interruption (`EntityInterrupted`) or a reply that fails to be encoded stores no result, so a `send` with the same key runs the message again.
 - If message storage can't be reached, the message fails with `StorageUnavailable` at once, and Shard doesn't send it again.
 - Its sender never interrupts it: once stored, the message runs and finishes even if its sender gets `SendTimeout`.
-- Only `send` uses it. Sent any other way, such as with `sendDiscard`, `stream`, `sendStream` or to a topic, the message is best effort. A message can't have both `AtMostOnce` and `AtLeastOnce`.
+- `sendDiscard` works like a `send` that doesn't wait for the result: it returns once the message is in the entity's mailbox, and the message then runs in the background. If the key has a result, it returns at once, and if the key is running, it returns once that message is in the mailbox. If the entity rejects a new message before it is in the mailbox, for example with `MailboxFull`, the message isn't stored, so it can be sent again.
+- `loadEntity` only applies to new keys: a new message that it discards isn't stored, and as for other messages, `sendDiscard` succeeds and `send` fails with `MessageDiscarded`. `loadEntity` never discards a message with a key that is already stored.
+- Only `send` and `sendDiscard` use it. Sent any other way, such as with `stream`, `sendStream` or to a topic, the message is best effort. A message can't have both `AtMostOnce` and `AtLeastOnce`.
 - A pod of an earlier version runs it as best effort, so during the rolling update that adds the marker, the message may run more than once.
 - Stored messages and results are encoded with the codec of the entity type, so the later versions of the app must still be able to decode them.

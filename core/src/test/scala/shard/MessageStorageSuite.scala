@@ -10,8 +10,7 @@ import shard.interfaces.MessageStorage.{Key, Result, Stored}
 import shard.interfaces.Pods.BinaryReply
 
 /**
-  * The tests shared by the message storages, run in sequence on one shared storage with a live clock.
-  * Each test uses its own keys.
+  * The tests shared by the message storages, run in sequence on one storage with a live clock, each with its own keys.
   */
 object MessageStorageSuite {
   private val role = Role.default
@@ -84,7 +83,6 @@ object MessageStorageSuite {
           _       <- saveResult(done, success("value"))
           _       <- remove(done)
           result  <- store(done, "b")
-          // a result is saved even if its message was removed meanwhile
           _       <- saveResult(Key("type", "id", "unknown"), success("value"))
           unknown <- store(Key("type", "id", "unknown"), "a")
         } yield assertTrue(stored == "new", result == "success value", unknown == "success value")

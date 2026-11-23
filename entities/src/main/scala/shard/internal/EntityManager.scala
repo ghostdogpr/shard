@@ -164,19 +164,23 @@ final private[shard] class EntityManager[Msg[_, _]] private (
     * Add a message to an entity's mailbox, starting the entity if needed, and trying again a little later if it is stopping.
     * Fails with `EntityNotManagedByThisPod`, `MailboxFull` or `MessageDiscarded`.
     */
-  def enqueue[E, A](entityId: String, message: Msg[E, A]): IO[Throwable, Envelope[Msg]] =
-    tryEnqueue(entityId, message).someOrElseZIO(stoppingRetryDelay *> enqueue(entityId, message))
+  def enqueue[E, A](entityId: String, message: Msg[E, A], useLoadEntity: Boolean = true): IO[Throwable, Envelope[Msg]] =
+    tryEnqueue(entityId, message, useLoadEntity).someOrElseZIO(stoppingRetryDelay *> enqueue(entityId, message, useLoadEntity))
 
-  private def tryEnqueue[E, A](entityId: String, message: Msg[E, A]): IO[Throwable, Option[Envelope[Msg]]] = {
+  private def tryEnqueue[E, A](
+    entityId: String,
+    message: Msg[E, A],
+    useLoadEntity: Boolean
+  ): IO[Throwable, Option[Envelope[Msg]]] = {
     val erased = message.asInstanceOf[Msg[Any, Any]]
     for {
       _        <- ZIO.unlessZIO(isOnLocalShards(entityId))(ZIO.fail(EntityNotManagedByThisPod(entityId)))
       current  <- entities.get
       envelope <- current.running.get(entityId) match {
-                    case Some(entity)                         => tryOffer(entity, erased)
-                    case None if !options.loadEntity(message) =>
+                    case Some(entity)                                          => tryOffer(entity, erased)
+                    case None if useLoadEntity && !options.loadEntity(message) =>
                       ZIO.fail(MessageDiscarded(recipientType.name, entityId))
-                    case None                                 => getOrStart(entityId).flatMap(tryOffer(_, erased))
+                    case None                                                  => getOrStart(entityId).flatMap(tryOffer(_, erased))
                   }
     } yield envelope
   }
@@ -187,7 +191,7 @@ final private[shard] class EntityManager[Msg[_, _]] private (
     */
   def ask[E, A](entityId: String, message: Msg[E, A]): IO[Throwable, Exit[Any, Any]] =
     ZIO.uninterruptibleMask(restore =>
-      tryEnqueue(entityId, message).flatMap {
+      tryEnqueue(entityId, message, useLoadEntity = true).flatMap {
         case Some(envelope) => restore(envelope.result.await).onInterrupt(envelope.cancel)
         case None           => restore(stoppingRetryDelay *> ask(entityId, message))
       }
@@ -195,21 +199,16 @@ final private[shard] class EntityManager[Msg[_, _]] private (
 
   /**
     * Deliver a message from another pod that replies with a single value, and return its reply.
-    * A message that expects no reply returns `ack` once it is in the mailbox.
     */
-  def receiveUnary(msg: BinaryMessage, ack: BinaryReply): Task[BinaryReply] =
+  def receiveUnary(msg: BinaryMessage): Task[BinaryReply] =
     Replies
       .decodeMessage(recipientType, msg.body)
-      .flatMap((decoded, codec) =>
-        if (msg.expectsReply) askEncoded(msg.entityId, decoded, msg.body, codec)
-        else enqueue(msg.entityId, decoded).as(ack)
-      )
+      .flatMap((decoded, codec) => deliverEncoded(msg.entityId, decoded, msg.body, codec, msg.expectsReply))
 
   /**
-    * Deliver a Streamed or Duplex message from another pod and give its result to `onExit` with the codec of its reply.
-    * A message that expects no reply returns `ack` once it is in the mailbox.
+    * Deliver a message of a stream call or `sendStream` from another pod as best effort, even if it is `AtLeastOnce`.
     */
-  def receiveStreamRequest[A](msg: BinaryMessage)(ack: => A)(onExit: (Exit[Any, Any], ReplyCodec) => A): Task[A] =
+  def receiveBestEffort[A](msg: BinaryMessage)(ack: => A)(onExit: (Exit[Any, Any], ReplyCodec) => A): Task[A] =
     Replies
       .decodeMessage(recipientType, msg.body)
       .flatMap((decoded, codec) =>
@@ -218,16 +217,23 @@ final private[shard] class EntityManager[Msg[_, _]] private (
       )
 
   /**
-    * Add a message that replies with a single value to its entity's mailbox, and return its reply encoded with `codec`.
-    * An `AtLeastOnce` message to an entity runs once for its key, stored as `body` (see `AtLeastOnceDelivery`).
-    * A topic runs it as best effort.
+    * Deliver a message that replies with a single value and return its encoded reply, running it once for its key if it is `AtLeastOnce`.
     */
-  def askEncoded[E, A](entityId: String, message: Msg[E, A], body: Array[Byte], codec: ReplyCodec): Task[BinaryReply] =
+  def deliverEncoded[E, A](
+    entityId: String,
+    message: Msg[E, A],
+    body: Array[Byte],
+    codec: ReplyCodec,
+    expectsReply: Boolean
+  ): Task[BinaryReply] =
     message match {
       case keyed: AtLeastOnce if recipientType.isInstanceOf[EntityType[?]] =>
         ZIO.unlessZIO(isOnLocalShards(entityId))(ZIO.fail(EntityNotManagedByThisPod(entityId))) *>
-          atLeastOnce.runOnce(entityId, keyed, body, codec)([E1, A1] => (m: Msg[E1, A1]) => ask(entityId, m))
-      case _                                                               => ask(entityId, message).map(Replies.encodeExit(_, codec))
+          atLeastOnce.deliver(entityId, keyed, body, codec, expectsReply)([E1, A1] =>
+            (message: Msg[E1, A1], useLoadEntity: Boolean) => enqueue(entityId, message, useLoadEntity).map(_.result.await)
+          )
+      case _ if expectsReply                                               => ask(entityId, message).map(Replies.encodeExit(_, codec))
+      case _                                                               => enqueue(entityId, message).as(Replies.ack)
     }
 
   /**
