@@ -60,7 +60,7 @@ object ShardingSpec extends ZIOSpecDefault {
             errors <- keyedErrors(MessageStorage.none)
           } yield assertTrue(
             errors == List.fill(2)(
-              List.fill(3)(
+              List.fill(4)(
                 EntityDefect(
                   "Message storage died with java.lang.RuntimeException: MessageStorage.none stores no messages, so it can't run AtLeastOnce messages"
                 )
@@ -75,7 +75,7 @@ object ShardingSpec extends ZIOSpecDefault {
           for {
             errors  <- keyedErrors(unreachableStorage)
             unsaved <- keyedErrors(unsavedResults)
-          } yield assertTrue(errors == List.fill(2)(List.fill(3)(unavailable) -> 0), unsaved == List.fill(2)(List.fill(2)(unavailable) -> 3))
+          } yield assertTrue(errors == List.fill(2)(List.fill(4)(unavailable) -> 0), unsaved == List.fill(2)(List.fill(2)(unavailable) -> 4))
         },
         test("A keyed sendDiscard that joins a run of its stored key fails if that run can't add the message to the mailbox") {
           for {
@@ -506,7 +506,6 @@ object ShardingSpec extends ZIOSpecDefault {
 
   val otherPod: PodAddress = PodAddress("other", 1)
 
-  // sends keyed messages with sendDiscard and send, locally and with simulated remote pods, and returns their errors and the counter's value
   private def keyedErrors(messageStorage: ULayer[MessageStorage]): IO[Any, List[(List[ClusterError], Int)]] =
     ZIO.foreach(List(false, true))(simulateRemotePods =>
       ZIO
@@ -515,9 +514,10 @@ object ShardingSpec extends ZIOSpecDefault {
             .flatMap(counter =>
               for {
                 discarded <- counter.sendDiscard("c1")(KeyedIncrement("b")).flip.option
+                streamed  <- counter.sendStream("c1")(ZStream(KeyedIncrementNoReply("c"))).flip.option
                 sent      <- ZIO.foreach(List(1, 2))(_ => counter.send("c1")(KeyedIncrement("a")).flip)
                 value     <- counter.send("c1")(GetCounter())
-              } yield (discarded.toList ++ sent, value)
+              } yield (discarded.toList ++ streamed ++ sent, value)
             )
         )
         .provide(
@@ -835,6 +835,8 @@ object ShardingSpec extends ZIOSpecDefault {
           entity  <- counter.send("k2")(KeyedIncrement("a"))
           failed  <- counter.send("k1")(KeyedFail("c")).flip
           refused <- counter.send("k1")(KeyedFail("c")).flip
+          _       <- counter.sendStream("k1")(ZStream(KeyedIncrementNoReply("a"), KeyedIncrementNoReply("e")))
+          _       <- counter.send("k1")(KeyedFail("e"))
           value   <- counter.send("k1")(GetCounter())
           died    <- counter.send("k3")(KeyedDie("d")).flip.repeatN(1)
         } yield assertTrue(
@@ -845,7 +847,7 @@ object ShardingSpec extends ZIOSpecDefault {
           entity == 1,
           failed == CounterError("failed at 3"),
           refused == failed,
-          value == 3,
+          value == 4,
           died == EntityDefect("Entity died with java.lang.Exception: boom")
         )
       },
@@ -928,18 +930,16 @@ object ShardingSpec extends ZIOSpecDefault {
           onParent <- typeCheck("enum M[E, A] extends AtMostOnce { case X(k: String) extends M[Nothing, Int] with AtLeastOnce(k) }")
         } yield assertTrue(both.left.exists(_.contains("DeliveryGuarantee")), onParent.left.exists(_.contains("DeliveryGuarantee")))
       },
-      test("An at-least-once message sent with a stream call, sendStream or to a topic runs as best effort") {
+      test("An at-least-once message sent with a stream call or to a topic runs as best effort") {
         for {
           counter     <- startCounter()
           _           <- Sharding.registerTopic(Incrementer)(IncrementerActor.behavior)
           broadcaster <- Sharding.broadcaster(Incrementer)
           streamed    <- counter.stream("c1")(KeyedStream("a")).runCollect.repeatN(1)
-          _           <- counter.sendStream("c2")(ZStream(KeyedIncrementNoReply("a"))).repeatN(1)
           _           <- broadcaster.broadcast("t1")(IncrementerMessage.KeyedIncrement("a")).repeatN(1)
           _           <- broadcaster.broadcastDiscard("t1")(IncrementerMessage.KeyedIncrement("a"))
-          value       <- counter.send("c2")(GetCounter())
           increments  <- broadcaster.broadcast("t1")(IncrementerMessage.GetIncrement())
-        } yield assertTrue(streamed == Chunk(2), value == 2, increments.values.toList == List(Exit.succeed(3)))
+        } yield assertTrue(streamed == Chunk(2), increments.values.toList == List(Exit.succeed(3)))
       },
       test("Defect stops the entity") {
         for {
@@ -1705,10 +1705,10 @@ object ShardingSpec extends ZIOSpecDefault {
                 (Clock.sleep(500.millis) *> sharding.register).forkDaemon *> sharding.unregister
               )
             )
-          _        <- worker.sendStream("w1")(ZStream(Complete(), Complete()) ++ moving ++ ZStream(Complete()))
+          _        <- worker.sendStream("w1")(ZStream(Complete(), DoneKeyed("moved")) ++ moving ++ ZStream(Complete()))
           _        <- worker.send("w1")(Ping()) // processed after the messages of the stream
           done     <- state.completed.get
-        } yield assertTrue(done == 5) // 2 messages processed before the move, then the 3 messages
+        } yield assertTrue(done == 4) // 2 messages processed before the move, then the 2 messages without a stored key
       } @@ TestAspect.tag(inProcess),
       test("Entity is restarted after one of its finalizers died") {
         for {
@@ -2170,6 +2170,7 @@ object WorkerActor {
     // counts as completed right away
     case CompleteNow()           extends WorkerMessage[Nothing, Unit]
     case CompleteNowOnce()       extends WorkerMessage[Nothing, Unit] with AtMostOnce
+    case DoneKeyed(key: String)  extends WorkerMessage[Nothing, Unit] with AtLeastOnce(key)
     // counts as running until the test opens the gate, then counts as completed
     case Gated()                 extends WorkerMessage[Nothing, Unit] with Uninterruptible
     case GatedOnce()             extends WorkerMessage[Nothing, Unit] with AtMostOnce
@@ -2243,6 +2244,7 @@ object WorkerActor {
           case GatedStream()                     => ZIO.succeed(Streamed(ZStream.fromZIO(running(state.gate.await).as(instance))))
           case Complete()                        => Clock.sleep(10.millis) *> state.completed.update(_ + 1)
           case CompleteNow() | CompleteNowOnce() => state.completed.update(_ + 1)
+          case DoneKeyed(_)                      => state.completed.update(_ + 1)
           case Gated() | GatedOnce()             => running(state.gate.await) *> state.completed.update(_ + 1)
           case GatedKeyed(_)                     => running(state.gate.await) *> state.completed.updateAndGet(_ + 1)
           case Instance()                        => ZIO.succeed(instance)

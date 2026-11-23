@@ -206,7 +206,7 @@ final private[shard] class EntityManager[Msg[_, _]] private (
       .flatMap((decoded, codec) => deliverEncoded(msg.entityId, decoded, msg.body, codec, msg.expectsReply))
 
   /**
-    * Deliver a message of a stream call or `sendStream` from another pod as best effort, even if it is `AtLeastOnce`.
+    * Deliver the request of a stream call from another pod as best effort, even if it is `AtLeastOnce`.
     */
   def receiveBestEffort[A](msg: BinaryMessage)(ack: => A)(onExit: (Exit[Any, Any], ReplyCodec) => A): Task[A] =
     Replies

@@ -308,9 +308,7 @@ class Sharding private (
   private[shard] def sendStreamToLocalEntity(messages: ZStream[Any, Throwable, BinaryMessage]): Task[BinaryReply] =
     Streams.run(
       messages,
-      ZSink.foldZIO(Replies.ack)(_.isInstanceOf[BinaryReply.Success])((_, msg) =>
-        receive(msg)(identity)(_.receiveBestEffort(msg)(Replies.ack)(Replies.encodeExit))
-      )
+      ZSink.foldZIO(Replies.ack)(_.isInstanceOf[BinaryReply.Success])((_, msg) => sendToLocalEntity(msg))
     )
 
   /**
@@ -494,18 +492,7 @@ class Sharding private (
   ): IO[Any, Unit] =
     if (isLocal(pod))
       // an empty stream never looks up the entity type, like on a remote pod
-      Streams.run(
-        messages.mapChunksZIO(chunk =>
-          ZIO
-            .when(chunk.nonEmpty)(
-              entityManager(entityType, entityId)
-                .flatMap(manager => ZIO.foreachDiscard(chunk)(manager.enqueue(entityId, _)))
-                .catchAll(fromTransport)
-            )
-            .as(Chunk.empty)
-        ),
-        ZSink.drain
-      )
+      Streams.run(messages.tapChunks(chunk => ZIO.foreachDiscard(chunk)(deliver(entityType, entityId, pod, _, expectsReply = false))), ZSink.drain)
     else
       Promise.make[Any, Nothing].flatMap { inputFailure =>
         val failIfInputFailed = ZIO.whenZIODiscard(inputFailure.isDone)(inputFailure.await)
