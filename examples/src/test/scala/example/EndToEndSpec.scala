@@ -17,9 +17,16 @@ import zio.test.TestAspect.{sequential, withLiveClock}
 
 import shard._
 import shard.errors.SendTimeout
-import shard.interfaces.{MessageStorage, PodsHealth}
+import shard.interfaces.PodsHealth
+import shard.javaSerialization.given
 
 object EndToEndSpec extends ZIOSpecDefault {
+
+  enum TallyMessage[E, A] {
+    case Add(txId: String) extends TallyMessage[Nothing, Int] with AtLeastOnce(txId)
+  }
+
+  object Tally extends EntityType[TallyMessage]("tally")
 
   val shardManagerServer: ZLayer[ShardManager & ManagerConfig & GrpcConfig, Throwable, Unit] =
     ZLayer.scoped(ZIO.serviceWithZIO[ManagerConfig](config => Server.run.forkScoped *> awaitPort(config.apiPort)))
@@ -85,6 +92,27 @@ object EndToEndSpec extends ZIOSpecDefault {
           assertTrue(timeout == SendTimeout(Guild.name, "guild1")) &&
           assert(res)(hasSize(equalTo(5)))
       },
+      test("Run a keyed message once with its result stored in Redis, and give a resend that result") {
+        for {
+          _     <- Sharding.registerEntity(Tally)(_ =>
+                     Ref
+                       .make(0)
+                       .map(tally =>
+                         new Tally.Handler {
+                           def handle[E, A](message: TallyMessage[E, A]): IO[E, A] =
+                             message match {
+                               case TallyMessage.Add(_) => tally.updateAndGet(_ + 1)
+                             }
+                         }
+                       )
+                   )
+          _     <- Sharding.registerScoped
+          tally <- Sharding.messenger(Tally)
+          first <- tally.send("tally1")(TallyMessage.Add("tx1"))
+          again <- tally.send("tally1")(TallyMessage.Add("tx1"))
+          next  <- tally.send("tally1")(TallyMessage.Add("tx2"))
+        } yield assertTrue(first == 1, again == 1, next == 2)
+      },
       test("Fail the Shard Manager client layer on an invalid host") {
         ZIO
           .scoped(ShardManagerClient.live.build)
@@ -145,7 +173,7 @@ object EndToEndSpec extends ZIOSpecDefault {
       GrpcPods.live,
       ShardManagerClient.live,
       StorageRedis.live,
-      MessageStorage.none,
+      MessageStorageRedis.live,
       ShardManager.live,
       PodsHealth.noop,
       GrpcShardingService.live,

@@ -65,7 +65,7 @@ Shard only takes care of starting entities on the right pods as well as the comm
 
 There are 5 pluggable parts that can be implemented with the technology of your choice.
 - The `Storage` trait defines where shard assignments will be stored. Shard provides an implementation using **Redis**.
-- The `MessageStorage` trait defines where `AtLeastOnce` messages and their results will be stored. Shard provides an implementation in memory for tests.
+- The `MessageStorage` trait defines where `AtLeastOnce` messages and their results will be stored. Shard provides an implementation using **Redis**.
 - The `Pods` trait defines how to communicate with remote pods. Shard provides an implementation using **gRPC** as the protocol.
 - The `MessageCodec[Msg]` type class defines how to encode and decode messages of a given type. Shard provides backends using **Kryo** (reflective, no derivation) and **Proteus** (macro-derived, protobuf wire format).
 - The `PodsHealth` trait defines how to check if a pod is healthy or not. Shard provides an implementation using the **k8s API**.
