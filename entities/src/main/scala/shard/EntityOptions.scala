@@ -1,6 +1,6 @@
 package shard
 
-import zio.{durationInt, Duration}
+import zio.{durationInt, Duration, Schedule}
 
 /**
   * Options for an entity or topic type.
@@ -16,6 +16,8 @@ import zio.{durationInt, Duration}
   *                  gets it (default: 24 hours)
   * @param rescanInterval how often the pod looks for the `AtLeastOnce` messages of its shards that are stored without a result
   *                       and aren't running, to run them (default: 10 seconds)
+  * @param retrySchedule decides, after each attempt of an `AtLeastOnce` message that dies, whether to run it again and
+  *                      after which delay, until it becomes a dead letter (default: 5 attempts, with exponential backoff from 200 milliseconds)
   */
 final case class EntityOptions[Msg[_, _]](
   maxIdleTime: Option[Duration] = None,
@@ -24,7 +26,8 @@ final case class EntityOptions[Msg[_, _]](
   loadEntity: [E, A] => Msg[E, A] => Boolean = [E, A] => (_: Msg[E, A]) => true,
   interceptor: EntityInterceptor[Msg] = EntityInterceptor.none,
   retention: Duration = 24.hours,
-  rescanInterval: Duration = 10.seconds
+  rescanInterval: Duration = 10.seconds,
+  retrySchedule: Schedule[Any, Any, Any] = Schedule.exponential(200.millis) && Schedule.recurs(4)
 )
 
 object EntityOptions {

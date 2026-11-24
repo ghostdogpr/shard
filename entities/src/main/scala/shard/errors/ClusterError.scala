@@ -54,6 +54,12 @@ final case class StorageUnavailable(entityType: String, entityId: String)
   extends ClusterError(s"Message storage is unavailable for a message to $entityType $entityId")
 
 /**
+  * An `AtLeastOnce` message became a dead letter, so it won't run again: its sends with the same key get this error.
+  */
+final case class DeadLettered(entityType: String, entityId: String, reason: String)
+  extends ClusterError(s"Message to $entityType $entityId became a dead letter: $reason")
+
+/**
   * The entity was not running and `loadEntity` rejected the message.
   */
 final case class MessageDiscarded(entityType: String, entityId: String)

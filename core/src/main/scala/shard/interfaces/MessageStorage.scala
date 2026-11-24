@@ -20,7 +20,8 @@ trait MessageStorage {
   def store(role: Role, key: Key, body: Array[Byte]): Task[Stored]
 
   /**
-    * Save the result of a message unless its key has one, and return the result kept under its key until `retention` has passed.
+    * Save the result of a message unless its key has one, and return the result kept under its key until `retention` has passed,
+    * or with no expiry for a dead letter.
     */
   def saveResult(role: Role, key: Key, result: Result, retention: Duration): Task[Result]
 
@@ -43,9 +44,14 @@ object MessageStorage {
   final case class Key(entityType: String, shardId: ShardId, entityId: String, deliveryKey: String)
 
   /**
-    * The result of a message, encoded with the codecs of the message: the reply that the sends of its key get during its retention.
+    * The outcome of a message that won't run, with the reason.
     */
-  type Result = BinaryReply.Success | BinaryReply.Failure
+  final case class DeadLetter(reason: String)
+
+  /**
+    * The result of a message, encoded with the codecs of the message, or a dead letter: what the sends of its key get.
+    */
+  type Result = BinaryReply.Success | BinaryReply.Failure | DeadLetter
 
   /**
     * What `store` finds under a key: nothing, so the message was stored now, a message that has no result yet, or its result.
@@ -92,7 +98,11 @@ object MessageStorage {
               map.get((role, key)).filter(isLive(now)) match {
                 case Some(Completed(kept, _)) => (kept, map)
                 case _                        =>
-                  (result, map.updated((role, key), Completed(result, now + retention.toMillis.min(Long.MaxValue - now))))
+                  val expiresAt = result match {
+                    case _: DeadLetter => Long.MaxValue
+                    case _             => now + retention.toMillis.min(Long.MaxValue - now)
+                  }
+                  (result, map.updated((role, key), Completed(result, expiresAt)))
               }
             )
           )

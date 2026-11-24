@@ -1,13 +1,13 @@
 package shard.internal
 
-import zio.{Duration, Exit, IO, Promise, Ref, Task, UIO, ZIO}
+import zio.{Exit, IO, Promise, Ref, Task, UIO, ZIO}
 import zio.stream.ZStream
 
-import shard.{AtLeastOnce, RecipientType, Role, ShardId}
+import shard.{AtLeastOnce, EntityOptions, RecipientType, Role, ShardId}
 import shard.errors.{EntityNotManagedByThisPod, MailboxFull, MessageDiscarded}
 import shard.interfaces.MessageCodec.ReplyCodec
 import shard.interfaces.MessageStorage
-import shard.interfaces.MessageStorage.{Key, Result, Stored}
+import shard.interfaces.MessageStorage.{DeadLetter, Key, Result, Stored}
 import shard.interfaces.Pods.BinaryReply
 import shard.interfaces.Pods.BinaryReply.DeliveryError
 
@@ -18,14 +18,14 @@ final private[shard] class AtLeastOnceDelivery[Msg[_, _]] private (
   recipientType: RecipientType[Msg],
   role: Role,
   storage: MessageStorage,
-  retention: Duration,
+  options: EntityOptions[Msg],
   shardId: String => ShardId,
   isOwner: String => UIO[Boolean],
   inProgress: Ref[Map[Key, AtLeastOnceDelivery.Run]]
 ) {
-  import AtLeastOnceDelivery.{Admission, NoLongerStored, Run, RunError}
+  import AtLeastOnceDelivery.{Admission, Attempt, NoLongerStored, Run, RunError}
 
-  type Enqueue = [E, A] => (entityId: String, message: Msg[E, A], isNew: Boolean) => Task[UIO[Exit[Any, Any]]]
+  type Enqueue = [E, A] => (entityId: String, message: Msg[E, A], isNew: Boolean) => Task[UIO[Attempt]]
 
   /**
     * Run a message once for its key, and return the reply for that key, or `Replies.ack` once it is in the mailbox.
@@ -58,9 +58,10 @@ final private[shard] class AtLeastOnceDelivery[Msg[_, _]] private (
           }
           .catchAllCause(cause =>
             cause.failureOption match {
-              // the shard left this pod meanwhile, and its next owner runs the message
-              case Some(_: EntityNotManagedByThisPod) | Some(NoLongerStored) => ZIO.unit
-              case _                                                         =>
+              // the shard left this pod meanwhile, and its next owner runs the message, or it is a dead letter
+              case Some(_: EntityNotManagedByThisPod) | Some(NoLongerStored) | Some(BinaryReply.Defect(_, Some(DeliveryError.DeadLettered))) =>
+                ZIO.unit
+              case _                                                                                                                         =>
                 ZIO.logWarningCause(s"Failed to recover message ${key.deliveryKey} of ${key.entityType} ${key.entityId}", cause)
             }
           )
@@ -101,19 +102,60 @@ final private[shard] class AtLeastOnceDelivery[Msg[_, _]] private (
           case _: MailboxFull | _: MessageDiscarded | NoLongerStored => callStorage(storage.remove(role, key))
         }
       case Stored.Pending(stored) =>
-        Replies.decodeMessage(recipientType, stored).flatMap((message, codec) => run(key, message, codec, isNew = false, enqueue))
-      case Stored.Done(result)    => ZIO.succeed(ZIO.succeed(result))
+        Replies
+          .decodeMessage(recipientType, stored)
+          .foldZIO(
+            error => save(key, DeadLetter(error.message)).map(ZIO.succeed(_)),
+            (message, codec) => run(key, message, codec, isNew = false, enqueue)
+          )
+      case Stored.Done(result)    => outcome(result).map(ZIO.succeed(_))
     }
 
-  private def run[E, A](key: Key, message: Msg[E, A], codec: ReplyCodec, isNew: Boolean, enqueue: Enqueue): IO[RunError, IO[RunError, BinaryReply]] =
-    enqueue(key.entityId, message, isNew).map(saveResult(key, codec, _))
+  private def run[E, A](
+    key: Key,
+    message: Msg[E, A],
+    codec: ReplyCodec,
+    isNew: Boolean,
+    enqueue: Enqueue
+  ): IO[RunError, IO[RunError, BinaryReply]] =
+    options.retrySchedule.driver.flatMap { retries =>
+      def queue(isNew: Boolean): IO[RunError, IO[RunError, BinaryReply]] =
+        enqueue(key.entityId, message, isNew).map(_.flatMap(complete))
 
-  private def saveResult(key: Key, codec: ReplyCodec, result: UIO[Exit[Any, Any]]): IO[BinaryReply.Defect, BinaryReply] =
-    result.flatMap { exit =>
-      Replies.encodeExit(exit, codec) match {
-        case result: Result => callStorage(storage.saveResult(role, key, result, retention))
-        case reply          => ZIO.succeed(reply)
-      }
+      // cut short by a rebalance or a shutdown: the message stays pending
+      def whileOwner(otherwise: BinaryReply)(next: => IO[RunError, BinaryReply]): IO[RunError, BinaryReply] =
+        isOwner(key.entityId).flatMap(owner => if (owner) next else ZIO.succeed(otherwise))
+
+      def complete(attempt: Attempt): IO[RunError, BinaryReply] =
+        attempt match {
+          case Attempt.Ran(exit)        =>
+            Replies.encodeExit(exit, codec) match {
+              case result: (BinaryReply.Success | BinaryReply.Failure) => save(key, result)
+              case BinaryReply.SerializationError(reason)              => save(key, DeadLetter(reason))
+              case defect: BinaryReply.Defect                          =>
+                whileOwner(defect)(
+                  retries
+                    .next(())
+                    .foldZIO(_ => save(key, DeadLetter(s"Ran out of attempts: ${defect.message}")), _ => queue(isNew = false).flatten)
+                )
+              case other                                               => ZIO.succeed(other)
+            }
+          case Attempt.Skipped          =>
+            whileOwner(BinaryReply.Interrupted)(queue(isNew = false).flatten)
+          case Attempt.NotStarted(exit) => ZIO.succeed(Replies.encodeExit(exit, codec))
+        }
+
+      queue(isNew)
+    }
+
+  private def save(key: Key, result: Result): IO[BinaryReply.Defect, BinaryReply] =
+    callStorage(storage.saveResult(role, key, result, options.retention)).flatMap(outcome)
+
+  // a dead letter fails, so that it also fails the admission of a sendDiscard of its key
+  private def outcome(result: Result): IO[BinaryReply.Defect, BinaryReply] =
+    result match {
+      case DeadLetter(reason)  => Exit.fail(BinaryReply.Defect(reason, Some(DeliveryError.DeadLettered)))
+      case result: BinaryReply => Exit.succeed(result)
     }
 
   private def callStorage[A](effect: => Task[A]): IO[BinaryReply.Defect, A] =
@@ -144,15 +186,21 @@ private[shard] object AtLeastOnceDelivery {
     case Joined(run: Run)
   }
 
+  enum Attempt {
+    case Ran(exit: Exit[Any, Any])
+    case Skipped
+    case NotStarted(exit: Exit[Any, Any])
+  }
+
   def make[Msg[_, _]](
     recipientType: RecipientType[Msg],
     role: Role,
     storage: MessageStorage,
-    retention: Duration,
+    options: EntityOptions[Msg],
     shardId: String => ShardId,
     isOwner: String => UIO[Boolean]
   ): UIO[AtLeastOnceDelivery[Msg]] =
     Ref
       .make(Map.empty[Key, Run])
-      .map(new AtLeastOnceDelivery(recipientType, role, storage, retention, shardId, isOwner, _))
+      .map(new AtLeastOnceDelivery(recipientType, role, storage, options, shardId, isOwner, _))
 }

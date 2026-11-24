@@ -70,7 +70,7 @@ trait MessageStorage {
 }
 ```
 - `store` stores a message unless its key holds one, and returns what was under the key: `New` if the message was stored now, `Pending` with the stored message if it has no result yet, or `Done` with its result. A `Key` is the delivery key of a message with its entity type, entity ID and the shard of its entity.
-- `saveResult` saves the result of a message, the `BinaryReply.Success` or `BinaryReply.Failure` that it replied, unless its key already has one, keeps it for `retention`, and returns the result kept under the key. After that, the key is free again.
+- `saveResult` saves the result of a message, unless its key already has one, and returns the result kept under the key. A result is the `BinaryReply.Success` or `BinaryReply.Failure` that the message replied, kept for `retention`, after which the key is free again, or a `DeadLetter` with the reason the message won't run, kept with no expiry.
 - `remove` removes a stored message that has no result, when it was rejected before running (e.g. its mailbox was full).
 - `pending` streams the stored messages of an entity type's shards that have no result, with their keys. The pod that owns these shards calls it to find the messages to run (see [At least once](delivery-guarantees.md#at-least-once-atleastonce)). The other methods are called while the stream is open, from the same pod and concurrently, so the stream must not hold a resource that they need.
 

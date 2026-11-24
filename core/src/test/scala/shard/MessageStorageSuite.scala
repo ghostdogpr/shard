@@ -6,7 +6,7 @@ import zio.{durationInt, Clock, Duration, ZIO}
 import zio.test._
 
 import shard.interfaces.MessageStorage
-import shard.interfaces.MessageStorage.{Key, Result, Stored}
+import shard.interfaces.MessageStorage.{DeadLetter, Key, Result, Stored}
 import shard.interfaces.Pods.BinaryReply
 
 /**
@@ -34,6 +34,7 @@ object MessageStorageSuite {
       case Stored.Pending(body)                   => s"pending ${String(body, UTF_8)}"
       case Stored.Done(BinaryReply.Success(body)) => s"success ${String(body, UTF_8)}"
       case Stored.Done(BinaryReply.Failure(body)) => s"failure ${String(body, UTF_8)}"
+      case Stored.Done(DeadLetter(reason))        => s"dead letter $reason"
     }
 
   val tests: List[Spec[MessageStorage, Throwable]] =
@@ -72,6 +73,26 @@ object MessageStorageSuite {
           again <- store(key, "d")
         } yield assertTrue(kept == "success value", again == "pending c")
       },
+      test("a dead letter is kept with no expiry, and like a result, only the first outcome is kept") {
+        val deadLetter = Key("type", 1, "id", "dead letter")
+        val done       = Key("type", 1, "id", "done before dead letter")
+        for {
+          _      <- store(deadLetter, "a")
+          saved  <- saveResult(deadLetter, DeadLetter("reason"), retention = 1.milli)
+          kept   <- saveResult(deadLetter, success("value"))
+          _      <- remove(deadLetter)
+          _      <- Clock.sleep(100.millis)
+          stored <- store(deadLetter, "b")
+          _      <- store(done, "a")
+          _      <- saveResult(done, success("value"))
+          result <- saveResult(done, DeadLetter("reason"))
+        } yield assertTrue(
+          saved == "dead letter reason",
+          kept == "dead letter reason",
+          stored == "dead letter reason",
+          result == "success value"
+        )
+      },
       test("removing a message frees its key, unless it has a result") {
         val removed = Key("type", 1, "id", "removed")
         val done    = Key("type", 1, "id", "done")
@@ -90,10 +111,12 @@ object MessageStorageSuite {
       test("pending streams the messages of an entity type's shards that have no result") {
         def key(shardId: ShardId, deliveryKey: String) = Key("pending-type", shardId, "id", deliveryKey)
         for {
-          _       <- ZIO.foreachDiscard(List(key(1, "a"), key(2, "b"), key(3, "other shard"), key(1, "done"), key(1, "removed")))(key =>
-                       store(key, key.deliveryKey)
-                     )
+          _       <-
+            ZIO.foreachDiscard(List(key(1, "a"), key(2, "b"), key(3, "other shard"), key(1, "done"), key(1, "dead letter"), key(1, "removed")))(key =>
+              store(key, key.deliveryKey)
+            )
           _       <- saveResult(key(1, "done"), success("value"))
+          _       <- saveResult(key(1, "dead letter"), DeadLetter("reason"))
           _       <- remove(key(1, "removed"))
           _       <- store(Key("other", 1, "id", "a"), "c")
           _       <- ZIO.serviceWithZIO[MessageStorage](_.store(Role("other"), key(1, "other role"), "d".getBytes(UTF_8)))

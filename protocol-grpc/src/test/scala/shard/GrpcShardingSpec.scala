@@ -201,20 +201,22 @@ object GrpcShardingSpec extends ZIOSpecDefault {
               late.isFailure
             )
           },
-          test("A StorageUnavailable reply reaches a pod of an earlier version as a Defect, and the reverse") {
-            val reply   = BinaryReply.Defect("unavailable", Some(BinaryReply.DeliveryError.StorageUnavailable))
-            val bytes   = summon[ProtobufCodec[SendResponse]].encode(SendResponse(reply))
-            val decoded = summon[ProtobufCodec[SendResponse]].decode(bytes).reply
-            val earlier = summon[ProtobufCodec[EarlierVersion.SendResponse]].decode(bytes)
+          test("A StorageUnavailable or DeadLettered reply reaches a pod of an earlier version as a Defect, and the reverse") {
+            val codec   = ReplyCodec(Codec.nothing, Codec.unit, Codec.nothing, Codec.nothing)
+            val sent    = List(
+              BinaryReply.DeliveryError.StorageUnavailable -> StorageUnavailable(Worker.name, "w1"),
+              BinaryReply.DeliveryError.DeadLettered       -> DeadLettered(Worker.name, "w1", "reason")
+            ).map { (error, expected) =>
+              val bytes   = summon[ProtobufCodec[SendResponse]].encode(SendResponse(BinaryReply.Defect("reason", Some(error))))
+              val decoded = summon[ProtobufCodec[SendResponse]].decode(bytes).reply
+              val earlier = summon[ProtobufCodec[EarlierVersion.SendResponse]].decode(bytes)
+              Replies.decodeReply(decoded, codec, Worker.name, "w1") == Exit.fail(expected) &&
+                earlier == EarlierVersion.SendResponse(EarlierVersion.Reply.Defect("reason"))
+            }
             val fromOld = summon[ProtobufCodec[SendResponse]]
               .decode(summon[ProtobufCodec[EarlierVersion.SendResponse]].encode(EarlierVersion.SendResponse(EarlierVersion.Reply.Defect("boom"))))
               .reply
-            val codec   = ReplyCodec(Codec.nothing, Codec.unit, Codec.nothing, Codec.nothing)
-            assertTrue(
-              Replies.decodeReply(decoded, codec, Worker.name, "w1") == Exit.fail(StorageUnavailable(Worker.name, "w1")),
-              earlier == EarlierVersion.SendResponse(EarlierVersion.Reply.Defect("unavailable")),
-              fromOld == BinaryReply.Defect("boom", None)
-            )
+            assertTrue(sent == List(true, true), fromOld == BinaryReply.Defect("boom", None))
           }
         )
       )

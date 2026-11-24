@@ -156,6 +156,7 @@ object Pods {
         * Message storage can't be reached
         */
       case StorageUnavailable
+      case DeadLettered
     }
   }
 }
