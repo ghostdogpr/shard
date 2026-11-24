@@ -56,7 +56,8 @@ final private[shard] class AtLeastOnceDelivery[Msg[_, _]] private (
           start(key)(storeAndRun(key, body, enqueue)(ZIO.fail(NoLongerStored)))
             .flatMap {
               case Admission.Started(run) => run.accepted.await
-              case Admission.Joined(_)    => ZIO.unit
+              // even when a send started it, which reports its failure
+              case Admission.Joined(run)  => run.accepted.await.ignore
             }
             .catchAllCause(cause =>
               cause.failureOption match {

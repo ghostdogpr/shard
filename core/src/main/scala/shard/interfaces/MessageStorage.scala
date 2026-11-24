@@ -2,6 +2,8 @@ package shard.interfaces
 
 import java.util.concurrent.TimeUnit
 
+import scala.collection.immutable.VectorMap
+
 import zio.{Clock, Duration, Ref, Task, ULayer, ZIO, ZLayer}
 import zio.stream.ZStream
 
@@ -31,7 +33,8 @@ trait MessageStorage {
   def remove(role: Role, key: Key): Task[Unit]
 
   /**
-    * Stream the stored messages of an entity type's shards that have no result. The other methods are called while the stream is open.
+    * Stream the stored messages of an entity type's shards that have no result, those of each entity in the order they were stored.
+    * The other methods are called while the stream is open.
     */
   def pending(role: Role, entityType: String, shards: Set[ShardId]): ZStream[Any, Throwable, (Key, Array[Byte])]
 
@@ -74,7 +77,8 @@ object MessageStorage {
     * A layer that stores messages in memory, which only suits a single pod, e.g. in tests.
     */
   val memory: ULayer[MessageStorage] =
-    ZLayer(Ref.make(Map.empty[(Role, Key), Entry]).map { entries =>
+    // in insertion order, which is the order of `pending`, since `store` only adds a key that is absent
+    ZLayer(Ref.make(VectorMap.empty[(Role, Key), Entry]).map { entries =>
       new MessageStorage {
         private val now = Clock.currentTime(TimeUnit.MILLISECONDS)
 

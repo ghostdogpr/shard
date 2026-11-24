@@ -112,6 +112,24 @@ object ShardingSpec extends ZIOSpecDefault {
                        } yield (reply, done))
           } yield assertTrue(result == (1, 1))
         },
+        test("The pending messages of an entity start in the order they were stored, even when a resend is starting the first one") {
+          val deliveryKeys = List("e", "b", "f", "a", "d", "c")
+          for {
+            memory  <- MessageStorage.memory.build.map(_.get)
+            held    <- Promise.make[Nothing, Unit]
+            scanned <- Promise.make[Nothing, Unit]
+            replies <- onPod(holdingStore(memory, storedKey(Counter, "r8", "e"), held, scanned))(for {
+                         counter <- startCounter(EntityOptions(rescanInterval = 200.millis))
+                         resend  <- counter.send("r8")(KeyedIncrement("e")).fork
+                         _       <- held.await
+                         _       <- ZIO.foreachDiscard(deliveryKeys)(key => storePending(memory, Counter, "r8")(KeyedIncrement(key)))
+                         first   <- resend.join
+                         _       <- (Clock.sleep(10.millis) *> counter.send("r8")(GetCounter())).repeatUntil(_ == deliveryKeys.size)
+                         // each resend gets the value of the counter when its message ran
+                         replies <- ZIO.foreach(deliveryKeys)(key => counter.send("r8")(KeyedIncrement(key)))
+                       } yield first :: replies)
+          } yield assertTrue(replies == List(1, 1, 2, 3, 4, 5, 6))
+        },
         test("An acknowledged keyed sendDiscard whose pod stops before running it is run by the next owner of its shard") {
           for {
             storage <- MessageStorage.memory.build.map(_.get)
@@ -864,6 +882,21 @@ object ShardingSpec extends ZIOSpecDefault {
       export memory.{deadLetters, pending, remove, saveResult}
       def store(role: Role, key: MessageStorage.Key, body: Array[Byte]): Task[MessageStorage.Stored] =
         entered.offer(()) *> permits.take *> memory.store(role, key, body)
+    }
+
+  // a storage whose store of a key completes `held`, then waits for a scan to read a message, and for 100 ms more so that the scan can go on
+  private def holdingStore(
+    memory: MessageStorage,
+    key: MessageStorage.Key,
+    held: Promise[Nothing, Unit],
+    scanned: Promise[Nothing, Unit]
+  ): MessageStorage =
+    new MessageStorage {
+      export memory.{deadLetters, remove, saveResult}
+      def store(role: Role, stored: MessageStorage.Key, body: Array[Byte]): Task[MessageStorage.Stored]                             =
+        ZIO.when(stored == key)(held.succeed(()) *> scanned.await *> Clock.sleep(100.millis)) *> memory.store(role, stored, body)
+      def pending(role: Role, entityType: String, shards: Set[ShardId]): ZStream[Any, Throwable, (MessageStorage.Key, Array[Byte])] =
+        memory.pending(role, entityType, shards).tap(_ => ZIO.whenZIODiscard(held.isDone)(scanned.succeed(())))
     }
 
   private def failingSaves(memory: MessageStorage, failures: Ref[Int]): MessageStorage =

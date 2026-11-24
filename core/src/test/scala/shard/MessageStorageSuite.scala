@@ -2,7 +2,7 @@ package shard
 
 import java.nio.charset.StandardCharsets.UTF_8
 
-import zio.{durationInt, Clock, Duration, ZIO}
+import zio.{durationInt, Chunk, Clock, Duration, ZIO}
 import zio.test._
 
 import shard.interfaces.MessageStorage
@@ -132,6 +132,24 @@ object MessageStorageSuite {
           deadLetters.map((key, reason, body) => (key, reason, String(body, UTF_8))).toSet ==
             Set((key(1, "dead letter"), "reason", "dead letter"), (key(3, "other shard"), "other reason", "other shard")),
           freed == "new"
+        )
+      },
+      test("pending streams the messages of each entity in the order they were stored, and a key stored again after a removal takes its new place") {
+        val deliveryKeys                               = List("e", "b", "f", "a", "d", "c")
+        def key(entityId: String, deliveryKey: String) = Key("ordered-type", 1, entityId, deliveryKey)
+        for {
+          _       <- ZIO.foreachDiscard(deliveryKeys)(deliveryKey =>
+                       ZIO.foreachDiscard(List("x", "y"))(entityId => store(key(entityId, deliveryKey), deliveryKey))
+                     )
+          _       <- remove(key("x", "b"))
+          _       <- store(key("x", "b"), "b")
+          _       <- saveResult(key("y", "f"), DeadLetter("reason"))
+          _       <- remove(key("y", "f"))
+          _       <- store(key("y", "f"), "f")
+          pending <- ZIO.serviceWithZIO[MessageStorage](_.pending(role, "ordered-type", Set(1)).runCollect)
+        } yield assertTrue(
+          pending.groupMap(_._1.entityId)(_._1.deliveryKey) ==
+            Map("x" -> Chunk("e", "f", "a", "d", "c", "b"), "y" -> Chunk("e", "b", "a", "d", "c", "f"))
         )
       }
     )
