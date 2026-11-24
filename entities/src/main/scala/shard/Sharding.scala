@@ -20,7 +20,7 @@ import shard.internal.EntityManager.StreamReply
   */
 class Sharding private (
   address: PodAddress,
-  config: Config,
+  private[shard] val config: Config,
   shardAssignments: Ref[Map[ShardId, PodAddress]],
   entityStates: Ref.Synchronized[Map[String, Option[EntityManager[?]]]], // None once its registration has closed
   singletons: Ref.Synchronized[List[(String, UIO[Nothing], Option[Fiber[Nothing, Nothing]])]],
@@ -30,7 +30,7 @@ class Sharding private (
   shardManager: ShardManagerClient,
   pods: Pods,
   storage: Storage,
-  messageStorage: MessageStorage,
+  private[shard] val messageStorage: MessageStorage,
   eventsHub: Hub[ShardingRegistrationEvent]
 ) { self =>
   def getShardId(recipientType: RecipientType[?], entityId: String): ShardId =

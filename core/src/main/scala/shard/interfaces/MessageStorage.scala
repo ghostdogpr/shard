@@ -21,12 +21,12 @@ trait MessageStorage {
 
   /**
     * Save the result of a message unless its key has one, and return the result kept under its key until `retention` has passed,
-    * or with no expiry for a dead letter.
+    * or with no expiry for a dead letter, which keeps the body of its stored message.
     */
   def saveResult(role: Role, key: Key, result: Result, retention: Duration): Task[Result]
 
   /**
-    * Remove a stored message that has no result, because it was rejected before running (e.g. its mailbox was full).
+    * Remove a stored message that has no result, because it was rejected before running (e.g. its mailbox was full), or a dead letter.
     */
   def remove(role: Role, key: Key): Task[Unit]
 
@@ -34,6 +34,11 @@ trait MessageStorage {
     * Stream the stored messages of an entity type's shards that have no result. The other methods are called while the stream is open.
     */
   def pending(role: Role, entityType: String, shards: Set[ShardId]): ZStream[Any, Throwable, (Key, Array[Byte])]
+
+  /**
+    * Stream the dead letters of an entity type's shards, with their reason and the body of their message.
+    */
+  def deadLetters(role: Role, entityType: String, shards: Set[ShardId]): ZStream[Any, Throwable, (Key, String, Array[Byte])]
 }
 
 object MessageStorage {
@@ -62,7 +67,7 @@ object MessageStorage {
     case Done(result: Result)
   }
 
-  final private case class Completed(result: Result, expiresAt: Long)
+  final private case class Completed(result: Result, expiresAt: Long, body: Array[Byte])
   private type Entry = Stored.Pending | Completed
 
   /**
@@ -75,8 +80,8 @@ object MessageStorage {
 
         private def isLive(now: Long)(entry: Entry): Boolean =
           entry match {
-            case Completed(_, expiresAt) => now < expiresAt
-            case _: Stored.Pending       => true
+            case Completed(_, expiresAt, _) => now < expiresAt
+            case _: Stored.Pending          => true
           }
 
         def store(role: Role, key: Key, body: Array[Byte]): Task[Stored] =
@@ -84,7 +89,7 @@ object MessageStorage {
             entries.modify { map =>
               map.get((role, key)).filter(isLive(now)) match {
                 case Some(pending: Stored.Pending) => (pending, map)
-                case Some(Completed(result, _))    => (Stored.Done(result), map)
+                case Some(Completed(result, _, _)) => (Stored.Done(result), map)
                 // the expired results are dropped here, so that they don't accumulate
                 case None                          =>
                   (Stored.New, map.filter((_, entry) => isLive(now)(entry)).updated((role, key), Stored.Pending(body)))
@@ -96,13 +101,15 @@ object MessageStorage {
           now.flatMap(now =>
             entries.modify(map =>
               map.get((role, key)).filter(isLive(now)) match {
-                case Some(Completed(kept, _)) => (kept, map)
-                case _                        =>
-                  val expiresAt = result match {
-                    case _: DeadLetter => Long.MaxValue
-                    case _             => now + retention.toMillis.min(Long.MaxValue - now)
+                case Some(Completed(kept, _, _)) => (kept, map)
+                case stored                      =>
+                  val completed = (result, stored) match {
+                    case (_: DeadLetter, Some(Stored.Pending(body))) => Completed(result, Long.MaxValue, body)
+                    case (_: DeadLetter, _)                          => Completed(result, Long.MaxValue, Array.emptyByteArray)
+                    case _                                           =>
+                      Completed(result, now + retention.toMillis.min(Long.MaxValue - now), Array.emptyByteArray)
                   }
-                  (result, map.updated((role, key), Completed(result, expiresAt)))
+                  (result, map.updated((role, key), completed))
               }
             )
           )
@@ -110,14 +117,20 @@ object MessageStorage {
         def remove(role: Role, key: Key): Task[Unit] =
           entries.update(map =>
             map.get((role, key)) match {
-              case Some(_: Stored.Pending) => map - ((role, key))
-              case _                       => map
+              case Some(_: Stored.Pending) | Some(Completed(_: DeadLetter, _, _)) => map - ((role, key))
+              case _                                                              => map
             }
           )
 
         def pending(role: Role, entityType: String, shards: Set[ShardId]): ZStream[Any, Throwable, (Key, Array[Byte])] =
           ZStream.fromIterableZIO(entries.get.map(_.collect {
             case ((`role`, key), Stored.Pending(body)) if key.entityType == entityType && shards.contains(key.shardId) => (key, body)
+          }))
+
+        def deadLetters(role: Role, entityType: String, shards: Set[ShardId]): ZStream[Any, Throwable, (Key, String, Array[Byte])] =
+          ZStream.fromIterableZIO(entries.get.map(_.collect {
+            case ((`role`, key), Completed(DeadLetter(reason), _, body)) if key.entityType == entityType && shards.contains(key.shardId) =>
+              (key, reason, body)
           }))
       }
     })
@@ -129,9 +142,10 @@ object MessageStorage {
     ZLayer.succeed(new MessageStorage {
       private val noStorage = ZIO.dieMessage("MessageStorage.none stores no messages, so it can't run AtLeastOnce messages")
 
-      def store(role: Role, key: Key, body: Array[Byte]): Task[Stored]                                               = noStorage
-      def saveResult(role: Role, key: Key, result: Result, retention: Duration): Task[Result]                        = noStorage
-      def remove(role: Role, key: Key): Task[Unit]                                                                   = noStorage
-      def pending(role: Role, entityType: String, shards: Set[ShardId]): ZStream[Any, Throwable, (Key, Array[Byte])] = ZStream.empty
+      def store(role: Role, key: Key, body: Array[Byte]): Task[Stored]                                                           = noStorage
+      def saveResult(role: Role, key: Key, result: Result, retention: Duration): Task[Result]                                    = noStorage
+      def remove(role: Role, key: Key): Task[Unit]                                                                               = noStorage
+      def pending(role: Role, entityType: String, shards: Set[ShardId]): ZStream[Any, Throwable, (Key, Array[Byte])]             = ZStream.empty
+      def deadLetters(role: Role, entityType: String, shards: Set[ShardId]): ZStream[Any, Throwable, (Key, String, Array[Byte])] = ZStream.empty
     })
 }

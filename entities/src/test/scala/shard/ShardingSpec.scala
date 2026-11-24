@@ -362,6 +362,66 @@ object ShardingSpec extends ZIOSpecDefault {
               decode.startsWith("Failed to decode a message") && encode.startsWith("Failed to encode a reply") && discarded == encode
             case _                                                                                                => false
           })
+        },
+        test("The dead letters of an entity type can be listed, and a retried one is run by the next scan with fresh attempts") {
+          for {
+            storage <- MessageStorage.memory.build.map(_.get)
+            result  <- onPod(storage)(for {
+                         state   <- startWorker(EntityOptions(retrySchedule = Schedule.recurs(1), rescanInterval = 200.millis))
+                         // two attempts, then the first attempt of the retry
+                         _       <- state.script.set(List.fill(3)(ZIO.die(new Exception("boom"))))
+                         worker  <- Sharding.messenger(Worker)
+                         error   <- worker.send("t6")(Scripted("a")).flip
+                         listed  <- DeadLetters.list(Worker).runCollect
+                         retried <- DeadLetters.retry(Worker, "t6", "a")
+                         _       <- state.attempts.changes.takeUntil(_.size == 4).runDrain
+                         reply   <- worker.send("t6")(Scripted("a"))
+                         again   <- worker.send("t6")(Scripted("a"))
+                         after   <- DeadLetters.list(Worker).runCollect
+                       } yield (error, listed, retried, reply, again, after))
+          } yield {
+            val reason = "Ran out of attempts: Entity died with java.lang.Exception: boom"
+            assertTrue(
+              result == (DeadLettered(Worker.name, "t6", reason), Chunk(DeadLetters.DeadLetter("t6", "a", reason)), true, 4, 4, Chunk.empty)
+            )
+          }
+        },
+        test("A drop removes a dead letter, and a retry or a drop of a key that has none returns false") {
+          for {
+            storage <- MessageStorage.memory.build.map(_.get)
+            result  <- onPod(storage)(for {
+                         _       <- startWorker()
+                         worker  <- Sharding.messenger(Worker)
+                         _       <- worker.send("t8")(Unencodable("a")).flip
+                         missing <- DeadLetters.retry(Worker, "t8", "other")
+                         dropped <- DeadLetters.drop(Worker, "t8", "a")
+                         again   <- DeadLetters.drop(Worker, "t8", "a")
+                         listed  <- DeadLetters.list(Worker).runCollect
+                       } yield (missing, dropped, again, listed))
+          } yield assertTrue(result == (false, true, false, Chunk.empty))
+        },
+        test("Each pod sets a gauge of the pending messages of its shards, and counts and logs each new dead letter") {
+          val pendingMessages = Metrics.pendingMessages.tagged("role", Role.default.name).tagged("type", Worker.name)
+          val deadLetters     = Metrics.deadLetters.tagged("role", Role.default.name).tagged("type", Worker.name)
+          for {
+            storage            <- MessageStorage.memory.build.map(_.get)
+            _                  <- ZIO.foreachDiscard(List("a", "b"))(key => storePending(storage, Worker, "t9")(GatedKeyed(key)))
+            before             <- deadLetters.value
+            result             <- onPod(storage)(for {
+                                    state  <- startWorker(EntityOptions(rescanInterval = 50.millis))
+                                    _      <- (Clock.sleep(10.millis) *> pendingMessages.value).repeatUntil(_.value == 2)
+                                    _      <- state.gate.succeed(())
+                                    _      <- (Clock.sleep(10.millis) *> pendingMessages.value).repeatUntil(_.value == 0)
+                                    worker <- Sharding.messenger(Worker)
+                                    _      <- worker.send("t9")(Unencodable("c")).flip
+                                    after  <- deadLetters.value
+                                    logs   <- ZTestLogger.logOutput
+                                  } yield (after.count - before.count, logs.filter(_.logLevel == LogLevel.Warning).map(_.message())))
+            (counted, warnings) = result
+          } yield assertTrue(
+            counted == 1,
+            warnings.count(_.startsWith("Message c of worker t9 became a dead letter: Failed to encode a reply")) == 1
+          )
         }
       ),
       suite("registered pods")(
@@ -789,24 +849,26 @@ object ShardingSpec extends ZIOSpecDefault {
     ZLayer.succeed(new MessageStorage {
       private val unreachable = ZIO.fail(new Exception("connection refused"))
 
-      def store(role: Role, key: MessageStorage.Key, body: Array[Byte]): Task[MessageStorage.Stored]                                       = unreachable
-      def saveResult(role: Role, key: MessageStorage.Key, result: MessageStorage.Result, retention: Duration): Task[MessageStorage.Result] =
+      def store(role: Role, key: MessageStorage.Key, body: Array[Byte]): Task[MessageStorage.Stored]                                            = unreachable
+      def saveResult(role: Role, key: MessageStorage.Key, result: MessageStorage.Result, retention: Duration): Task[MessageStorage.Result]      =
         unreachable
-      def remove(role: Role, key: MessageStorage.Key): Task[Unit]                                                                          = unreachable
-      def pending(role: Role, entityType: String, shards: Set[ShardId]): ZStream[Any, Throwable, (MessageStorage.Key, Array[Byte])]        =
+      def remove(role: Role, key: MessageStorage.Key): Task[Unit]                                                                               = unreachable
+      def pending(role: Role, entityType: String, shards: Set[ShardId]): ZStream[Any, Throwable, (MessageStorage.Key, Array[Byte])]             =
+        ZStream.fromZIO(unreachable)
+      def deadLetters(role: Role, entityType: String, shards: Set[ShardId]): ZStream[Any, Throwable, (MessageStorage.Key, String, Array[Byte])] =
         ZStream.fromZIO(unreachable)
     })
 
   private def gatedStore(memory: MessageStorage, entered: Queue[Unit], permits: Queue[Unit]): MessageStorage =
     new MessageStorage {
-      export memory.{pending, remove, saveResult}
+      export memory.{deadLetters, pending, remove, saveResult}
       def store(role: Role, key: MessageStorage.Key, body: Array[Byte]): Task[MessageStorage.Stored] =
         entered.offer(()) *> permits.take *> memory.store(role, key, body)
     }
 
   private def failingSaves(memory: MessageStorage, failures: Ref[Int]): MessageStorage =
     new MessageStorage {
-      export memory.{pending, remove, store}
+      export memory.{deadLetters, pending, remove, store}
       def saveResult(role: Role, key: MessageStorage.Key, result: MessageStorage.Result, retention: Duration): Task[MessageStorage.Result] =
         ZIO.ifZIO(failures.getAndUpdate(_ - 1).map(_ > 0))(
           ZIO.fail(new Exception("connection refused")),
@@ -817,7 +879,7 @@ object ShardingSpec extends ZIOSpecDefault {
   // a storage whose stores run `afterStore` after the underlying store, before they return
   private def heldStore(memory: MessageStorage, afterStore: UIO[Unit]): MessageStorage =
     new MessageStorage {
-      export memory.{pending, remove, saveResult}
+      export memory.{deadLetters, pending, remove, saveResult}
       def store(role: Role, key: MessageStorage.Key, body: Array[Byte]): Task[MessageStorage.Stored] =
         memory.store(role, key, body) <* afterStore
     }
@@ -831,7 +893,7 @@ object ShardingSpec extends ZIOSpecDefault {
     finished: Promise[Nothing, Unit]
   ): MessageStorage =
     new MessageStorage {
-      export storage.{remove, saveResult, store}
+      export storage.{deadLetters, remove, saveResult, store}
       def pending(role: Role, entityType: String, shards: Set[ShardId]): ZStream[Any, Throwable, (MessageStorage.Key, Array[Byte])] =
         storage.pending(role, entityType, shards).flatMap { row =>
           if (row._1 == key) ZStream.execute(read.succeed(()) *> resume.await) ++ ZStream.succeed(row) ++ ZStream.execute(finished.succeed(()))
@@ -841,7 +903,7 @@ object ShardingSpec extends ZIOSpecDefault {
 
   private def scanned(memory: MessageStorage, scans: Queue[Unit]): MessageStorage =
     new MessageStorage {
-      export memory.{remove, saveResult, store}
+      export memory.{deadLetters, remove, saveResult, store}
       def pending(role: Role, entityType: String, shards: Set[ShardId]): ZStream[Any, Throwable, (MessageStorage.Key, Array[Byte])] =
         memory.pending(role, entityType, shards) ++ ZStream.execute(scans.offer(()))
     }

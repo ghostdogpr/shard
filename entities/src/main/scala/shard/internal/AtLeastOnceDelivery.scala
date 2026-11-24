@@ -3,7 +3,7 @@ package shard.internal
 import zio.{Exit, IO, Promise, Ref, Task, UIO, ZIO}
 import zio.stream.ZStream
 
-import shard.{AtLeastOnce, EntityOptions, RecipientType, Role, ShardId}
+import shard.{AtLeastOnce, EntityOptions, Metrics, RecipientType, Role, ShardId}
 import shard.errors.{EntityNotManagedByThisPod, MailboxFull, MessageDiscarded}
 import shard.interfaces.MessageCodec.ReplyCodec
 import shard.interfaces.MessageStorage
@@ -45,28 +45,31 @@ final private[shard] class AtLeastOnceDelivery[Msg[_, _]] private (
   }
 
   /**
-    * Start the messages of these shards that are stored without a result and aren't running on this pod.
+    * Start the messages of these shards that are stored without a result and aren't running on this pod, and return how many are stored.
     */
-  def recover(shards: Set[ShardId])(enqueue: Enqueue): Task[Unit] =
-    ZStream.suspend(storage.pending(role, recipientType.name, shards)).runForeach { (key, body) =>
-      ZIO.whenZIODiscard(isOwner(key.entityId))(
-        // a key that is gone since the scan read it was rejected or completed meanwhile, so the scan removes it again instead of running it
-        start(key)(storeAndRun(key, body, enqueue)(ZIO.fail(NoLongerStored)))
-          .flatMap {
-            case Admission.Started(run) => run.accepted.await
-            case Admission.Joined(_)    => ZIO.unit
-          }
-          .catchAllCause(cause =>
-            cause.failureOption match {
-              // the shard left this pod meanwhile, and its next owner runs the message, or it is a dead letter
-              case Some(_: EntityNotManagedByThisPod) | Some(NoLongerStored) | Some(BinaryReply.Defect(_, Some(DeliveryError.DeadLettered))) =>
-                ZIO.unit
-              case _                                                                                                                         =>
-                ZIO.logWarningCause(s"Failed to recover message ${key.deliveryKey} of ${key.entityType} ${key.entityId}", cause)
+  def recover(shards: Set[ShardId])(enqueue: Enqueue): Task[Long] =
+    ZStream
+      .suspend(storage.pending(role, recipientType.name, shards))
+      .tap { (key, body) =>
+        ZIO.whenZIODiscard(isOwner(key.entityId))(
+          // a key that is gone since the scan read it was rejected or completed meanwhile, so the scan removes it again instead of running it
+          start(key)(storeAndRun(key, body, enqueue)(ZIO.fail(NoLongerStored)))
+            .flatMap {
+              case Admission.Started(run) => run.accepted.await
+              case Admission.Joined(_)    => ZIO.unit
             }
-          )
-      )
-    }
+            .catchAllCause(cause =>
+              cause.failureOption match {
+                // the shard left this pod meanwhile, and its next owner runs the message, or it is a dead letter
+                case Some(_: EntityNotManagedByThisPod) | Some(NoLongerStored) | Some(BinaryReply.Defect(_, Some(DeliveryError.DeadLettered))) =>
+                  ZIO.unit
+                case _                                                                                                                         =>
+                  ZIO.logWarningCause(s"Failed to recover message ${key.deliveryKey} of ${key.entityType} ${key.entityId}", cause)
+              }
+            )
+        )
+      }
+      .runCount
 
   private def start(key: Key)(admit: => IO[RunError, IO[RunError, BinaryReply]]): UIO[Admission] =
     (Promise.make[RunError, Unit] <*> Promise.make[RunError, BinaryReply]).flatMap { (accepted, result) =>
@@ -149,7 +152,14 @@ final private[shard] class AtLeastOnceDelivery[Msg[_, _]] private (
     }
 
   private def save(key: Key, result: Result): IO[BinaryReply.Defect, BinaryReply] =
-    callStorage(storage.saveResult(role, key, result, options.retention)).flatMap(outcome)
+    callStorage(storage.saveResult(role, key, result, options.retention))
+      .tap {
+        case deadLetter @ DeadLetter(reason) if deadLetter == result =>
+          Metrics.deadLetters.tagged("role", role.name).tagged("type", key.entityType).increment *>
+            ZIO.logWarning(s"Message ${key.deliveryKey} of ${key.entityType} ${key.entityId} became a dead letter: $reason")
+        case _                                                       => ZIO.unit
+      }
+      .flatMap(outcome)
 
   // a dead letter fails, so that it also fails the admission of a sendDiscard of its key
   private def outcome(result: Result): IO[BinaryReply.Defect, BinaryReply] =

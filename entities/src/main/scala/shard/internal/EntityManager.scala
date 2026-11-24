@@ -154,6 +154,8 @@ final private[shard] class EntityManager[Msg[_, _]] private (
 
   private val decrementGauge = FiberRef.currentTags.locally(registered.getOrDefault(FiberRef.currentTags))(gauge.decrement)
 
+  private val pendingGauge = Metrics.pendingMessages.tagged("role", config.role.name).tagged("type", recipientType.name)
+
   private val interrupted: Exit[Any, Any] = Exit.interrupt(FiberId.None)
 
   private val sequential = options.concurrency <= 1
@@ -182,9 +184,11 @@ final private[shard] class EntityManager[Msg[_, _]] private (
     */
   val startRescan: UIO[Unit] = {
     val scan = sharding.thisPodAssignments
-      .flatMap(shards => ZIO.whenDiscard(shards.nonEmpty)(atLeastOnce.recover(shards.toSet)(enqueueKeyed)))
-      .catchAllCause(ZIO.logWarningCause(s"Failed to recover the messages of ${recipientType.name}", _))
-    ZIO.whenDiscard(isEntityType)((scan *> Clock.sleep(options.rescanInterval)).forever.interruptible.forkIn(scope))
+      .flatMap(shards => if (shards.isEmpty) ZIO.succeed(0L) else atLeastOnce.recover(shards.toSet)(enqueueKeyed))
+      .foldCauseZIO(ZIO.logWarningCause(s"Failed to recover the messages of ${recipientType.name}", _), count => pendingGauge.set(count.toDouble))
+    ZIO.whenDiscard(isEntityType)(
+      (scan *> Clock.sleep(options.rescanInterval)).forever.interruptible.ensuring(pendingGauge.set(0)).forkIn(scope)
+    )
   }
 
   private def isOnLocalShards(entityId: String): UIO[Boolean] =

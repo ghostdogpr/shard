@@ -80,7 +80,6 @@ object MessageStorageSuite {
           _      <- store(deadLetter, "a")
           saved  <- saveResult(deadLetter, DeadLetter("reason"), retention = 1.milli)
           kept   <- saveResult(deadLetter, success("value"))
-          _      <- remove(deadLetter)
           _      <- Clock.sleep(100.millis)
           stored <- store(deadLetter, "b")
           _      <- store(done, "a")
@@ -108,20 +107,32 @@ object MessageStorageSuite {
           unknown <- store(Key("type", 1, "id", "unknown"), "a")
         } yield assertTrue(stored == "new", result == "success value", unknown == "success value")
       },
-      test("pending streams the messages of an entity type's shards that have no result") {
+      test("pending streams the messages of an entity type's shards that have no result, and deadLetters their dead letters") {
         def key(shardId: ShardId, deliveryKey: String) = Key("pending-type", shardId, "id", deliveryKey)
         for {
-          _       <-
+          _           <-
             ZIO.foreachDiscard(List(key(1, "a"), key(2, "b"), key(3, "other shard"), key(1, "done"), key(1, "dead letter"), key(1, "removed")))(key =>
               store(key, key.deliveryKey)
             )
-          _       <- saveResult(key(1, "done"), success("value"))
-          _       <- saveResult(key(1, "dead letter"), DeadLetter("reason"))
-          _       <- remove(key(1, "removed"))
-          _       <- store(Key("other", 1, "id", "a"), "c")
-          _       <- ZIO.serviceWithZIO[MessageStorage](_.store(Role("other"), key(1, "other role"), "d".getBytes(UTF_8)))
-          pending <- ZIO.serviceWithZIO[MessageStorage](_.pending(role, "pending-type", Set(1, 2)).runCollect)
-        } yield assertTrue(pending.map((key, body) => key -> String(body, UTF_8)).toSet == Set(key(1, "a") -> "a", key(2, "b") -> "b"))
+          _           <- saveResult(key(1, "done"), success("value"))
+          _           <- saveResult(key(1, "dead letter"), DeadLetter("reason"))
+          _           <- remove(key(1, "removed"))
+          _           <- store(Key("other", 1, "id", "a"), "c")
+          _           <- ZIO.serviceWithZIO[MessageStorage](_.store(Role("other"), key(1, "other role"), "d".getBytes(UTF_8)))
+          pending     <- ZIO.serviceWithZIO[MessageStorage](_.pending(role, "pending-type", Set(1, 2)).runCollect)
+          _           <- ZIO.foreachDiscard(List(key(3, "other shard"), Key("other", 1, "id", "a"), key(2, "b")))(saveResult(_, DeadLetter("other reason")))
+          _           <- ZIO.serviceWithZIO[MessageStorage](_.saveResult(Role("other"), key(1, "other role"), DeadLetter("reason"), 1.minute))
+          _           <- store(key(1, "removed"), "a")
+          _           <- saveResult(key(1, "removed"), DeadLetter("removed"))
+          _           <- remove(key(1, "removed"))
+          deadLetters <- ZIO.serviceWithZIO[MessageStorage](_.deadLetters(role, "pending-type", Set(1, 3)).runCollect)
+          freed       <- store(key(1, "removed"), "b")
+        } yield assertTrue(
+          pending.map((key, body) => key -> String(body, UTF_8)).toSet == Set(key(1, "a") -> "a", key(2, "b") -> "b"),
+          deadLetters.map((key, reason, body) => (key, reason, String(body, UTF_8))).toSet ==
+            Set((key(1, "dead letter"), "reason", "dead letter"), (key(3, "other shard"), "other reason", "other shard")),
+          freed == "new"
+        )
       }
     )
 }
