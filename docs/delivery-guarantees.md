@@ -31,11 +31,16 @@ enum AccountMessage[E, A] {
 ```
 
 - The pod hosting the entity stores the message in [message storage](customization.md#message-storage) before running it. Its first result, a reply or a typed error, is stored, and every `send` with the same key gets that result without running the message again.
-- A `send` with a key whose message is running waits for its result, so a message sent again after its connection dropped runs once. If its pod dies before its result is stored, or its result can't be stored, the message runs again when it is sent again.
+- A `send` with a key whose message is running waits for its result, so a message sent again after its connection dropped runs once.
+- The pod that owns the shard of an entity runs the stored messages of the entity that have no result, without waiting for them to be sent again. It looks for them when the entity type is registered, and then every `rescanInterval`, skipping those that are running. So a message whose pod died before its result was stored runs again on the next owner of its shard.
+- A rebalance or a shutdown lets running and queued messages finish, as for other messages, for up to `entityTerminationTimeout`. A message that doesn't finish in time stores no result, so it runs again on the next owner of its shard.
+- If its result can't be stored, the message fails with `StorageUnavailable` and stays stored, so its owner runs it again on its next scan, or when it is sent again.
+- A stored message that runs again, started by its owner or by a `send` of its key, is added to the mailbox even when it is full. It still counts toward `mailboxCapacity` for new messages.
+- If its entity fails to start, the message fails with `EntityDefect` and stays stored, and its owner runs it once the entity starts.
 - A key belongs to an entity: messages of any case sent to the same entity with the same key are one message, whatever their other fields. The stored result is decoded with the codecs of the case that is sent, so cases sharing a key need compatible reply and error types. Reusing a key for a different message is not supported.
 - A result is kept for the `retention` of the entity type (24 hours by default). After that, the key is free, and a `send` with it is a new message.
-- A defect (`EntityDefect`), an interruption (`EntityInterrupted`) or a reply that fails to be encoded stores no result, so a `send` with the same key runs the message again.
-- If message storage can't be reached, the message fails with `StorageUnavailable` at once, and Shard doesn't send it again.
+- A defect (`EntityDefect`), an interruption (`EntityInterrupted`) or a reply that fails to be encoded stores no result, so the message runs again on every scan of its owner, or when it is sent again.
+- If message storage can't be reached when the message is stored, the message fails with `StorageUnavailable` at once, and Shard doesn't send it again. If it was stored anyway, its owner still runs it.
 - Its sender never interrupts it: once stored, the message runs and finishes even if its sender gets `SendTimeout`.
 - `sendDiscard` works like a `send` that doesn't wait for the result: it returns once the message is in the entity's mailbox, and the message then runs in the background. If the key has a result, it returns at once, and if the key is running, it returns once that message is in the mailbox. If the entity rejects a new message before it is in the mailbox, for example with `MailboxFull`, the message isn't stored, so it can be sent again.
 - `loadEntity` only applies to new keys: a new message that it discards isn't stored, and as for other messages, `sendDiscard` succeeds and `send` fails with `MessageDiscarded`. `loadEntity` never discards a message with a key that is already stored.

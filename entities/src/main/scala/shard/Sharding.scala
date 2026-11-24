@@ -661,18 +661,21 @@ class Sharding private (
     for {
       env        <- ZIO.environment[R]
       makeHandler = (entityId: String) => ZIO.suspend(behavior(entityId)).provideSomeEnvironment[Scope](env ++ _).orDie
-      _          <- ZIO.acquireRelease(
-                      entityStates.modifyZIO(map =>
-                        if (map.get(recipientType.name).flatten.nonEmpty)
-                          ZIO.dieMessage(
-                            s"An entity or topic type named ${recipientType.name} is already registered, names must be unique"
-                          )
-                        else
-                          EntityManager
-                            .make(recipientType, makeHandler, self, messageStorage, config, options)
-                            .map(manager => (manager, map.updated(recipientType.name, Some(manager))))
-                      )
-                    )(manager => manager.close *> entityStates.update(_.updated(recipientType.name, None)))
+      _          <- ZIO
+                      .acquireRelease(
+                        entityStates.modifyZIO(map =>
+                          if (map.get(recipientType.name).flatten.nonEmpty)
+                            ZIO.dieMessage(
+                              s"An entity or topic type named ${recipientType.name} is already registered, names must be unique"
+                            )
+                          else
+                            EntityManager
+                              .make(recipientType, makeHandler, self, messageStorage, config, options)
+                              .map(manager => (manager, map.updated(recipientType.name, Some(manager))))
+                        )
+                      )(manager => manager.close *> entityStates.update(_.updated(recipientType.name, None)))
+                      // once the manager is visible, so that the entities it starts can reach their own type
+                      .flatMap(_.startRescan)
     } yield ()
 
   def terminateLocalEntity(entityType: EntityType[?], entityId: String): UIO[Unit] =

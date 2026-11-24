@@ -14,6 +14,8 @@ import zio.{durationInt, Duration}
   * @param interceptor wraps the entities of this type and the processing of their messages (see `EntityInterceptor`)
   * @param retention how long the result of an `AtLeastOnce` message is kept, during which a `send` with the same key
   *                  gets it (default: 24 hours)
+  * @param rescanInterval how often the pod looks for the `AtLeastOnce` messages of its shards that are stored without a result
+  *                       and aren't running, to run them (default: 10 seconds)
   */
 final case class EntityOptions[Msg[_, _]](
   maxIdleTime: Option[Duration] = None,
@@ -21,7 +23,8 @@ final case class EntityOptions[Msg[_, _]](
   mailboxCapacity: Int = EntityOptions.DefaultMailboxCapacity,
   loadEntity: [E, A] => Msg[E, A] => Boolean = [E, A] => (_: Msg[E, A]) => true,
   interceptor: EntityInterceptor[Msg] = EntityInterceptor.none,
-  retention: Duration = 24.hours
+  retention: Duration = 24.hours,
+  rescanInterval: Duration = 10.seconds
 )
 
 object EntityOptions {

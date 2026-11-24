@@ -68,44 +68,221 @@ object ShardingSpec extends ZIOSpecDefault {
             )
           )
         },
-        test(
-          "When message storage can't be reached, an at-least-once message fails with StorageUnavailable, and runs again if its result wasn't saved"
-        ) {
-          val unavailable = StorageUnavailable(Counter.name, "c1")
+        test("When message storage can't be reached, an at-least-once message fails with StorageUnavailable") {
           for {
-            errors  <- keyedErrors(unreachableStorage)
-            unsaved <- keyedErrors(unsavedResults)
-          } yield assertTrue(errors == List.fill(2)(List.fill(4)(unavailable) -> 0), unsaved == List.fill(2)(List.fill(2)(unavailable) -> 4))
+            errors <- keyedErrors(unreachableStorage)
+          } yield assertTrue(errors == List.fill(2)(List.fill(4)(StorageUnavailable(Counter.name, "c1")) -> 0))
         },
-        test("A keyed sendDiscard that joins a run of its stored key fails if that run can't add the message to the mailbox") {
+        test("A keyed sendDiscard that joins a run of its key fails if that run can't add the message to the mailbox") {
           for {
             memory  <- MessageStorage.memory.build.map(_.get)
             entered <- Queue.unbounded[Unit]
             permits <- Queue.unbounded[Unit]
-            _       <- memory.store(Role.default, MessageStorage.Key(Worker.name, "s1", "a"), Worker.codec.encodeMessage(GatedKeyed("a")))
-            result  <- ZIO
-                         .scoped(for {
-                           state     <- startWorker(EntityOptions(mailboxCapacity = 1))
-                           worker    <- Sharding.messenger(Worker)
-                           _         <- worker.sendDiscard("s1")(Gated())
-                           sent      <- worker.send("s1")(GatedKeyed("a")).flip.fork
-                           _         <- entered.take
-                           discarded <- worker.sendDiscard("s1")(GatedKeyed("a")).flip.fork
-                           // gives the sendDiscard time to join the send's run, with a spare permit in case it runs alone
-                           _         <- Clock.sleep(200.millis)
-                           _         <- permits.offerAll(List((), ()))
-                           errors    <- sent.join <*> discarded.join
-                           joined    <- entered.isEmpty
-                           _         <- state.gate.succeed(())
-                         } yield (errors, joined))
-                         .provide(
-                           LocalSharding.live,
-                           LocalShardManagerClient.live,
-                           Storage.memory,
-                           gatedStore(memory, entered, permits),
-                           ZLayer.succeed(Config.default)
-                         )
+            result  <- onPod(gatedStore(memory, entered, permits))(for {
+                         state     <- startWorker(EntityOptions(mailboxCapacity = 1))
+                         worker    <- Sharding.messenger(Worker)
+                         _         <- worker.sendDiscard("s1")(Gated())
+                         sent      <- worker.send("s1")(GatedKeyed("a")).flip.fork
+                         _         <- entered.take
+                         discarded <- worker.sendDiscard("s1")(GatedKeyed("a")).flip.fork
+                         // gives the sendDiscard time to join the send's run, with a spare permit in case it runs alone
+                         _         <- Clock.sleep(200.millis)
+                         _         <- permits.offerAll(List((), ()))
+                         errors    <- sent.join <*> discarded.join
+                         joined    <- entered.isEmpty
+                         _         <- state.gate.succeed(())
+                       } yield (errors, joined))
           } yield assertTrue(result == ((MailboxFull(Worker.name, "s1"), MailboxFull(Worker.name, "s1")), true))
+        }
+      ),
+      suite("recovery")(
+        test("After the pod running a keyed message dies, the new owner of its shard runs it with no new send, and a resend gets its outcome") {
+          for {
+            storage <- MessageStorage.memory.build.map(_.get)
+            _       <- storePending(storage, Worker, "r1")(GatedKeyed("a"))
+            result  <- onPod(storage)(for {
+                         state  <- startWorker()
+                         worker <- Sharding.messenger(Worker)
+                         _      <- state.running.changes.takeUntil(_ == 1).runDrain
+                         resend <- worker.send("r1")(GatedKeyed("a")).fork
+                         _      <- Clock.sleep(200.millis)
+                         _      <- state.gate.succeed(())
+                         reply  <- resend.join
+                         done   <- state.completed.get
+                       } yield (reply, done))
+          } yield assertTrue(result == (1, 1))
+        },
+        test("An acknowledged keyed sendDiscard whose pod stops before running it is run by the next owner of its shard") {
+          for {
+            storage <- MessageStorage.memory.build.map(_.get)
+            first   <- onPod(storage, Config.default.copy(entityTerminationTimeout = 100.millis))(for {
+                         state  <- startWorker()
+                         worker <- Sharding.messenger(Worker)
+                         _      <- worker.sendDiscard("r2")(Block())
+                         _      <- worker.sendDiscard("r2")(DoneKeyed("a"))
+                       } yield state)
+            ran     <- first.completed.get
+            _       <- onPod(storage)(startWorker().flatMap(_.completed.changes.takeUntil(_ == 1).runDrain))
+          } yield assertTrue(ran == 0)
+        },
+        test("A rebalance leaves the keyed messages that its drain doesn't finish pending, and the next owner of their shard runs them") {
+          for {
+            storage <- MessageStorage.memory.build.map(_.get)
+            result  <- onPod(storage, Config.default.copy(entityTerminationTimeout = 100.millis))(for {
+                         sharding <- ZIO.service[Sharding]
+                         state    <- startWorker(EntityOptions(rescanInterval = 200.millis))
+                         worker   <- Sharding.messenger(Worker)
+                         shard     = sharding.getShardId(Worker, "r3")
+                         _        <- worker.sendDiscard("r3")(GatedKeyed("a"))
+                         _        <- worker.sendDiscard("r3")(DoneKeyed("b"))
+                         _        <- state.running.changes.takeUntil(_ == 1).runDrain
+                         _        <- sharding.unassign(Set(shard))
+                         stopped  <- state.completed.get
+                         pending  <- storage.pending(Role.default, Worker.name, Set(shard)).map(_._1.deliveryKey).runCollect
+                         _        <- state.gate.succeed(())
+                         // lets the interrupted run end, so that it isn't running when the shard comes back
+                         _        <- Clock.sleep(100.millis)
+                         _        <- sharding.assign(Set(shard))
+                         ran      <- state.completed.changes.takeUntil(_ == 2).runDrain.timeout(5.seconds)
+                       } yield (stopped, pending.toSet, ran.isDefined))
+          } yield assertTrue(result == (0, Set("a", "b"), true))
+        },
+        test("A pod scans its shards again for the pending messages that aren't running, and runs them, but not those of other shards") {
+          for {
+            memory <- MessageStorage.memory.build.map(_.get)
+            scans  <- Queue.unbounded[Unit]
+            result <- onPod(scanned(memory, scans))(for {
+                        sharding <- ZIO.service[Sharding]
+                        state    <- startWorker(EntityOptions(rescanInterval = 200.millis))
+                        _        <- sharding.unassign(Set(sharding.getShardId(Worker, "moved")))
+                        _        <- scans.take
+                        _        <- storePending(memory, Worker, "r4")(DoneKeyed("a"))
+                        _        <- storePending(memory, Worker, "moved")(DoneKeyed("b"))
+                        _        <- state.completed.changes.takeUntil(_ == 1).runDrain
+                        _        <- scans.takeAll *> scans.take
+                        done     <- state.completed.get
+                      } yield done)
+          } yield assertTrue(result == 1)
+        },
+        test("A run whose result fails to be saved fails with StorageUnavailable, and the next scan runs the message again and saves its result") {
+          for {
+            memory   <- MessageStorage.memory.build.map(_.get)
+            failures <- Ref.make(1)
+            result   <- onPod(failingSaves(memory, failures))(for {
+                          counter <- startCounter(EntityOptions(rescanInterval = 200.millis))
+                          error   <- counter.send("r5")(KeyedIncrement("a")).flip
+                          _       <- (Clock.sleep(10.millis) *> memory.store(Role.default, storedKey(Counter, "r5", "a"), Array.emptyByteArray))
+                                       .repeatUntil(_.isInstanceOf[MessageStorage.Stored.Done])
+                          resend  <- counter.send("r5")(KeyedIncrement("a"))
+                          value   <- counter.send("r5")(GetCounter())
+                        } yield (error, resend, value))
+          } yield assertTrue(result == (StorageUnavailable(Counter.name, "r5"), 2, 2))
+        },
+        test("Stored messages started again, by their owner or by a resend, don't count against mailboxCapacity") {
+          for {
+            storage <- MessageStorage.memory.build.map(_.get)
+            result  <- onPod(storage)(for {
+                         state  <- startWorker(EntityOptions(concurrency = 2, mailboxCapacity = 1, rescanInterval = 200.millis))
+                         worker <- Sharding.messenger(Worker)
+                         _      <- worker.sendDiscard("r6")(Gated())
+                         _      <- state.running.changes.takeUntil(_ == 1).runDrain
+                         full   <- worker.sendDiscard("r6")(DoneKeyed("new")).flip
+                         _      <- storePending(storage, Worker, "r6")(DoneKeyed("resent"))
+                         resent <- worker.send("r6")(DoneKeyed("resent")).exit
+                         _      <- storePending(storage, Worker, "r6")(GatedKeyed("recovered"))
+                         // runs next to the message that fills the mailbox
+                         _      <- state.running.changes.takeUntil(_ == 2).runDrain
+                         _      <- state.gate.succeed(())
+                       } yield (full, resent.isSuccess))
+          } yield assertTrue(result == (MailboxFull(Worker.name, "r6"), true))
+        },
+        test("The pending messages of an entity that failed to start run once it starts") {
+          for {
+            storage <- MessageStorage.memory.build.map(_.get)
+            result  <- onPod(storage)(for {
+                         state    <- WorkerState.make
+                         failures <- Ref.make(1)
+                         _        <- Sharding.registerEntity(Worker, EntityOptions(rescanInterval = 200.millis))(entityId =>
+                                       ZIO.whenZIO(failures.getAndUpdate(_ - 1).map(_ > 0))(ZIO.fail(new Exception("not ready"))) *> worker(state)(entityId)
+                                     )
+                         _        <- Sharding.registerScoped
+                         worker   <- Sharding.messenger(Worker)
+                         error    <- worker.send("r7")(DoneKeyed("a")).flip
+                         _        <- state.completed.changes.takeUntil(_ == 1).runDrain
+                         _        <- worker.send("r7")(DoneKeyed("a"))
+                         done     <- state.completed.get
+                       } yield (error, done))
+          } yield assertTrue(result == (EntityDefect("Entity died with java.lang.Exception: not ready"), 1))
+        },
+        test("A keyed message whose shard leaves its pod while it is being stored stays pending for the next owner of the shard") {
+          val shard = Worker.getShardId("r9", Config.default.numberOfShards)
+          for {
+            memory  <- MessageStorage.memory.build.map(_.get)
+            stored  <- Promise.make[Nothing, Unit]
+            release <- Promise.make[Nothing, Unit]
+            // the next owner of the shard runs the message, then stops before it has a result
+            error   <- onPod(memory, Config.default.copy(entityTerminationTimeout = 100.millis))(
+                         startWorker(EntityOptions(rescanInterval = 100.millis)).flatMap(next =>
+                           onPod(heldStore(memory, stored.succeed(()) *> release.await))(for {
+                             sharding <- ZIO.service[Sharding]
+                             _        <- startWorker()
+                             // the shard doesn't come back to this pod, so the send times out
+                             worker   <- Sharding.messenger(Worker, MessengerTimeout.Timeout(1.second))
+                             sent     <- worker.sendDiscard("r9")(GatedKeyed("a")).flip.fork
+                             _        <- stored.await *> sharding.unassign(Set(shard))
+                             _        <- next.running.changes.takeUntil(_ == 1).runDrain *> release.succeed(())
+                             error    <- sent.join
+                           } yield error)
+                         )
+                       )
+            pending <- memory.pending(Role.default, Worker.name, Set(shard)).map(_._1.deliveryKey).runCollect
+          } yield assertTrue(error == SendTimeout(Worker.name, "r9"), pending == Chunk("a"))
+        },
+        test("A scan doesn't run a message that was rejected and removed after the scan read it") {
+          val key = storedKey(Worker, "r10", "a")
+          for {
+            memory  <- MessageStorage.memory.build.map(_.get)
+            read    <- Promise.make[Nothing, Unit]
+            resume  <- Promise.make[Nothing, Unit]
+            scanned <- Promise.make[Nothing, Unit]
+            result  <- onPod(pausedScan(heldStore(memory, read.await), key, read, resume, scanned))(for {
+                         state  <- startWorker(EntityOptions(mailboxCapacity = 2, rescanInterval = 50.millis))
+                         worker <- Sharding.messenger(Worker)
+                         _      <- worker.sendDiscard("r10")(Gated()).repeatN(1)
+                         _      <- state.running.changes.takeUntil(_ == 1).runDrain
+                         error  <- worker.sendDiscard("r10")(DoneKeyed("a")).flip
+                         // the second message completing means the first one has left the mailbox
+                         _      <- state.gate.succeed(()) *> state.completed.changes.takeUntil(_ == 2).runDrain
+                         _      <- resume.succeed(()) *> scanned.await
+                         now    <- memory.store(Role.default, key, Array.emptyByteArray)
+                       } yield (error, now))
+          } yield assertTrue(result == (MailboxFull(Worker.name, "r10"), MessageStorage.Stored.New))
+        },
+        test("A send that joins a scan of its key that finds the key gone runs its message as a new one") {
+          val key = storedKey(Worker, "r11", "a")
+          for {
+            memory  <- MessageStorage.memory.build.map(_.get)
+            // the scan's run of this body would wait for a gate that never opens
+            _       <- storePending(memory, Worker, "r11")(GatedKeyed("a"))
+            read    <- Promise.make[Nothing, Unit]
+            resume  <- Promise.make[Nothing, Unit]
+            scanned <- Promise.make[Nothing, Unit]
+            entered <- Queue.unbounded[Unit]
+            permits <- Queue.unbounded[Unit]
+            result  <- onPod(pausedScan(gatedStore(memory, entered, permits), key, read, resume, scanned))(for {
+                         state  <- startWorker(EntityOptions(rescanInterval = 50.millis))
+                         worker <- Sharding.messenger(Worker)
+                         _      <- read.await *> memory.remove(Role.default, key) *> resume.succeed(())
+                         _      <- entered.take
+                         sent   <- worker.send("r11")(DoneKeyed("a")).fork
+                         // gives the send time to join the scan's run, with a permit for its own store
+                         _      <- Clock.sleep(200.millis)
+                         _      <- permits.offerAll(List((), ()))
+                         _      <- sent.join *> scanned.await
+                         done   <- state.completed.get
+                         now    <- memory.store(Role.default, key, Array.emptyByteArray)
+                       } yield (done, now))
+          } yield assertTrue(result._1 == 1, result._2.isInstanceOf[MessageStorage.Stored.Done])
         }
       ),
       suite("registered pods")(
@@ -537,27 +714,73 @@ object ShardingSpec extends ZIOSpecDefault {
       def saveResult(role: Role, key: MessageStorage.Key, result: MessageStorage.Result, retention: Duration): Task[MessageStorage.Result] =
         unreachable
       def remove(role: Role, key: MessageStorage.Key): Task[Unit]                                                                          = unreachable
+      def pending(role: Role, entityType: String, shards: Set[ShardId]): ZStream[Any, Throwable, (MessageStorage.Key, Array[Byte])]        =
+        ZStream.fromZIO(unreachable)
     })
 
-  private val unsavedResults: ULayer[MessageStorage] =
-    MessageStorage.memory.project(memory =>
-      new MessageStorage {
-        def store(role: Role, key: MessageStorage.Key, body: Array[Byte]): Task[MessageStorage.Stored]                                       =
-          memory.store(role, key, body)
-        def saveResult(role: Role, key: MessageStorage.Key, result: MessageStorage.Result, retention: Duration): Task[MessageStorage.Result] =
-          ZIO.fail(new Exception("connection refused"))
-        def remove(role: Role, key: MessageStorage.Key): Task[Unit]                                                                          = memory.remove(role, key)
-      }
-    )
-
-  private def gatedStore(memory: MessageStorage, entered: Queue[Unit], permits: Queue[Unit]): ULayer[MessageStorage] =
-    ZLayer.succeed(new MessageStorage {
-      def store(role: Role, key: MessageStorage.Key, body: Array[Byte]): Task[MessageStorage.Stored]                                       =
+  private def gatedStore(memory: MessageStorage, entered: Queue[Unit], permits: Queue[Unit]): MessageStorage =
+    new MessageStorage {
+      export memory.{pending, remove, saveResult}
+      def store(role: Role, key: MessageStorage.Key, body: Array[Byte]): Task[MessageStorage.Stored] =
         entered.offer(()) *> permits.take *> memory.store(role, key, body)
+    }
+
+  private def failingSaves(memory: MessageStorage, failures: Ref[Int]): MessageStorage =
+    new MessageStorage {
+      export memory.{pending, remove, store}
       def saveResult(role: Role, key: MessageStorage.Key, result: MessageStorage.Result, retention: Duration): Task[MessageStorage.Result] =
-        memory.saveResult(role, key, result, retention)
-      def remove(role: Role, key: MessageStorage.Key): Task[Unit]                                                                          = memory.remove(role, key)
-    })
+        ZIO.ifZIO(failures.getAndUpdate(_ - 1).map(_ > 0))(
+          ZIO.fail(new Exception("connection refused")),
+          memory.saveResult(role, key, result, retention)
+        )
+    }
+
+  // a storage whose stores run `afterStore` after the underlying store, before they return
+  private def heldStore(memory: MessageStorage, afterStore: UIO[Unit]): MessageStorage =
+    new MessageStorage {
+      export memory.{pending, remove, saveResult}
+      def store(role: Role, key: MessageStorage.Key, body: Array[Byte]): Task[MessageStorage.Stored] =
+        memory.store(role, key, body) <* afterStore
+    }
+
+  // a storage whose scans that reach `key` complete `read`, then wait for `resume` before streaming it, and complete `finished` once the scan has handled it
+  private def pausedScan(
+    storage: MessageStorage,
+    key: MessageStorage.Key,
+    read: Promise[Nothing, Unit],
+    resume: Promise[Nothing, Unit],
+    finished: Promise[Nothing, Unit]
+  ): MessageStorage =
+    new MessageStorage {
+      export storage.{remove, saveResult, store}
+      def pending(role: Role, entityType: String, shards: Set[ShardId]): ZStream[Any, Throwable, (MessageStorage.Key, Array[Byte])] =
+        storage.pending(role, entityType, shards).flatMap { row =>
+          if (row._1 == key) ZStream.execute(read.succeed(()) *> resume.await) ++ ZStream.succeed(row) ++ ZStream.execute(finished.succeed(()))
+          else ZStream.succeed(row)
+        }
+    }
+
+  private def scanned(memory: MessageStorage, scans: Queue[Unit]): MessageStorage =
+    new MessageStorage {
+      export memory.{remove, saveResult, store}
+      def pending(role: Role, entityType: String, shards: Set[ShardId]): ZStream[Any, Throwable, (MessageStorage.Key, Array[Byte])] =
+        memory.pending(role, entityType, shards) ++ ZStream.execute(scans.offer(()))
+    }
+
+  private def storedKey(entityType: EntityType[?], entityId: String, deliveryKey: String): MessageStorage.Key =
+    MessageStorage.Key(entityType.name, entityType.getShardId(entityId, Config.default.numberOfShards), entityId, deliveryKey)
+
+  // stores a message as a pod that died before it had a result leaves it
+  private def storePending[Msg[_, _], E, A](storage: MessageStorage, entityType: EntityType[Msg], entityId: String)(
+    message: Msg[E, A] & AtLeastOnce
+  ): Task[Unit] =
+    storage.store(Role.default, storedKey(entityType, entityId, message.atLeastOnceKey), entityType.codec.encodeMessage(message)).unit
+
+  // runs a pod, with all the shards, on a message storage that outlives it
+  private def onPod[A](storage: MessageStorage, config: Config = Config.default)(effect: ZIO[Sharding & Scope, Any, A]): IO[Any, A] =
+    ZIO
+      .scoped[Sharding](effect)
+      .provide(LocalSharding.live, LocalShardManagerClient.live, Storage.memory, ZLayer.succeed(storage), ZLayer.succeed(config))
 
   // a Shard Manager that gives the shards of a pod that unregisters to another pod
   private def takingShardsBack(assignments: Ref[Map[ShardId, Option[PodAddress]]]): ShardManagerClient =
@@ -839,6 +1062,8 @@ object ShardingSpec extends ZIOSpecDefault {
           _       <- counter.send("k1")(KeyedFail("e"))
           value   <- counter.send("k1")(GetCounter())
           died    <- counter.send("k3")(KeyedDie("d")).flip.repeatN(1)
+          // stays pending, so its owner would run it again in later tests
+          _       <- ZIO.serviceWithZIO[MessageStorage](_.remove(Role.default, storedKey(Counter, "k3", "d")))
         } yield assertTrue(
           first == 1,
           again == 1,
@@ -898,7 +1123,8 @@ object ShardingSpec extends ZIOSpecDefault {
           worker  <- Sharding.messenger(Worker)
           _       <- worker.sendDiscard("f1")(Gated())
           error   <- worker.sendDiscard("f1")(GatedKeyed("a")).flip
-          stored  <- storage.store(Role.default, MessageStorage.Key(Worker.name, "f1", "a"), Array.emptyByteArray)
+          stored  <- storage.store(Role.default, storedKey(Worker, "f1", "a"), Array.emptyByteArray) <*
+                       storage.remove(Role.default, storedKey(Worker, "f1", "a"))
           _       <- state.gate.succeed(())
         } yield assertTrue(error == MailboxFull(Worker.name, "f1"), stored == MessageStorage.Stored.New)
       },
@@ -907,15 +1133,15 @@ object ShardingSpec extends ZIOSpecDefault {
         for {
           storage   <- ZIO.service[MessageStorage]
           counter   <- startCounter(EntityOptions(loadEntity = [E, A] => _ match { case KeyedIncrement(_) => false; case _ => true }))
-          _         <- ZIO.foreachDiscard(List("l1", "l2"))(entityId =>
-                         storage.store(Role.default, MessageStorage.Key(Counter.name, entityId, key), Counter.codec.encodeMessage(KeyedIncrement(key)))
-                       )
+          _         <- ZIO.foreachDiscard(List("l2", "l3"))(storePending(storage, Counter, _)(KeyedIncrement(key)))
           discarded <- counter.sendDiscard("l1")(KeyedIncrement("new")).exit
           error     <- counter.send("l1")(KeyedIncrement("new")).flip
-          stored    <- storage.store(Role.default, MessageStorage.Key(Counter.name, "l1", "new"), Array.emptyByteArray)
-          pending   <- counter.send("l1")(KeyedIncrement(key))
-          _         <- counter.sendDiscard("l2")(KeyedIncrement(key))
-          value     <- counter.send("l2")(GetCounter())
+          stored    <- storage.store(Role.default, storedKey(Counter, "l1", "new"), Array.emptyByteArray) <*
+                         storage.remove(Role.default, storedKey(Counter, "l1", "new"))
+          // the owner may have run them already, which also ignores loadEntity
+          pending   <- counter.send("l2")(KeyedIncrement(key))
+          _         <- counter.sendDiscard("l3")(KeyedIncrement(key))
+          value     <- counter.send("l3")(GetCounter())
         } yield assertTrue(
           discarded.isSuccess,
           error == MessageDiscarded(Counter.name, "l1"),

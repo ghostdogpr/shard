@@ -43,6 +43,7 @@ Entity and topic types must all have different names.
 - `loadEntity`: whether a message should start the entity when it isn't running. If not, the message is discarded: `sendDiscard` succeeds and `send` fails with `MessageDiscarded`. For an `AtLeastOnce` message, it only applies to a new key (see [At least once](delivery-guarantees.md#at-least-once-atleastonce)).
 - `interceptor`: wraps the entities and their messages, see [Interceptors](#interceptors).
 - `retention`: how long the result of an `AtLeastOnce` message is kept (24 hours by default), see [At least once](delivery-guarantees.md#at-least-once-atleastonce).
+- `rescanInterval`: how often a pod looks for the stored `AtLeastOnce` messages of its shards that need to run (10 seconds by default), see [At least once](delivery-guarantees.md#at-least-once-atleastonce).
 
 ```scala
 Sharding.registerEntity(

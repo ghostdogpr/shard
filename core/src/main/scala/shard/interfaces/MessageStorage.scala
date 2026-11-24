@@ -3,8 +3,9 @@ package shard.interfaces
 import java.util.concurrent.TimeUnit
 
 import zio.{Clock, Duration, Ref, Task, ULayer, ZIO, ZLayer}
+import zio.stream.ZStream
 
-import shard.Role
+import shard.{Role, ShardId}
 import shard.interfaces.MessageStorage.{Key, Result, Stored}
 import shard.interfaces.Pods.BinaryReply
 
@@ -27,14 +28,19 @@ trait MessageStorage {
     * Remove a stored message that has no result, because it was rejected before running (e.g. its mailbox was full).
     */
   def remove(role: Role, key: Key): Task[Unit]
+
+  /**
+    * Stream the stored messages of an entity type's shards that have no result. The other methods are called while the stream is open.
+    */
+  def pending(role: Role, entityType: String, shards: Set[ShardId]): ZStream[Any, Throwable, (Key, Array[Byte])]
 }
 
 object MessageStorage {
 
   /**
-    * The identity of a message: its delivery key, scoped to its entity.
+    * The identity of a message: its delivery key, scoped to its entity, with the shard of its entity.
     */
-  final case class Key(entityType: String, entityId: String, deliveryKey: String)
+  final case class Key(entityType: String, shardId: ShardId, entityId: String, deliveryKey: String)
 
   /**
     * The result of a message, encoded with the codecs of the message: the reply that the sends of its key get during its retention.
@@ -98,6 +104,11 @@ object MessageStorage {
               case _                       => map
             }
           )
+
+        def pending(role: Role, entityType: String, shards: Set[ShardId]): ZStream[Any, Throwable, (Key, Array[Byte])] =
+          ZStream.fromIterableZIO(entries.get.map(_.collect {
+            case ((`role`, key), Stored.Pending(body)) if key.entityType == entityType && shards.contains(key.shardId) => (key, body)
+          }))
       }
     })
 
@@ -108,8 +119,9 @@ object MessageStorage {
     ZLayer.succeed(new MessageStorage {
       private val noStorage = ZIO.dieMessage("MessageStorage.none stores no messages, so it can't run AtLeastOnce messages")
 
-      def store(role: Role, key: Key, body: Array[Byte]): Task[Stored]                        = noStorage
-      def saveResult(role: Role, key: Key, result: Result, retention: Duration): Task[Result] = noStorage
-      def remove(role: Role, key: Key): Task[Unit]                                            = noStorage
+      def store(role: Role, key: Key, body: Array[Byte]): Task[Stored]                                               = noStorage
+      def saveResult(role: Role, key: Key, result: Result, retention: Duration): Task[Result]                        = noStorage
+      def remove(role: Role, key: Key): Task[Unit]                                                                   = noStorage
+      def pending(role: Role, entityType: String, shards: Set[ShardId]): ZStream[Any, Throwable, (Key, Array[Byte])] = ZStream.empty
     })
 }

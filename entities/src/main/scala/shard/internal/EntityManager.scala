@@ -106,8 +106,16 @@ private[shard] object EntityManager {
       entities    <- Ref.make(Entities[Msg](Map(), 0L))
       closed      <- Ref.make(false)
       registered  <- ZIO.getFiberRefs
-      atLeastOnce <- AtLeastOnceDelivery.make(recipientType, config.role, messageStorage, options.retention)
-      manager      = new EntityManager(recipientType, makeHandler, entities, closed, registered, atLeastOnce, sharding, config, options)
+      atLeastOnce <- AtLeastOnceDelivery.make(
+                       recipientType,
+                       config.role,
+                       messageStorage,
+                       options.retention,
+                       sharding.getShardId(recipientType, _),
+                       entityId => sharding.isEntityOnLocalShards(recipientType, entityId) && closed.get.negate
+                     )
+      scope       <- ZIO.scope
+      manager      = new EntityManager(recipientType, makeHandler, entities, closed, registered, atLeastOnce, scope, sharding, config, options)
       _           <- manager.reaper.interruptible.forkScoped
     } yield manager
 }
@@ -123,6 +131,7 @@ final private[shard] class EntityManager[Msg[_, _]] private (
   closed: Ref[Boolean],
   registered: FiberRefs,
   atLeastOnce: AtLeastOnceDelivery[Msg],
+  scope: Scope,
   sharding: Sharding,
   config: Config,
   options: EntityOptions[Msg]
@@ -136,6 +145,8 @@ final private[shard] class EntityManager[Msg[_, _]] private (
   private val interrupted: Exit[Any, Any] = Exit.interrupt(FiberId.None)
 
   private val sequential = options.concurrency <= 1
+
+  private val isEntityType = recipientType.isInstanceOf[EntityType[?]]
 
   private val interceptor = config.entityInterceptor ++ options.interceptor
 
@@ -154,6 +165,16 @@ final private[shard] class EntityManager[Msg[_, _]] private (
     (Clock.sleep(interval) *> reap).forever
   }
 
+  /**
+    * Scan this pod's shards for `AtLeastOnce` messages to run now and then every `rescanInterval`, until the type is unregistered.
+    */
+  val startRescan: UIO[Unit] = {
+    val scan = sharding.thisPodAssignments
+      .flatMap(shards => ZIO.whenDiscard(shards.nonEmpty)(atLeastOnce.recover(shards.toSet)(enqueueKeyed)))
+      .catchAllCause(ZIO.logWarningCause(s"Failed to recover the messages of ${recipientType.name}", _))
+    ZIO.whenDiscard(isEntityType)((scan *> Clock.sleep(options.rescanInterval)).forever.interruptible.forkIn(scope))
+  }
+
   private def isOnLocalShards(entityId: String): UIO[Boolean] =
     recipientType match {
       case _: EntityType[?] => sharding.isEntityOnLocalShards(recipientType, entityId)
@@ -162,25 +183,24 @@ final private[shard] class EntityManager[Msg[_, _]] private (
 
   /**
     * Add a message to an entity's mailbox, starting the entity if needed, and trying again a little later if it is stopping.
-    * Fails with `EntityNotManagedByThisPod`, `MailboxFull` or `MessageDiscarded`.
+    * Fails with `EntityNotManagedByThisPod`, `MailboxFull` or `MessageDiscarded`, the last two only for a new message.
     */
-  def enqueue[E, A](entityId: String, message: Msg[E, A], useLoadEntity: Boolean = true): IO[Throwable, Envelope[Msg]] =
-    tryEnqueue(entityId, message, useLoadEntity).someOrElseZIO(stoppingRetryDelay *> enqueue(entityId, message, useLoadEntity))
+  def enqueue[E, A](entityId: String, message: Msg[E, A], isNew: Boolean = true): IO[Throwable, Envelope[Msg]] =
+    tryEnqueue(entityId, message, isNew).someOrElseZIO(stoppingRetryDelay *> enqueue(entityId, message, isNew))
 
   private def tryEnqueue[E, A](
     entityId: String,
     message: Msg[E, A],
-    useLoadEntity: Boolean
+    isNew: Boolean
   ): IO[Throwable, Option[Envelope[Msg]]] = {
     val erased = message.asInstanceOf[Msg[Any, Any]]
     for {
       _        <- ZIO.unlessZIO(isOnLocalShards(entityId))(ZIO.fail(EntityNotManagedByThisPod(entityId)))
       current  <- entities.get
       envelope <- current.running.get(entityId) match {
-                    case Some(entity)                                          => tryOffer(entity, erased)
-                    case None if useLoadEntity && !options.loadEntity(message) =>
-                      ZIO.fail(MessageDiscarded(recipientType.name, entityId))
-                    case None                                                  => getOrStart(entityId).flatMap(tryOffer(_, erased))
+                    case Some(entity)                                  => tryOffer(entity, erased, isNew)
+                    case None if isNew && !options.loadEntity(message) => ZIO.fail(MessageDiscarded(recipientType.name, entityId))
+                    case None                                          => getOrStart(entityId).flatMap(tryOffer(_, erased, isNew))
                   }
     } yield envelope
   }
@@ -191,7 +211,7 @@ final private[shard] class EntityManager[Msg[_, _]] private (
     */
   def ask[E, A](entityId: String, message: Msg[E, A]): IO[Throwable, Exit[Any, Any]] =
     ZIO.uninterruptibleMask(restore =>
-      tryEnqueue(entityId, message, useLoadEntity = true).flatMap {
+      tryEnqueue(entityId, message, isNew = true).flatMap {
         case Some(envelope) => restore(envelope.result.await).onInterrupt(envelope.cancel)
         case None           => restore(stoppingRetryDelay *> ask(entityId, message))
       }
@@ -227,20 +247,21 @@ final private[shard] class EntityManager[Msg[_, _]] private (
     expectsReply: Boolean
   ): Task[BinaryReply] =
     message match {
-      case keyed: AtLeastOnce if recipientType.isInstanceOf[EntityType[?]] =>
+      case keyed: AtLeastOnce if isEntityType =>
         ZIO.unlessZIO(isOnLocalShards(entityId))(ZIO.fail(EntityNotManagedByThisPod(entityId))) *>
-          atLeastOnce.deliver(entityId, keyed, body, codec, expectsReply)([E1, A1] =>
-            (message: Msg[E1, A1], useLoadEntity: Boolean) => enqueue(entityId, message, useLoadEntity).map(_.result.await)
-          )
-      case _ if expectsReply                                               => ask(entityId, message).map(Replies.encodeExit(_, codec))
-      case _                                                               => enqueue(entityId, message).as(Replies.ack)
+          atLeastOnce.deliver(entityId, keyed, body, codec, expectsReply)(enqueueKeyed)
+      case _ if expectsReply                  => ask(entityId, message).map(Replies.encodeExit(_, codec))
+      case _                                  => enqueue(entityId, message).as(Replies.ack)
     }
 
+  private val enqueueKeyed: atLeastOnce.Enqueue =
+    [E, A] => (entityId: String, message: Msg[E, A], isNew: Boolean) => enqueue(entityId, message, isNew).map(_.result.await)
+
   /**
-    * Add a message to the entity's mailbox, or fail with `MailboxFull` if it is full.
+    * Add a message to the entity's mailbox, or fail with `MailboxFull` if it is full and the message is new.
     * Returns None if the entity is closing.
     */
-  private def tryOffer(entity: RunningEntity[Msg], message: Msg[Any, Any]): IO[MailboxFull, Option[Envelope[Msg]]] = {
+  private def tryOffer(entity: RunningEntity[Msg], message: Msg[Any, Any], isNew: Boolean): IO[MailboxFull, Option[Envelope[Msg]]] = {
     val mailbox = if (message.isInstanceOf[Concurrent]) entity.concurrentMailbox else entity.mailbox
     val add     = Envelope.make(message).tap(mailbox.offer).asSome
     // uninterruptible so that a message counted in `pending` always reaches the mailbox
@@ -248,7 +269,7 @@ final private[shard] class EntityManager[Msg[_, _]] private (
       .modify { s =>
         // no need to update lastActive: the entity is not stopped while it has pending messages
         if (s.closing) (ZIO.none, s)
-        else if (s.pending >= options.mailboxCapacity) (ZIO.fail(MailboxFull(recipientType.name, entity.entityId)), s)
+        else if (isNew && s.pending >= options.mailboxCapacity) (ZIO.fail(MailboxFull(recipientType.name, entity.entityId)), s)
         else (add, s.copy(pending = s.pending + 1))
       }
       .flatten
