@@ -2,7 +2,7 @@ val scala3 = "3.9.0"
 
 val zioVersion            = "2.1.27"
 val proteusVersion        = "0.8.0"
-val grpcNettyVersion      = "1.85.1"
+val grpcNettyVersion      = "1.86.0"
 val zioK8sVersion         = "3.2.1"
 val zioK8sSttpVersion     = "3.11.0"
 val zioCacheVersion       = "0.3.0"
