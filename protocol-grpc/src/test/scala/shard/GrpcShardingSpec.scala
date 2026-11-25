@@ -22,10 +22,11 @@ object GrpcShardingSpec extends ZIOSpecDefault {
 
   def spec: Spec[TestEnvironment & Scope, Any] =
     suite("GrpcShardingSpec")(
-      overGrpc(Config.default.copy(shardingPort = 54330))(
+      // ports below the ephemeral port range, from which containers and connections take their ports
+      overGrpc(Config.default.copy(shardingPort = 14330))(
         suite("ShardingSpec over gRPC")(ShardingSpec.tests.flatMap(_.filterNotTags(_ == ShardingSpec.inProcess))*)
       ),
-      overGrpc(Config.default.copy(shardingPort = 54329, sendTimeout = 1.second))(
+      overGrpc(Config.default.copy(shardingPort = 14329, sendTimeout = 1.second))(
         suite("gRPC")(
           test("Encoding and decoding failures are received as SerializationError, on either pod") {
             for {
