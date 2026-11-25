@@ -10,6 +10,8 @@ val zioCatsInteropVersion = "23.1.0.15"
 val redis4catsVersion     = "2.0.6"
 val redissonVersion       = "4.8.0"
 val sageVersion           = "0.6.0"
+val magnumVersion         = "2.0.0"
+val postgresqlVersion     = "42.7.15"
 val scalaKryoVersion      = "1.5.3"
 val testContainersVersion = "0.44.1"
 
@@ -50,6 +52,7 @@ lazy val root = project
     storageSage,
     storageRedis,
     storageRedisson,
+    storagePostgres,
     serializationKryo,
     serializationProteus,
     grpcProtocol,
@@ -131,6 +134,21 @@ lazy val storageRedisson = project
     libraryDependencies ++=
       Seq(
         "org.redisson" % "redisson" % redissonVersion
+      )
+  )
+
+lazy val storagePostgres = project
+  .in(file("storage-postgres"))
+  .settings(name := "shard-storage-postgres")
+  .settings(commonSettings)
+  .dependsOn(core % "compile->compile;test->test")
+  .settings(
+    libraryDependencies ++=
+      Seq(
+        "com.augustnagro" %% "magnum"     % magnumVersion,
+        "com.augustnagro" %% "magnumzio"  % magnumVersion,
+        "com.augustnagro" %% "magnumpg"   % magnumVersion,
+        "org.postgresql"   % "postgresql" % postgresqlVersion
       )
   )
 

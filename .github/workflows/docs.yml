@@ -9,6 +9,7 @@ on:
   pull_request:
     paths:
       - 'docs/**'
+      - 'storage-postgres/src/main/resources/shard/message-storage.sql'
       - '.github/workflows/docs.yml'
 
 permissions:
