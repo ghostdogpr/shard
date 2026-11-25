@@ -13,7 +13,10 @@ object GrpcAuthExampleSpec extends ZIOSpecDefault {
 
   private val authKey = Metadata.Key.of("authentication-key", Metadata.ASCII_STRING_MARSHALLER)
 
-  private val config = ZLayer.succeed(Config.default.copy(simulateRemotePods = true))
+  // below the ephemeral port range, from which containers and connections take their ports, and not EndToEndSpec's
+  private val port = 14322
+
+  private val config = ZLayer.succeed(Config.default.copy(shardingPort = port, simulateRemotePods = true))
 
   private def grpcConfigLayer(clientAuthKey: String): ULayer[GrpcConfig] =
     ZLayer.succeed(
@@ -33,7 +36,7 @@ object GrpcAuthExampleSpec extends ZIOSpecDefault {
   def spec: Spec[TestEnvironment & Scope, Any] =
     suite("GrpcAuthExampleSpec")(
       test("auth example for gRPC") {
-        val podAddress = PodAddress("localhost", 54321)
+        val podAddress = PodAddress("localhost", port)
         ZIO.scoped {
           for {
             _                 <- Sharding.registerScoped

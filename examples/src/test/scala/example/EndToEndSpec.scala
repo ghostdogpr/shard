@@ -54,6 +54,8 @@ object EndToEndSpec extends ZIOSpecDefault {
 
   private val config        = ZLayer.succeed(
     Config.default.copy(
+      // below the ephemeral port range, from which containers and connections take their ports
+      shardingPort = 14321,
       shardManagerPort = 8087,
       simulateRemotePods = true,
       sendTimeout = 3 seconds
