@@ -297,6 +297,8 @@ object ShardManagerSpec extends ZIOSpecDefault {
                                                           )
                                                           .timeoutFail(new Exception("assignments not persisted"))(5.seconds)
                                                       )
+                                       // pod4's first write runs in the background, and it must be in flight before the shutdown
+                                       _           <- Live.live(blocked.get.repeat(Schedule.recurUntil[Boolean](identity) <* Schedule.spaced(10.millis)))
                                        _           <- closing.set(true)
                                      } yield assertTrue(
                                        assignments.get(1).flatten.contains(pod1.address),
