@@ -55,6 +55,21 @@ object MessageStorageSuite {
           done == "failure error"
         )
       },
+      test("concurrent stores of a key store one message, and concurrent saves of its result keep one result") {
+        val key = Key("type", 1, "id", "concurrent")
+        for {
+          stored <- ZIO.foreachPar(1 to 20)(n => store(key, n.toString).map(n -> _))
+          saved  <- ZIO.foreachPar(1 to 20)(n => saveResult(key, success(n.toString)))
+          kept   <- store(key, "again")
+        } yield {
+          val winners = stored.collect { case (n, "new") => n }
+          assertTrue(
+            winners.size == 1,
+            stored.collect { case (_, found) if found != "new" => found }.toSet == winners.map(n => s"pending $n").toSet,
+            saved.toSet == Set(kept)
+          )
+        }
+      },
       test("keys are separate for each role, entity type and entity ID") {
         val key = Key("type", 1, "id", "scoped:key")
         for {
@@ -142,19 +157,21 @@ object MessageStorageSuite {
         )
       },
       test("pending streams the messages of each entity in the order they were stored, and a key stored again after a removal takes its new place") {
-        // more than a page of a storage that reads them in pages
-        val deliveryKeys                               = List("e", "b", "f", "a", "d", "c") ++ (1 to 200).map(_.toString)
-        def key(entityId: String, deliveryKey: String) = Key("ordered-type", 1, entityId, deliveryKey)
+        // more than a page of a storage that reads them in pages, for each entity, in its own shard, with an unrequested shard between them
+        val deliveryKeys                    = List("e", "b", "f", "a", "d", "c") ++ (1 to 200).map(_.toString)
+        def x(deliveryKey: String)          = Key("ordered-type", 1, "x", deliveryKey)
+        def otherShard(deliveryKey: String) = Key("ordered-type", 2, "other shard", deliveryKey)
+        def y(deliveryKey: String)          = Key("ordered-type", 3, "y", deliveryKey)
         for {
           _       <- ZIO.foreachDiscard(deliveryKeys)(deliveryKey =>
-                       ZIO.foreachDiscard(List("x", "y"))(entityId => store(key(entityId, deliveryKey), deliveryKey))
+                       ZIO.foreachDiscard(List(x, otherShard, y))(entity => store(entity(deliveryKey), deliveryKey))
                      )
-          _       <- remove(key("x", "b"))
-          _       <- store(key("x", "b"), "b")
-          _       <- saveResult(key("y", "f"), DeadLetter("reason"))
-          _       <- remove(key("y", "f"))
-          _       <- store(key("y", "f"), "f")
-          pending <- ZIO.serviceWithZIO[MessageStorage](_.pending(role, "ordered-type", Set(1)).runCollect)
+          _       <- remove(x("b"))
+          _       <- store(x("b"), "b")
+          _       <- saveResult(y("f"), DeadLetter("reason"))
+          _       <- remove(y("f"))
+          _       <- store(y("f"), "f")
+          pending <- ZIO.serviceWithZIO[MessageStorage](_.pending(role, "ordered-type", Set(1, 3)).runCollect)
         } yield assertTrue(
           pending.groupMap(_._1.entityId)(_._1.deliveryKey) ==
             Map("x" -> Chunk.from(deliveryKeys.filterNot(_ == "b") :+ "b"), "y" -> Chunk.from(deliveryKeys.filterNot(_ == "f") :+ "f"))

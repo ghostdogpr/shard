@@ -87,6 +87,27 @@ The `shard-storage-sage` dependency also provides `MessageStorageRedis.live`, wh
 
 For the messages that Shard accepted to survive a crash or a restart of Redis, Redis must write each one to disk before it replies: configure it with `appendonly yes` and `appendfsync always`. With the default `appendfsync everysec`, a crash of Redis can lose the messages and results of the last second. Configure `maxmemory-policy noeviction` as well, because the other policies let Redis evict stored messages and results when its memory is full. With replicas, replication is asynchronous, so a failover can lose the messages and results that the master acknowledged just before it.
 
+### Postgres
+
+The `shard-storage-postgres` dependency provides `MessageStoragePostgres.live`, which stores messages in a Postgres table:
+
+```scala
+"com.github.ghostdogpr" %% "shard-storage-postgres" % "@VERSION@"
+```
+
+It requires a `javax.sql.DataSource` for the database, such as a connection pool, and a `PostgresConfig`. Its connections must use the Read Committed isolation level, which is the Postgres default, because under a stricter level concurrent calls with the same key can fail with a serialization error. The layer never changes the schema, so create the table and its indexes with your migration tool. The module also contains these statements as the `shard/message-storage.sql` resource:
+
+<<< @/../storage-postgres/src/main/resources/shard/message-storage.sql
+
+`PostgresConfig` has the following options:
+- `table`: the table that stores the messages (`shard_messages` by default). It can include a schema, such as `shard.messages`. If you change it, change the names in the statements above as well.
+- `cleanupInterval`: how often each pod deletes the results whose `retention` has passed (1 minute by default)
+- `cleanupBatchSize`: how many expired results each delete removes at most (1000 by default). A pod deletes batches until fewer are left, then waits for the next interval.
+
+A key is free as soon as the retention of its result has passed, whether or not the cleanup has deleted it yet, so the cleanup only keeps the table from growing. Several pods can clean up at the same time. Dead letters never expire, so the cleanup keeps them until they are [retried or dropped](delivery-guarantees.md#dead-letters).
+
+For the messages that Shard accepted to survive a crash of Postgres, Postgres must write each commit to disk before it replies, which it does by default: keep `synchronous_commit` and `fsync` on. With asynchronous replication, a failover to a replica can lose the messages and results that the primary committed just before it. Synchronous replication, with `synchronous_standby_names` set and `synchronous_commit` set to `on` or `remote_apply`, avoids that, as long as a failover promotes a standby that has received every commit the primary acknowledged.
+
 ## Messaging Protocol
 
 The `Pods` trait defines how to communicate with remote pods.
