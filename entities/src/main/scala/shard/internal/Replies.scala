@@ -81,6 +81,7 @@ private[shard] object Replies {
       case BinaryReply.Failure(body)                                       =>
         decode(codec.error, body, "a failure").flatMapExit(Exit.fail)
       case BinaryReply.Defect(_, Some(DeliveryError.StorageUnavailable))   => Exit.fail(StorageUnavailable(entityType, entityId))
+      case BinaryReply.Defect(reason, Some(DeliveryError.DeadLettered))    => Exit.fail(DeadLettered(entityType, entityId, reason))
       case BinaryReply.Defect(msg, None)                                   => Exit.fail(EntityDefect(msg))
       case BinaryReply.SerializationError(msg)                             => Exit.fail(SerializationError(msg))
       case BinaryReply.Interrupted                                         => Exit.fail(EntityInterrupted(entityType, entityId))

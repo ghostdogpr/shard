@@ -66,13 +66,17 @@ trait MessageStorage {
   def store(role: Role, key: Key, body: Array[Byte]): Task[Stored]
   def saveResult(role: Role, key: Key, result: Result, retention: Duration): Task[Result]
   def remove(role: Role, key: Key): Task[Unit]
+  def pending(role: Role, entityType: String, shards: Set[ShardId]): ZStream[Any, Throwable, (Key, Array[Byte])]
+  def deadLetters(role: Role, entityType: String, shards: Set[ShardId]): ZStream[Any, Throwable, (Key, String, Array[Byte])]
 }
 ```
-- `store` stores a message before it runs, unless a message with the same key is stored, and returns what was under the key: `New` if there was nothing and the message was stored, `Pending` with the message if it has no result yet, or `Done` with its result. A `Key` is the delivery key of a message with its entity type and entity ID.
-- `saveResult` saves the result of a message, the `BinaryReply.Success` or `BinaryReply.Failure` that it replied, unless its key already has one, keeps it for `retention`, and returns the result kept under the key. After that, the key is free again.
-- `remove` removes a stored message that has no result, when it was rejected before running (e.g. its mailbox was full).
+- `store` stores a message unless its key holds one, and returns what was under the key: `New` if the message was stored now, `Pending` with the stored message if it has no result yet, or `Done` with its result. A `Key` is the delivery key of a message with its entity type, entity ID and the shard of its entity.
+- `saveResult` saves the result of a message unless its key already has one, and returns the result kept under the key. A `BinaryReply.Success` or `BinaryReply.Failure` is kept for `retention`, after which the key is free again. A `DeadLetter` is kept with no expiry, along with the body of the stored message.
+- `remove` removes a stored message that has no result, or a dead letter.
+- `pending` streams the stored messages of an entity type's shards that have no result. It must return the messages of each entity in the order they were stored, where a key stored again after it was removed or after its result expired takes its new place, while the order of different entities doesn't matter. The other methods are called while the stream is open, so it must not hold a resource that they need.
+- `deadLetters` streams the dead letters of an entity type's shards, with their reasons and the bodies of their messages.
 
-When one of these methods fails, the message fails with `StorageUnavailable`, and when it dies, with `EntityDefect`.
+When `store`, `saveResult` or `remove` fails, the message fails with `StorageUnavailable`, and when one of them dies, with `EntityDefect`. When `pending` fails, the next scan calls it again.
 
 `Sharding.live` requires a `MessageStorage`. If you don't send `AtLeastOnce` messages, use the `MessageStorage.none` layer, with which they fail with `EntityDefect`. For testing, you can use the `MessageStorage.memory` layer that keeps messages in memory, which only works with a single pod.
 

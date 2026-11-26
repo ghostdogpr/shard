@@ -31,7 +31,7 @@ Entity and topic types must all have different names.
 - The `Scope` given to the behavior is closed when the entity stops, after its last message was processed: use it to acquire resources or save the entity state.
 - If the behavior fails, the messages sent to the entity fail with `EntityDefect`.
 - An entity runs with the fiber refs of the `registerEntity` call (e.g. its log annotations), not with those of the sender of the message that started it.
-- If processing a message dies with a defect, its sender receives `EntityDefect`, the entity is stopped and the next message starts a new one.
+- If processing a message dies with a defect, its sender receives `EntityDefect` (an `AtLeastOnce` message is retried instead, see [At least once](delivery-guarantees.md#at-least-once-atleastonce)), the entity is stopped and the next message starts a new one.
 - `Sharding.terminateLocalEntity` stops an entity explicitly (typically from the entity itself), after completing the messages it already received. The next message starts it again.
 
 ## Entity options
@@ -42,7 +42,9 @@ Entity and topic types must all have different names.
 - `mailboxCapacity`: maximum number of messages waiting or being processed by an entity (4096 by default, `EntityOptions.Unbounded` for no limit). Beyond that, messages fail with `MailboxFull`.
 - `loadEntity`: whether a message should start the entity when it isn't running. If not, the message is discarded: `sendDiscard` succeeds and `send` fails with `MessageDiscarded`. For an `AtLeastOnce` message, it only applies to a new key (see [At least once](delivery-guarantees.md#at-least-once-atleastonce)).
 - `interceptor`: wraps the entities and their messages, see [Interceptors](#interceptors).
-- `retention`: how long the result of an `AtLeastOnce` message is kept (24 hours by default), see [At least once](delivery-guarantees.md#at-least-once-atleastonce).
+- `retention`: how long the reply or typed error of an `AtLeastOnce` message is kept (24 hours by default), see [At least once](delivery-guarantees.md#at-least-once-atleastonce).
+- `rescanInterval`: how often a pod looks for the stored `AtLeastOnce` messages of its shards that need to run (10 seconds by default), see [At least once](delivery-guarantees.md#at-least-once-atleastonce).
+- `retrySchedule`: decides, after each attempt of an `AtLeastOnce` message that dies, whether to run it again and after which delay (5 attempts in all with exponential backoff from 200 milliseconds by default), see [At least once](delivery-guarantees.md#at-least-once-atleastonce).
 
 ```scala
 Sharding.registerEntity(
@@ -121,6 +123,7 @@ Besides the error type declared by the message, calls can fail with a `ClusterEr
 - `MessageDiscarded`: the entity was not running and `loadEntity` rejected the message.
 - `DeliveryUnknown`: an `AtMostOnce` message may or may not have been processed, for example because its pod became unavailable after it was sent. It was not sent again.
 - `StorageUnavailable`: message storage can't be reached, so the outcome of an `AtLeastOnce` message is unknown. It may have been processed: sending it again with the same key gets its result if that was stored, and processes it again otherwise.
+- `DeadLettered`: an `AtLeastOnce` message became a dead letter, for example because it ran out of attempts, so it won't run again. Every send with its key gets this error, with the reason.
 - `EntityDefect`: the entity died while processing the message (or failed to start).
 - `SerializationError`: a message, reply, stream element or stream input failed to be encoded or decoded.
 - `TransportError`: an unexpected failure of the transport between pods.

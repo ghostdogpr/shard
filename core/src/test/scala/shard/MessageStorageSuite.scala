@@ -2,11 +2,11 @@ package shard
 
 import java.nio.charset.StandardCharsets.UTF_8
 
-import zio.{durationInt, Clock, Duration, ZIO}
+import zio.{durationInt, Chunk, Clock, Duration, ZIO}
 import zio.test._
 
 import shard.interfaces.MessageStorage
-import shard.interfaces.MessageStorage.{Key, Result, Stored}
+import shard.interfaces.MessageStorage.{DeadLetter, Key, Result, Stored}
 import shard.interfaces.Pods.BinaryReply
 
 /**
@@ -34,12 +34,13 @@ object MessageStorageSuite {
       case Stored.Pending(body)                   => s"pending ${String(body, UTF_8)}"
       case Stored.Done(BinaryReply.Success(body)) => s"success ${String(body, UTF_8)}"
       case Stored.Done(BinaryReply.Failure(body)) => s"failure ${String(body, UTF_8)}"
+      case Stored.Done(DeadLetter(reason))        => s"dead letter $reason"
     }
 
   val tests: List[Spec[MessageStorage, Throwable]] =
     List(
       test("a stored message is pending until its result is saved, and only its first result is kept") {
-        val key = Key("type", "id", "pending")
+        val key = Key("type", 1, "id", "pending")
         for {
           first   <- store(key, "a")
           pending <- store(key, "b")
@@ -55,7 +56,7 @@ object MessageStorageSuite {
         )
       },
       test("keys are separate for each role, entity type and entity ID") {
-        val key = Key("type", "id", "scoped")
+        val key = Key("type", 1, "id", "scoped")
         for {
           _      <- store(key, "a")
           others <- ZIO.foreach(List(key.copy(entityType = "other"), key.copy(entityId = "other")))(store(_, "b"))
@@ -63,7 +64,7 @@ object MessageStorageSuite {
         } yield assertTrue(others.forall(_ == "new"), role == Stored.New)
       },
       test("a result is kept for its retention, then the key is free") {
-        val key = Key("type", "id", "retention")
+        val key = Key("type", 1, "id", "retention")
         for {
           _     <- store(key, "a")
           _     <- saveResult(key, success("value"), retention = 500.millis)
@@ -72,9 +73,28 @@ object MessageStorageSuite {
           again <- store(key, "d")
         } yield assertTrue(kept == "success value", again == "pending c")
       },
+      test("a dead letter is kept with no expiry, and like a result, only the first outcome is kept") {
+        val deadLetter = Key("type", 1, "id", "dead letter")
+        val done       = Key("type", 1, "id", "done before dead letter")
+        for {
+          _      <- store(deadLetter, "a")
+          saved  <- saveResult(deadLetter, DeadLetter("reason"), retention = 1.milli)
+          kept   <- saveResult(deadLetter, success("value"))
+          _      <- Clock.sleep(100.millis)
+          stored <- store(deadLetter, "b")
+          _      <- store(done, "a")
+          _      <- saveResult(done, success("value"))
+          result <- saveResult(done, DeadLetter("reason"))
+        } yield assertTrue(
+          saved == "dead letter reason",
+          kept == "dead letter reason",
+          stored == "dead letter reason",
+          result == "success value"
+        )
+      },
       test("removing a message frees its key, unless it has a result") {
-        val removed = Key("type", "id", "removed")
-        val done    = Key("type", "id", "done")
+        val removed = Key("type", 1, "id", "removed")
+        val done    = Key("type", 1, "id", "done")
         for {
           _       <- store(removed, "a")
           _       <- remove(removed)
@@ -83,9 +103,54 @@ object MessageStorageSuite {
           _       <- saveResult(done, success("value"))
           _       <- remove(done)
           result  <- store(done, "b")
-          _       <- saveResult(Key("type", "id", "unknown"), success("value"))
-          unknown <- store(Key("type", "id", "unknown"), "a")
+          _       <- saveResult(Key("type", 1, "id", "unknown"), success("value"))
+          unknown <- store(Key("type", 1, "id", "unknown"), "a")
         } yield assertTrue(stored == "new", result == "success value", unknown == "success value")
+      },
+      test("pending streams the messages of an entity type's shards that have no result, and deadLetters their dead letters") {
+        def key(shardId: ShardId, deliveryKey: String) = Key("pending-type", shardId, "id", deliveryKey)
+        for {
+          _           <-
+            ZIO.foreachDiscard(List(key(1, "a"), key(2, "b"), key(3, "other shard"), key(1, "done"), key(1, "dead letter"), key(1, "removed")))(key =>
+              store(key, key.deliveryKey)
+            )
+          _           <- saveResult(key(1, "done"), success("value"))
+          _           <- saveResult(key(1, "dead letter"), DeadLetter("reason"))
+          _           <- remove(key(1, "removed"))
+          _           <- store(Key("other", 1, "id", "a"), "c")
+          _           <- ZIO.serviceWithZIO[MessageStorage](_.store(Role("other"), key(1, "other role"), "d".getBytes(UTF_8)))
+          pending     <- ZIO.serviceWithZIO[MessageStorage](_.pending(role, "pending-type", Set(1, 2)).runCollect)
+          _           <- ZIO.foreachDiscard(List(key(3, "other shard"), Key("other", 1, "id", "a"), key(2, "b")))(saveResult(_, DeadLetter("other reason")))
+          _           <- ZIO.serviceWithZIO[MessageStorage](_.saveResult(Role("other"), key(1, "other role"), DeadLetter("reason"), 1.minute))
+          _           <- store(key(1, "removed"), "a")
+          _           <- saveResult(key(1, "removed"), DeadLetter("removed"))
+          _           <- remove(key(1, "removed"))
+          deadLetters <- ZIO.serviceWithZIO[MessageStorage](_.deadLetters(role, "pending-type", Set(1, 3)).runCollect)
+          freed       <- store(key(1, "removed"), "b")
+        } yield assertTrue(
+          pending.map((key, body) => key -> String(body, UTF_8)).toSet == Set(key(1, "a") -> "a", key(2, "b") -> "b"),
+          deadLetters.map((key, reason, body) => (key, reason, String(body, UTF_8))).toSet ==
+            Set((key(1, "dead letter"), "reason", "dead letter"), (key(3, "other shard"), "other reason", "other shard")),
+          freed == "new"
+        )
+      },
+      test("pending streams the messages of each entity in the order they were stored, and a key stored again after a removal takes its new place") {
+        val deliveryKeys                               = List("e", "b", "f", "a", "d", "c")
+        def key(entityId: String, deliveryKey: String) = Key("ordered-type", 1, entityId, deliveryKey)
+        for {
+          _       <- ZIO.foreachDiscard(deliveryKeys)(deliveryKey =>
+                       ZIO.foreachDiscard(List("x", "y"))(entityId => store(key(entityId, deliveryKey), deliveryKey))
+                     )
+          _       <- remove(key("x", "b"))
+          _       <- store(key("x", "b"), "b")
+          _       <- saveResult(key("y", "f"), DeadLetter("reason"))
+          _       <- remove(key("y", "f"))
+          _       <- store(key("y", "f"), "f")
+          pending <- ZIO.serviceWithZIO[MessageStorage](_.pending(role, "ordered-type", Set(1)).runCollect)
+        } yield assertTrue(
+          pending.groupMap(_._1.entityId)(_._1.deliveryKey) ==
+            Map("x" -> Chunk("e", "f", "a", "d", "c", "b"), "y" -> Chunk("e", "b", "a", "d", "c", "f"))
+        )
       }
     )
 }

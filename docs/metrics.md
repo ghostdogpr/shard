@@ -17,3 +17,5 @@ The shard-level Shard Manager gauges are additionally tagged with `pod_address`.
 - `shard.shards` (gauge, tagged with `role`): Number of shards currently assigned to the pod
 - `shard.entities` (gauge, tagged with `role` and `type`): Number of entities currently running on the pod
 - `shard.singletons` (gauge, tagged with `role` and `singleton_name`): Number of singletons currently running on the pod
+- `shard.pending_messages` (gauge, tagged with `role` and `type`): Number of `AtLeastOnce` messages stored without a result in the shards of the pod
+- `shard.dead_letters` (counter, tagged with `role` and `type`): Number of `AtLeastOnce` messages that became dead letters on the pod

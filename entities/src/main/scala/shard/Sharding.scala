@@ -20,7 +20,7 @@ import shard.internal.EntityManager.StreamReply
   */
 class Sharding private (
   address: PodAddress,
-  config: Config,
+  private[shard] val config: Config,
   shardAssignments: Ref[Map[ShardId, PodAddress]],
   entityStates: Ref.Synchronized[Map[String, Option[EntityManager[?]]]], // None once its registration has closed
   singletons: Ref.Synchronized[List[(String, UIO[Nothing], Option[Fiber[Nothing, Nothing]])]],
@@ -30,7 +30,7 @@ class Sharding private (
   shardManager: ShardManagerClient,
   pods: Pods,
   storage: Storage,
-  messageStorage: MessageStorage,
+  private[shard] val messageStorage: MessageStorage,
   eventsHub: Hub[ShardingRegistrationEvent]
 ) { self =>
   def getShardId(recipientType: RecipientType[?], entityId: String): ShardId =
@@ -661,18 +661,21 @@ class Sharding private (
     for {
       env        <- ZIO.environment[R]
       makeHandler = (entityId: String) => ZIO.suspend(behavior(entityId)).provideSomeEnvironment[Scope](env ++ _).orDie
-      _          <- ZIO.acquireRelease(
-                      entityStates.modifyZIO(map =>
-                        if (map.get(recipientType.name).flatten.nonEmpty)
-                          ZIO.dieMessage(
-                            s"An entity or topic type named ${recipientType.name} is already registered, names must be unique"
-                          )
-                        else
-                          EntityManager
-                            .make(recipientType, makeHandler, self, messageStorage, config, options)
-                            .map(manager => (manager, map.updated(recipientType.name, Some(manager))))
-                      )
-                    )(manager => manager.close *> entityStates.update(_.updated(recipientType.name, None)))
+      _          <- ZIO
+                      .acquireRelease(
+                        entityStates.modifyZIO(map =>
+                          if (map.get(recipientType.name).flatten.nonEmpty)
+                            ZIO.dieMessage(
+                              s"An entity or topic type named ${recipientType.name} is already registered, names must be unique"
+                            )
+                          else
+                            EntityManager
+                              .make(recipientType, makeHandler, self, messageStorage, config, options)
+                              .map(manager => (manager, map.updated(recipientType.name, Some(manager))))
+                        )
+                      )(manager => manager.close *> entityStates.update(_.updated(recipientType.name, None)))
+                      // once the manager is visible, so that the entities it starts can reach their own type
+                      .flatMap(_.startRescan)
     } yield ()
 
   def terminateLocalEntity(entityType: EntityType[?], entityId: String): UIO[Unit] =
