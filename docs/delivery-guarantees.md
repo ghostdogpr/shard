@@ -30,7 +30,7 @@ enum AccountMessage[E, A] {
 }
 ```
 
-- The pod hosting the entity stores the message in [message storage](customization.md#message-storage) before running it. Its first result, a reply or a typed error, is stored, and every `send` with the same key gets that result without running the message again.
+- The pod hosting the entity stores the message in [message storage](customization.md#message-storage), for example [on Redis](customization.md#redis), before running it. Its first result, a reply or a typed error, is stored, and every `send` with the same key gets that result without running the message again.
 - A `send` with a key whose message is running waits for its result, so a message sent again after its connection dropped runs once.
 - The pod that owns the shard of an entity runs the stored messages of the entity that have no result, without waiting for them to be sent again. It looks for them when the entity type is registered, and then every `rescanInterval`, skipping those that are running. So a message whose pod died before its result was stored runs again on the next owner of its shard. The scan at registration and each periodic scan set the `shard.pending_messages` [metric](metrics.md) to the number of these messages in all the shards of the pod.
 - The owner starts the stored messages that it finds for an entity in the order they were stored, apart from `Concurrent` messages, which run alongside the others. A new message sent to the entity meanwhile can run before them. A message that dies with a defect can run again after the messages queued behind it, which are queued again on a new entity in any order. A sender that needs its messages to run in strict order should send each one and wait for its outcome before sending the next.
@@ -51,7 +51,7 @@ enum AccountMessage[E, A] {
 - Each message of a `sendStream` is stored and queued like a `sendDiscard`, so when a `sendStream` is sent again from the start after a failure, its messages whose key has a result or is running don't run again, and a message whose key is a dead letter fails the `sendStream` with `DeadLettered` each time. The messages are stored and queued one at a time, so the latency of message storage adds up over a long stream. If message storage can't be reached, the `sendStream` fails with `StorageUnavailable` and isn't sent again.
 - Calls that return a stream of replies (`stream`, `duplex` and their auto-restart variants) and topics don't use it: sent with them, the message is best effort. A message can't have both `AtMostOnce` and `AtLeastOnce`.
 - A pod of an earlier version runs it as best effort, so during the rolling update that adds the marker, the message may run more than once.
-- Stored messages and results are encoded with the codec of the entity type, so the later versions of the app must still be able to decode them.
+- Stored messages and results are encoded with the codec of the entity type, so the later versions of the app must still be able to decode them, which is easier with a codec whose format can evolve, such as [Proteus](customization.md#proteus).
 
 ### Dead letters
 

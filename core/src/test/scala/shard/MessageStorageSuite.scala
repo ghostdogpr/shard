@@ -56,10 +56,10 @@ object MessageStorageSuite {
         )
       },
       test("keys are separate for each role, entity type and entity ID") {
-        val key = Key("type", 1, "id", "scoped")
+        val key = Key("type", 1, "id", "scoped:key")
         for {
           _      <- store(key, "a")
-          others <- ZIO.foreach(List(key.copy(entityType = "other"), key.copy(entityId = "other")))(store(_, "b"))
+          others <- ZIO.foreach(List(key.copy(entityType = "other"), key.copy(entityId = "other"), Key("type", 1, "id:scoped", "key")))(store(_, "b"))
           role   <- ZIO.serviceWithZIO[MessageStorage](_.store(Role("other"), key, "c".getBytes(UTF_8)))
         } yield assertTrue(others.forall(_ == "new"), role == Stored.New)
       },
@@ -109,11 +109,13 @@ object MessageStorageSuite {
       },
       test("pending streams the messages of an entity type's shards that have no result, and deadLetters their dead letters") {
         def key(shardId: ShardId, deliveryKey: String) = Key("pending-type", shardId, "id", deliveryKey)
+        val noEntityId                                 = Key("pending-type", 2, "", "c")
+        val neverStored                                = Key("pending-type", 3, "", "")
         for {
           _           <-
-            ZIO.foreachDiscard(List(key(1, "a"), key(2, "b"), key(3, "other shard"), key(1, "done"), key(1, "dead letter"), key(1, "removed")))(key =>
-              store(key, key.deliveryKey)
-            )
+            ZIO.foreachDiscard(
+              List(key(1, "a"), key(2, "b"), key(2, ""), noEntityId, key(3, "other shard"), key(1, "done"), key(1, "dead letter"), key(1, "removed"))
+            )(key => store(key, key.deliveryKey))
           _           <- saveResult(key(1, "done"), success("value"))
           _           <- saveResult(key(1, "dead letter"), DeadLetter("reason"))
           _           <- remove(key(1, "removed"))
@@ -121,6 +123,7 @@ object MessageStorageSuite {
           _           <- ZIO.serviceWithZIO[MessageStorage](_.store(Role("other"), key(1, "other role"), "d".getBytes(UTF_8)))
           pending     <- ZIO.serviceWithZIO[MessageStorage](_.pending(role, "pending-type", Set(1, 2)).runCollect)
           _           <- ZIO.foreachDiscard(List(key(3, "other shard"), Key("other", 1, "id", "a"), key(2, "b")))(saveResult(_, DeadLetter("other reason")))
+          _           <- saveResult(neverStored, DeadLetter("never stored"))
           _           <- ZIO.serviceWithZIO[MessageStorage](_.saveResult(Role("other"), key(1, "other role"), DeadLetter("reason"), 1.minute))
           _           <- store(key(1, "removed"), "a")
           _           <- saveResult(key(1, "removed"), DeadLetter("removed"))
@@ -128,14 +131,19 @@ object MessageStorageSuite {
           deadLetters <- ZIO.serviceWithZIO[MessageStorage](_.deadLetters(role, "pending-type", Set(1, 3)).runCollect)
           freed       <- store(key(1, "removed"), "b")
         } yield assertTrue(
-          pending.map((key, body) => key -> String(body, UTF_8)).toSet == Set(key(1, "a") -> "a", key(2, "b") -> "b"),
-          deadLetters.map((key, reason, body) => (key, reason, String(body, UTF_8))).toSet ==
-            Set((key(1, "dead letter"), "reason", "dead letter"), (key(3, "other shard"), "other reason", "other shard")),
+          pending.map((key, body) => key -> String(body, UTF_8)).toSet ==
+            Set(key(1, "a") -> "a", key(2, "b") -> "b", key(2, "") -> "", noEntityId -> "c"),
+          deadLetters.map((key, reason, body) => (key, reason, String(body, UTF_8))).toSet == Set(
+            (key(1, "dead letter"), "reason", "dead letter"),
+            (key(3, "other shard"), "other reason", "other shard"),
+            (neverStored, "never stored", "")
+          ),
           freed == "new"
         )
       },
       test("pending streams the messages of each entity in the order they were stored, and a key stored again after a removal takes its new place") {
-        val deliveryKeys                               = List("e", "b", "f", "a", "d", "c")
+        // more than a page of a storage that reads them in pages
+        val deliveryKeys                               = List("e", "b", "f", "a", "d", "c") ++ (1 to 200).map(_.toString)
         def key(entityId: String, deliveryKey: String) = Key("ordered-type", 1, entityId, deliveryKey)
         for {
           _       <- ZIO.foreachDiscard(deliveryKeys)(deliveryKey =>
@@ -149,7 +157,7 @@ object MessageStorageSuite {
           pending <- ZIO.serviceWithZIO[MessageStorage](_.pending(role, "ordered-type", Set(1)).runCollect)
         } yield assertTrue(
           pending.groupMap(_._1.entityId)(_._1.deliveryKey) ==
-            Map("x" -> Chunk("e", "f", "a", "d", "c", "b"), "y" -> Chunk("e", "b", "a", "d", "c", "f"))
+            Map("x" -> Chunk.from(deliveryKeys.filterNot(_ == "b") :+ "b"), "y" -> Chunk.from(deliveryKeys.filterNot(_ == "f") :+ "f"))
         )
       }
     )

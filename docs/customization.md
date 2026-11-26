@@ -36,6 +36,7 @@ You can then simply use the `StorageRedis.live` layer.
 It requires a `RedisConfig` with the following options:
 - `assignmentsKey`: a function returning the key to store the shard assignments of a role in Redis (`shard_assignments:<role>` by default)
 - `podsKey`: the key to store registered pods in Redis (`pods` by default)
+- `messagesKey`: a function returning the prefix of the keys that store the `AtLeastOnce` messages of a role and their results, used by [`MessageStorageRedis.live`](#redis) (`shard_messages:<role>` by default)
 
 It also requires a `SageClient`. Here's an example how to build it:
 
@@ -53,7 +54,7 @@ See the [Sage configuration](https://ghostdogpr.github.io/sage/configuration) fo
 ### Alternatives
 
 Two other Redis implementations are available. They store data in the same format, so you can switch between them.
-They provide the same `StorageRedis.live` layer and `RedisConfig`, but require a different client:
+They provide the same `StorageRedis.live` layer and `RedisConfig`, without `messagesKey` since they don't store messages, but require a different client:
 - `shard-storage-redis` uses [redis4cats](https://redis4cats.profunktor.dev/) and requires a `Redis` object, an alias to `RedisCommands[Task, String, String] & PubSubCommands[Task, fs2Stream, String, String]`.
 - `shard-storage-redisson` uses [Redisson](https://redisson.org/) and requires a `RedissonClient`.
 
@@ -79,6 +80,12 @@ trait MessageStorage {
 When `store`, `saveResult` or `remove` fails, the message fails with `StorageUnavailable`, and when one of them dies, with `EntityDefect`. When `pending` fails, the next scan calls it again.
 
 `Sharding.live` requires a `MessageStorage`. If you don't send `AtLeastOnce` messages, use the `MessageStorage.none` layer, with which they fail with `EntityDefect`. For testing, you can use the `MessageStorage.memory` layer that keeps messages in memory, which only works with a single pod.
+
+### Redis
+
+The `shard-storage-sage` dependency also provides `MessageStorageRedis.live`, which stores messages in Redis with the Sage client. It requires the same `SageClient` and `RedisConfig` as `StorageRedis.live`, and works with a standalone server, with a master and replicas, and with Redis Cluster, where the shards of an entity type spread over the nodes.
+
+For the messages that Shard accepted to survive a crash or a restart of Redis, Redis must write each one to disk before it replies: configure it with `appendonly yes` and `appendfsync always`. With the default `appendfsync everysec`, a crash of Redis can lose the messages and results of the last second. Configure `maxmemory-policy noeviction` as well, because the other policies let Redis evict stored messages and results when its memory is full. With replicas, replication is asynchronous, so a failover can lose the messages and results that the master acknowledged just before it.
 
 ## Messaging Protocol
 

@@ -8,11 +8,11 @@ import zio.test._
 import zio.test.TestAspect.{sequential, timeout}
 
 object StorageRedisSpec extends ZIOSpecDefault {
-  val container: ZLayer[Any, Nothing, GenericContainer] =
+  def container(command: String*): ZLayer[Any, Nothing, GenericContainer] =
     ZLayer.scoped {
       ZIO.acquireRelease {
         ZIO.attemptBlocking {
-          val container = new GenericContainer(dockerImage = "redis:8.8.0", exposedPorts = Seq(6379))
+          val container = new GenericContainer(dockerImage = "redis:8.8.0", exposedPorts = Seq(6379), command = command)
           container.start()
           container
         }.orDie
@@ -30,6 +30,6 @@ object StorageRedisSpec extends ZIOSpecDefault {
 
   def spec: Spec[TestEnvironment & Scope, Any] =
     suite("StorageRedisSpec")(StorageSuite.tests*).provideLayerShared(
-      (container >>> redis) ++ ZLayer.succeed(RedisConfig.default) >>> StorageRedis.live
+      (container() >>> redis) ++ ZLayer.succeed(RedisConfig.default) >>> StorageRedis.live
     ) @@ sequential @@ timeout(1.minute)
 }
