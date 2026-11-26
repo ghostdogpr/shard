@@ -127,6 +127,8 @@ final private[shard] class EntityManager[Msg[_, _]] private (
 
   private val gauge = Metrics.entities.tagged("role", config.role.name).tagged("type", recipientType.name)
 
+  private val decrementGauge = FiberRef.currentTags.locally(registered.getOrDefault(FiberRef.currentTags))(gauge.decrement)
+
   private val interrupted: Exit[Any, Any] = Exit.interrupt(FiberId.None)
 
   private val sequential = options.concurrency <= 1
@@ -296,23 +298,27 @@ final private[shard] class EntityManager[Msg[_, _]] private (
     for {
       scope      <- Scope.make
       // must stay interruptible to be stopped
-      processing <- makeHandler(entity.entityId)
-                      .provideEnvironment(ZEnvironment[Scope](scope))
-                      .foldCauseZIO(
-                        cause =>
-                          ZIO.logErrorCause(s"Failed to start ${recipientType.name} ${entity.entityId}", cause) *>
-                            failToStart(entity, cause),
-                        handler => {
-                          val mainLoop: UIO[Nothing] =
-                            if (sequential) sequentialLoop(entity, handler)
-                            else
-                              ZIO
-                                .when(options.concurrency <= maxBoundedConcurrency)(
-                                  Queue.bounded[Unit](options.concurrency)
-                                )
-                                .flatMap(permits => consume(entity.mailbox)(dispatch(entity, handler, _, permits)))
-                          mainLoop.fork *> consume(entity.concurrentMailbox)(dispatch(entity, handler, _, None))
-                        }
+      processing <- ZIO
+                      .transplant(graft =>
+                        makeHandler(entity.entityId)
+                          .provideEnvironment(ZEnvironment[Scope](scope))
+                          .foldCauseZIO(
+                            cause =>
+                              ZIO.logErrorCause(s"Failed to start ${recipientType.name} ${entity.entityId}", cause) *>
+                                failToStart(entity, cause),
+                            handler => {
+                              val mainLoop: UIO[Any] =
+                                if (sequential) sequentialLoop(entity, handler, graft)
+                                else
+                                  ZIO
+                                    .when(options.concurrency <= maxBoundedConcurrency)(
+                                      Queue.bounded[Unit](options.concurrency)
+                                    )
+                                    .flatMap(permits => consume(entity.mailbox)(dispatch(entity, handler, _, permits)))
+                                    .fork
+                              mainLoop *> consume(entity.concurrentMailbox)(dispatch(entity, handler, _, None))
+                            }
+                          )
                       )
                       .interruptible
                       .fork
@@ -340,7 +346,7 @@ final private[shard] class EntityManager[Msg[_, _]] private (
     // compared by reference, since an entity with the same ID may have started since
     entities.modify { current =>
       if (current.running.get(entity.entityId).contains(entity))
-        (gauge.decrement, current.copy(running = current.running - entity.entityId))
+        (decrementGauge, current.copy(running = current.running - entity.entityId))
       else (ZIO.unit, current)
     }.flatten
 
@@ -371,19 +377,21 @@ final private[shard] class EntityManager[Msg[_, _]] private (
       case other                => (finish(entity, envelope, interrupted), other)
     }.flatten
 
-  private def sequentialLoop(entity: RunningEntity[Msg], handler: EntityHandler[Msg]): UIO[Nothing] =
-    // a cancelled message interrupts the loop's fiber, then a new one takes over
-    forkWithSelf(loop =>
-      consume(entity.mailbox)(envelope =>
-        runIfQueued(entity, handler, envelope, loop)(exit =>
-          envelope.state.getAndSet(EnvelopeState.Done).flatMap { previous =>
-            complete(entity, envelope, exit) *>
-              // cancelled while running: wait for the sender's interruption
-              ZIO.when(previous == EnvelopeState.Done)(ZIO.interruptible(ZIO.never)).unit
-          }
+  private def sequentialLoop(entity: RunningEntity[Msg], handler: EntityHandler[Msg], graft: ZIO.Grafter): UIO[Any] =
+    // a cancelled message interrupts the loop's fiber, which starts the next one next to it before stopping
+    graft(
+      forkWithSelf(loop =>
+        consume(entity.mailbox)(envelope =>
+          runIfQueued(entity, handler, envelope, loop)(exit =>
+            envelope.state.getAndSet(EnvelopeState.Done).flatMap { previous =>
+              complete(entity, envelope, exit) *>
+                // cancelled while running: wait for the sender's interruption
+                ZIO.when(previous == EnvelopeState.Done)(sequentialLoop(entity, handler, graft) *> ZIO.interruptible(ZIO.never)).unit
+            }
+          )
         )
       )
-    ).flatMap(_.await).forever
+    )
 
   private def dispatch(
     entity: RunningEntity[Msg],
