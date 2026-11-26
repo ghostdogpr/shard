@@ -23,7 +23,8 @@ final case class SendTimeout(entityType: String, entityId: String) extends Clust
 final case class PodUnavailable(pod: PodAddress) extends ClusterError(s"Pod $pod is unavailable")
 
 /**
-  * A stream of replies was interrupted after it started (e.g. the entity was rebalanced or its pod became unavailable).
+  * A stream of replies was interrupted after it started (e.g. the entity was rebalanced or its pod became unavailable),
+  * or before that for an `AtMostOnce` message (e.g. its entity stopped).
   */
 case object StreamCancelled extends ClusterError("Stream connection was canceled.")
 
@@ -37,6 +38,13 @@ final case class InvalidShardId(entityId: String, shardId: Int) extends ClusterE
   */
 final case class EntityInterrupted(entityType: String, entityId: String)
   extends ClusterError(s"Processing of a message by $entityType $entityId was interrupted")
+
+/**
+  * An `AtMostOnce` message may or may not have been processed (e.g. its pod became unavailable after it was sent),
+  * so it was not sent again.
+  */
+final case class DeliveryUnknown(entityType: String, entityId: String)
+  extends ClusterError(s"Message to $entityType $entityId may or may not have been processed")
 
 /**
   * The entity was not running and `loadEntity` rejected the message.

@@ -1,5 +1,7 @@
 package shard
 
+import java.net.{ConnectException, NoRouteToHostException, UnknownHostException}
+import java.nio.channels.UnresolvedAddressException
 import java.util.concurrent.TimeUnit
 
 import io.grpc.{ClientInterceptors, ManagedChannelBuilder, Status, StatusException}
@@ -45,9 +47,10 @@ class GrpcPods(
 
   private def mapClientError(pod: PodAddress, streamedReplies: Boolean)(ex: StatusException): Throwable =
     ex.getStatus.getCode match {
-      case Status.Code.CANCELLED if streamedReplies        => StreamCancelled
-      case Status.Code.UNAVAILABLE | Status.Code.CANCELLED => PodUnavailable(pod)
-      case _                                               => ex
+      case Status.Code.CANCELLED if streamedReplies                                   => StreamCancelled
+      case Status.Code.UNAVAILABLE if GrpcPods.failedToConnect(ex.getStatus.getCause) => Pods.NotSent(pod)
+      case Status.Code.UNAVAILABLE | Status.Code.CANCELLED                            => PodUnavailable(pod)
+      case _                                                                          => ex
     }
 
   def assignShards(pod: PodAddress, role: Role, shards: Set[ShardId]): Task[Unit] =
@@ -82,13 +85,23 @@ class GrpcPods(
 
 object GrpcPods {
 
+  private def failedToConnect(cause: Throwable): Boolean =
+    Iterator.iterate(cause)(_.getCause).takeWhile(_ != null).exists {
+      case _: ConnectException | _: NoRouteToHostException | _: UnresolvedAddressException | _: UnknownHostException => true
+      case _                                                                                                         => false
+    }
+
   /**
     * Open a gRPC client to the given host and port, closed when the scope ends.
     */
   private[shard] def clientBackend(host: String, port: Int, config: GrpcConfig): RIO[Scope, ZioClientBackend] =
     ZIO.suspend {
       val builder =
-        ManagedChannelBuilder.forAddress(host, port).maxInboundMessageSize(config.maxInboundMessageSize).usePlaintext()
+        ManagedChannelBuilder
+          .forAddress(host, port)
+          .maxInboundMessageSize(config.maxInboundMessageSize)
+          .usePlaintext()
+          .disableServiceConfigLookUp()
       config.executor.foreach(builder.executor)
       ZIO
         .acquireRelease(ZIO.attempt(builder.build())) { channel =>

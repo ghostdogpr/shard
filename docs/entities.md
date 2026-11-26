@@ -19,6 +19,7 @@ enum GuildMessage[E, A] {
 Messages can extend marker traits that change how they are processed:
 - `Concurrent`: the message runs alongside the other messages, ignoring the `concurrency` option (useful for read-only messages).
 - `Uninterruptible`: the message is not interrupted when its sender stops waiting for it (e.g. after a timeout).
+- `AtMostOnce`: the message is processed at most once per call (see [At most once](delivery-guarantees.md#at-most-once-atmostonce)).
 
 ## Handlers
 
@@ -104,7 +105,7 @@ for {
 
 `Sharding.messenger` takes an optional `MessengerTimeout`: `InheritConfigTimeout` (the default) uses `Config.sendTimeout`, `Timeout(duration)` sets a specific timeout, and `NoTimeout` waits forever.
 The timeout only applies to `send` and `sendDiscard`.
-When it is reached, the sender receives `SendTimeout`, and for `send` the processing of the message is interrupted (unless it is `Uninterruptible`).
+When it is reached, the sender receives `SendTimeout`, and for `send` the processing of the message is interrupted (unless it is `Uninterruptible` or `AtMostOnce`).
 
 ## Errors
 
@@ -112,20 +113,18 @@ Besides the error type declared by the message, calls can fail with a `ClusterEr
 - `MailboxFull`: the mailbox of the entity is full, the message was not processed.
 - `SendTimeout`: `send` or `broadcast` got no reply, or `sendDiscard` got no acknowledgment, within the timeout.
 - `PodUnavailable`: a pod is not responsive (only returned by `broadcast`, since messages to entities are retried).
-- `StreamCancelled`: a stream of replies was interrupted after it started (e.g. the entity was rebalanced).
+- `StreamCancelled`: a stream of replies was interrupted after it started (e.g. the entity was rebalanced), or before that for an `AtMostOnce` message (e.g. its entity stopped).
 - `InvalidShardId`: the shard ID computed for an entity is invalid.
 - `EntityInterrupted`: the entity was stopped before the message was fully processed (e.g. it exceeded `entityTerminationTimeout`). The message may have been partially processed.
 - `MessageDiscarded`: the entity was not running and `loadEntity` rejected the message.
+- `DeliveryUnknown`: an `AtMostOnce` message may or may not have been processed, for example because its pod became unavailable after it was sent. It was not sent again.
 - `EntityDefect`: the entity died while processing the message (or failed to start).
 - `SerializationError`: a message, reply, stream element or stream input failed to be encoded or decoded.
 - `TransportError`: an unexpected failure of the transport between pods.
 
 ## Delivery guarantees
 
-- If the pod hosting an entity becomes unavailable while processing a message, the message is sent again once the entity has moved, so it may be processed more than once.
-- A message is not sent again once `sendDiscard` returned, or when it fails with `EntityInterrupted`.
-- A message whose reply is a stream is sent again only until the first element was received, or for a `duplex` until its inputs started being read. After that, the stream fails with `StreamCancelled` if the entity is rebalanced or its pod becomes unavailable (use `streamAutoRestart` or `duplexAutoRestart` to restart it).
-- When a `sendStream` is sent again, its stream of messages is run again from the start, so it must be one that can be run more than once.
+Each message has a delivery guarantee, which decides whether it is sent again when its pod fails: best effort by default, or at most once for `AtMostOnce` messages. See [Delivery guarantees](delivery-guarantees.md) for what each one guarantees.
 
 ## Streaming
 
