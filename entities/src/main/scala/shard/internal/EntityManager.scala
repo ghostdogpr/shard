@@ -82,6 +82,8 @@ private[shard] object EntityManager {
     }
   }
 
+  final private case class Entities[Msg[_, _]](running: Map[String, RunningEntity[Msg]], collections: Long)
+
   // above that number, the concurrency is considered unbounded and no permits are used
   private val maxBoundedConcurrency = 65536
 
@@ -99,7 +101,7 @@ private[shard] object EntityManager {
     options: EntityOptions[Msg]
   ): URIO[Scope, EntityManager[Msg]] =
     for {
-      entities   <- Ref.Synchronized.make[Map[String, RunningEntity[Msg]]](Map())
+      entities   <- Ref.make(Entities[Msg](Map(), 0L))
       closed     <- Ref.make(false)
       registered <- ZIO.getFiberRefs
       manager     = new EntityManager(recipientType, makeHandler, entities, closed, registered, sharding, config, options)
@@ -114,7 +116,7 @@ private[shard] object EntityManager {
 final private[shard] class EntityManager[Msg[_, _]] private (
   val recipientType: RecipientType[Msg],
   makeHandler: String => URIO[Scope, EntityHandler[Msg]],
-  entities: Ref.Synchronized[Map[String, EntityManager.RunningEntity[Msg]]],
+  entities: Ref[EntityManager.Entities[Msg]],
   closed: Ref[Boolean],
   registered: FiberRefs,
   sharding: Sharding,
@@ -138,8 +140,8 @@ final private[shard] class EntityManager[Msg[_, _]] private (
     val reap          =
       for {
         now     <- currentTimeInMilliseconds
-        running <- entities.get
-        _       <- ZIO.foreachDiscard(running.values)(
+        current <- entities.get
+        _       <- ZIO.foreachDiscard(current.running.values)(
                      stopInBackground(_, s => s.isIdle && now - s.lastActive >= maxIdleMillis)
                    )
       } yield ()
@@ -163,8 +165,8 @@ final private[shard] class EntityManager[Msg[_, _]] private (
     val erased = message.asInstanceOf[Msg[Any, Any]]
     for {
       _        <- ZIO.unlessZIO(isOnLocalShards(entityId))(ZIO.fail(EntityNotManagedByThisPod(entityId)))
-      map      <- entities.get
-      envelope <- map.get(entityId) match {
+      current  <- entities.get
+      envelope <- current.running.get(entityId) match {
                     case Some(entity)                         => tryOffer(entity, erased)
                     case None if !options.loadEntity(message) =>
                       ZIO.fail(MessageDiscarded(recipientType.name, entityId))
@@ -221,19 +223,30 @@ final private[shard] class EntityManager[Msg[_, _]] private (
   }
 
   private def getOrStart(entityId: String): IO[EntityNotManagedByThisPod, RunningEntity[Msg]] =
-    entities.modifyZIO { map =>
-      map.get(entityId) match {
-        case Some(entity) => ZIO.succeed((entity, map))
+    entities.get.flatMap { before =>
+      before.running.get(entityId) match {
+        case Some(entity) => ZIO.succeed(entity)
         case None         =>
-          // check again under the lock, so that an entity is never started after being stopped
+          // check again, so that an entity is never started after being stopped
           (isOnLocalShards(entityId) && sharding.isShuttingDown.negate && closed.get.negate).flatMap {
-            case true  => start(entityId).map(entity => (entity, map.updated(entityId, entity)))
+            case true  =>
+              create(entityId).flatMap { entity =>
+                entities.modify { current =>
+                  current.running.get(entityId) match {
+                    case Some(other)                                       => (ZIO.succeed(other), current)
+                    case None if current.collections != before.collections => (getOrStart(entityId), current)
+                    // added before it runs, since an entity that fails to start removes itself right away
+                    case None                                              =>
+                      (start(entity).as(entity), current.copy(running = current.running.updated(entityId, entity)))
+                  }
+                }.flatten
+              }
             case false => ZIO.fail(EntityNotManagedByThisPod(entityId))
           }
       }
     }.uninterruptible
 
-  private def start(entityId: String): UIO[RunningEntity[Msg]] =
+  private def create(entityId: String): UIO[RunningEntity[Msg]] =
     for {
       mailbox    <- Queue.unbounded[Envelope[Msg]]
       concurrent <- Queue.unbounded[Envelope[Msg]]
@@ -249,13 +262,12 @@ final private[shard] class EntityManager[Msg[_, _]] private (
       drained    <- Promise.make[Nothing, Unit]
       closing    <- Promise.make[Nothing, Unit]
       terminated <- Promise.make[Nothing, Unit]
-      entity      = new RunningEntity(entityId, mailbox, concurrent, state, drained, closing, terminated)
-      // the entity runs with the fiber refs of the registration (e.g. log annotations), not those of the message that
-      // started it, which may come from any sender
-      // the gauge is updated in that fiber to keep it out of the lock of `entities`
-      _          <-
-        (ZIO.updateFiberRefs((fiberId, _) => registered.forkAs(fiberId)) *> gauge.increment *> run(entity)).forkDaemon
-    } yield entity
+    } yield new RunningEntity(entityId, mailbox, concurrent, state, drained, closing, terminated)
+
+  private def start(entity: RunningEntity[Msg]): UIO[Unit] =
+    // the entity runs with the fiber refs of the registration (e.g. log annotations), not those of the message that
+    // started it, which may come from any sender
+    (ZIO.updateFiberRefs((fiberId, _) => registered.forkAs(fiberId)) *> gauge.increment *> run(entity)).forkDaemon.unit
 
   /**
     * Run an entity until it stops, wrapped by the interceptors.
@@ -326,8 +338,10 @@ final private[shard] class EntityManager[Msg[_, _]] private (
     */
   private def remove(entity: RunningEntity[Msg]): UIO[Unit] =
     // compared by reference, since an entity with the same ID may have started since
-    entities.modify { map =>
-      if (map.get(entity.entityId).contains(entity)) (gauge.decrement, map - entity.entityId) else (ZIO.unit, map)
+    entities.modify { current =>
+      if (current.running.get(entity.entityId).contains(entity))
+        (gauge.decrement, current.copy(running = current.running - entity.entityId))
+      else (ZIO.unit, current)
     }.flatten
 
   /**
@@ -513,26 +527,25 @@ final private[shard] class EntityManager[Msg[_, _]] private (
 
   def terminateEntity(entityId: String): UIO[Unit] =
     // don't make the caller wait, since this can be called from the entity itself
-    entities.get.flatMap(_.get(entityId) match {
+    entities.get.flatMap(_.running.get(entityId) match {
       case Some(entity) => stopInBackground(entity)
       case None         => ZIO.unit
     })
 
-  // reads the entities under the lock, so that no entity is being started at the same time
-  private val runningEntities: UIO[Map[String, RunningEntity[Msg]]] =
-    entities.modifyZIO(map => ZIO.succeed((map, map)))
+  // call it after the change that prevents the entities being stopped from starting again (e.g. unassigning their shards)
+  private val collectEntitiesToStop: UIO[Map[String, RunningEntity[Msg]]] =
+    entities.modify(current => (current.running, current.copy(collections = current.collections + 1)))
 
   /**
     * Get the IDs of the entities running on this pod, from their start until they terminate.
     */
   def entityIds: UIO[Set[String]] =
-    // under the lock, so that an entity whose behavior was called is always included
-    runningEntities.map(_.keySet)
+    entities.get.map(_.running.keySet)
 
   def terminateEntitiesOnShards(shards: Set[ShardId]): UIO[Unit] =
     recipientType match {
       case _: EntityType[?] =>
-        runningEntities.flatMap { map =>
+        collectEntitiesToStop.flatMap { map =>
           stopAll(map.collect {
             case (entityId, entity) if shards.contains(sharding.getShardId(recipientType, entityId)) => entity
           })
@@ -542,7 +555,7 @@ final private[shard] class EntityManager[Msg[_, _]] private (
     }
 
   def terminateAllEntities: UIO[Unit] =
-    runningEntities.flatMap(map => stopAll(map.values))
+    collectEntitiesToStop.flatMap(map => stopAll(map.values))
 
   /**
     * Stop all entities and never start new ones.
