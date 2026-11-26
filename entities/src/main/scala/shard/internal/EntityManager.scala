@@ -298,27 +298,24 @@ final private[shard] class EntityManager[Msg[_, _]] private (
     for {
       scope      <- Scope.make
       // must stay interruptible to be stopped
-      processing <- ZIO
-                      .transplant(graft =>
-                        makeHandler(entity.entityId)
-                          .provideEnvironment(ZEnvironment[Scope](scope))
-                          .foldCauseZIO(
-                            cause =>
-                              ZIO.logErrorCause(s"Failed to start ${recipientType.name} ${entity.entityId}", cause) *>
-                                failToStart(entity, cause),
-                            handler => {
-                              val mainLoop: UIO[Any] =
-                                if (sequential) sequentialLoop(entity, handler, graft)
-                                else
-                                  ZIO
-                                    .when(options.concurrency <= maxBoundedConcurrency)(
-                                      Queue.bounded[Unit](options.concurrency)
-                                    )
-                                    .flatMap(permits => consume(entity.mailbox)(dispatch(entity, handler, _, permits)))
-                                    .fork
-                              mainLoop *> consume(entity.concurrentMailbox)(dispatch(entity, handler, _, None))
-                            }
-                          )
+      processing <- makeHandler(entity.entityId)
+                      .provideEnvironment(ZEnvironment[Scope](scope))
+                      .foldCauseZIO(
+                        cause =>
+                          ZIO.logErrorCause(s"Failed to start ${recipientType.name} ${entity.entityId}", cause) *>
+                            failToStart(entity, cause),
+                        handler => {
+                          val mainLoop: UIO[Any] =
+                            if (sequential) ZIO.transplant(sequentialLoop(entity, handler, _, replaced = None))
+                            else
+                              ZIO
+                                .when(options.concurrency <= maxBoundedConcurrency)(
+                                  Queue.bounded[Unit](options.concurrency)
+                                )
+                                .flatMap(permits => consume(entity.mailbox)(dispatch(entity, handler, _, permits)))
+                                .fork
+                          mainLoop *> consume(entity.concurrentMailbox)(dispatch(entity, handler, _, None))
+                        }
                       )
                       .interruptible
                       .fork
@@ -377,19 +374,30 @@ final private[shard] class EntityManager[Msg[_, _]] private (
       case other                => (finish(entity, envelope, interrupted), other)
     }.flatten
 
-  private def sequentialLoop(entity: RunningEntity[Msg], handler: EntityHandler[Msg], graft: ZIO.Grafter): UIO[Any] =
-    // a cancelled message interrupts the loop's fiber, which starts the next one next to it before stopping
+  private def sequentialLoop(
+    entity: RunningEntity[Msg],
+    handler: EntityHandler[Msg],
+    graft: ZIO.Grafter,
+    replaced: Option[Fiber.Runtime[Nothing, Any]]
+  ): UIO[Any] =
+    // a cancelled message interrupts the loop's fiber, which starts the next one before stopping
     graft(
       forkWithSelf(loop =>
-        consume(entity.mailbox)(envelope =>
-          runIfQueued(entity, handler, envelope, loop)(exit =>
-            envelope.state.getAndSet(EnvelopeState.Done).flatMap { previous =>
-              complete(entity, envelope, exit) *>
-                // cancelled while running: wait for the sender's interruption
-                ZIO.when(previous == EnvelopeState.Done)(sequentialLoop(entity, handler, graft) *> ZIO.interruptible(ZIO.never)).unit
-            }
+        // the next message waits until the previous loop and the fibers it forked are done
+        ZIO.foreachDiscard(replaced)(_.await) *>
+          consume(entity.mailbox)(envelope =>
+            runIfQueued(entity, handler, envelope, loop)(exit =>
+              envelope.state.getAndSet(EnvelopeState.Done).flatMap { previous =>
+                complete(entity, envelope, exit) *>
+                  // cancelled while running: wait for the sender's interruption
+                  ZIO
+                    .when(previous == EnvelopeState.Done)(
+                      sequentialLoop(entity, handler, graft, Some(loop)) *> ZIO.interruptible(ZIO.never)
+                    )
+                    .unit
+              }
+            )
           )
-        )
       )
     )
 

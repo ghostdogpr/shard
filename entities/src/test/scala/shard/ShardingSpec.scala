@@ -843,6 +843,17 @@ object ShardingSpec extends ZIOSpecDefault {
           ping   <- worker.send("w1")(Ping()).exit // the entity processes the next message
         } yield assertTrue(error == SendTimeout(Worker.name, "w1"), ping.isSuccess)
       },
+      test("The next message waits for the cleanup of the fibers forked by a cancelled message") {
+        for {
+          state  <- startWorker()
+          worker <- Sharding.messenger(Worker, MessengerTimeout.Timeout(200.millis))
+          error  <- worker.send("w1")(JoinGatedCleanup()).flip
+          next   <- worker.send("w1")(Completed()).fork
+          early  <- next.join.timeout(100.millis)
+          _      <- state.gate.succeed(())
+          seen   <- next.join
+        } yield assertTrue(error == SendTimeout(Worker.name, "w1"), early.isEmpty, seen == 1)
+      },
       test("Uninterruptible messages complete after their sender stops waiting") {
         for {
           state  <- startWorker()
@@ -1651,6 +1662,10 @@ object WorkerActor {
     // counts as running until interrupted, then forks a fiber that sets completed to 1 if it is interrupted before the
     // entity's finalizers run, or to 2 after
     case ForkOnInterrupt()     extends WorkerMessage[Nothing, Unit]
+    // forks a fiber that counts as completed once interrupted and the test opens the gate, then waits for it
+    case JoinGatedCleanup()    extends WorkerMessage[Nothing, Unit]
+    // number of completed messages
+    case Completed()           extends WorkerMessage[Nothing, Int]
   }
 
   object Worker extends EntityType[WorkerMessage]("worker")
@@ -1703,6 +1718,9 @@ object WorkerActor {
           case Instance()            => ZIO.succeed(instance)
           case Log()                 => ZIO.log("message")
           case ForkGated()           => (state.gate.await *> state.completed.update(_ + 1)).fork.unit
+          case JoinGatedCleanup()    =>
+            ZIO.never.onInterrupt(state.gate.await *> state.completed.update(_ + 1)).fork.flatMap(_.join)
+          case Completed()           => state.completed.get
           case ForkOnInterrupt()     =>
             running(ZIO.never).onInterrupt(
               state.gate.await.interruptible
