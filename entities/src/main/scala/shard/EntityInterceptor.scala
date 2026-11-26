@@ -17,7 +17,7 @@ import zio.IO
   *       effect: IO[E, A]
   *     ): IO[E, A] =
   *       message match {
-  *         case GuildMessage.Join(userId) => effect.tap(members => ZIO.logInfo(s"$userId joined: $members"))
+  *         case GuildMessage.Join(userId) => effect.tap(members => ZIO.logInfo(s"\$userId joined: \$members"))
   *         case _                         => effect
   *       }
   *   }
