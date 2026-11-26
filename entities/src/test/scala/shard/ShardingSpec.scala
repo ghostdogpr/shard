@@ -153,6 +153,23 @@ object ShardingSpec extends ZIOSpecDefault {
           ZLayer.succeed(Config.default.copy(entityTerminationTimeout = 100.millis))
         )
       },
+      test("A fiber forked by a message while it is interrupted stops before the entity's finalizers run") {
+        (for {
+          state  <- startWorker()
+          worker <- Sharding.messenger(Worker, MessengerTimeout.NoTimeout)
+          sent   <- worker.send("w1")(ForkOnInterrupt()).exit.fork
+          _      <- state.running.changes.takeUntil(_ == 1).runDrain
+          _      <- Sharding.terminateLocalEntity(Worker, "w1")
+          _      <- state.completed.changes.takeUntil(_ != 0).runDrain.timeout(5.seconds)
+          order  <- state.completed.get
+          _      <- sent.join
+        } yield assertTrue(order == 1)).provideSome[Scope](
+          LocalSharding.live,
+          LocalShardManagerClient.live,
+          Storage.memory,
+          ZLayer.succeed(Config.default.copy(entityTerminationTimeout = 100.millis))
+        )
+      },
       test("A snapshot fetched before the Shard Manager assigned shards to the pod doesn't undo the assignment") {
         val config = Config.default.copy(refreshAssignmentsRetryInterval = 10.millis)
         val self   = PodAddress(config.selfHost, config.shardingPort)
@@ -845,6 +862,26 @@ object ShardingSpec extends ZIOSpecDefault {
           ping   <- worker.send("w1")(Ping()).exit // the entity processes the next message
         } yield assertTrue(error == SendTimeout(Worker.name, "w1"), ping.isSuccess)
       },
+      test("The next message waits for the cleanup of the fibers forked by a cancelled message") {
+        for {
+          state   <- startWorker()
+          worker  <- Sharding.messenger(Worker, MessengerTimeout.Timeout(200.millis))
+          error   <- worker.send("w1")(JoinGatedCleanup()).flip
+          patient <- Sharding.messenger(Worker, MessengerTimeout.NoTimeout)
+          next    <- patient.send("w1")(Completed()).fork
+          early   <- next.join.timeout(100.millis)
+          _       <- state.gate.succeed(())
+          seen    <- next.join
+        } yield assertTrue(error == SendTimeout(Worker.name, "w1"), early.isEmpty, seen == 1)
+      },
+      test("A message cancelled while it runs doesn't change the fiber refs of the next messages") {
+        for {
+          _      <- startWorker()
+          worker <- Sharding.messenger(Worker, MessengerTimeout.Timeout(200.millis))
+          error  <- worker.send("w1")(SetContextAndBlock()).flip
+          seen   <- worker.send("w1")(Context())
+        } yield assertTrue(error == SendTimeout(Worker.name, "w1"), seen == "initial")
+      },
       test("Uninterruptible messages complete after their sender stops waiting") {
         for {
           state  <- startWorker()
@@ -883,6 +920,16 @@ object ShardingSpec extends ZIOSpecDefault {
           _       <- worker.send("w1")(Unblock())
           _       <- blocked.join
         } yield assertTrue(running == 1)
+      },
+      test("A fiber forked by a message keeps running after the message completes") {
+        for {
+          state  <- startWorker()
+          worker <- Sharding.messenger(Worker)
+          _      <- worker.send("w1")(ForkGated())
+          _      <- state.gate.succeed(())
+          _      <- state.completed.changes.takeUntil(_ == 1).runDrain.timeout(5.seconds)
+          done   <- state.completed.get
+        } yield assertTrue(done == 1)
       },
       test("Concurrency option") {
         for {
@@ -1252,7 +1299,7 @@ object ShardingSpec extends ZIOSpecDefault {
           ping.isSuccess
         )
       },
-      test("An interceptor's log annotations apply to the start, the messages and the finalizers of an entity") {
+      test("An interceptor's log annotations apply to the start, the messages, the forks and the finalizers of an entity") {
         val interceptor = new EntityInterceptor[WorkerMessage] {
           override def aroundEntity[E, A](recipientType: RecipientType[?], entityId: String)(
             effect: IO[E, A]
@@ -1262,7 +1309,11 @@ object ShardingSpec extends ZIOSpecDefault {
         for {
           state  <- WorkerState.make
           _      <- Sharding.registerEntity(Worker, EntityOptions(interceptor = interceptor))(entityId =>
-                      ZIO.log("start") *> worker(state)(entityId) <* ZIO.addFinalizer(ZIO.log("finalizer"))
+                      ZIO.log("start") *>
+                        Promise
+                          .make[Nothing, Unit]
+                          .flatMap(forked => (forked.succeed(()) *> ZIO.never).onInterrupt(ZIO.log("interrupted")).fork *> forked.await) *>
+                        worker(state)(entityId) <* ZIO.addFinalizer(ZIO.log("finalizer"))
                     )
           _      <- Sharding.registerScoped
           worker <- Sharding.messenger(Worker)
@@ -1273,14 +1324,14 @@ object ShardingSpec extends ZIOSpecDefault {
           logs   <- ZTestLogger.logOutput
         } yield assertTrue(
           logs.collect { case log if log.annotations.get("entity").contains("worker/w1") => log.message() } ==
-            Chunk("start", "message", "finalizer")
+            Chunk("start", "message", "interrupted", "finalizer")
         )
       } @@ TestAspect.tag(inProcess),
-      test("An entity runs with the context of its registration, not of the message that started it") {
+      test("An entity runs with the context of its registration and its behavior, not of the message that started it") {
         for {
           state  <- WorkerState.make
           _      <- ZIO.logAnnotate("registered", "worker")(
-                      Sharding.registerEntity(Worker)(entityId => ZIO.log("start") *> worker(state)(entityId))
+                      Sharding.registerEntity(Worker)(entityId => ZIO.log("start") *> ZIO.logAnnotateScoped("behavior", "set") *> worker(state)(entityId))
                     )
           _      <- Sharding.registerScoped
           worker <- Sharding.messenger(Worker)
@@ -1291,7 +1342,11 @@ object ShardingSpec extends ZIOSpecDefault {
           logs.collect {
             case log if log.annotations.contains("registered") || log.annotations.contains("request") =>
               log.message() -> log.annotations
-          } == Chunk.fromIterable(List("start", "message", "message").map(_ -> Map("registered" -> "worker")))
+          } == Chunk(
+            "start"   -> Map("registered" -> "worker"),
+            "message" -> Map("registered" -> "worker", "behavior" -> "set"),
+            "message" -> Map("registered" -> "worker", "behavior" -> "set")
+          )
         )
       },
       test("An interceptor wraps each message and gets its outcome") {
@@ -1630,9 +1685,25 @@ object WorkerActor {
     case Instance()            extends WorkerMessage[Nothing, Int]
     // logs "message"
     case Log()                 extends WorkerMessage[Nothing, Unit]
+    // forks a fiber that counts as completed once the test opens the gate
+    case ForkGated()           extends WorkerMessage[Nothing, Unit]
+    // counts as running until interrupted, then forks a fiber that sets completed to 1 if it is interrupted before the
+    // entity's finalizers run, or to 2 after
+    case ForkOnInterrupt()     extends WorkerMessage[Nothing, Unit]
+    // forks a fiber that counts as completed once interrupted and the test opens the gate, then waits for it
+    case JoinGatedCleanup()    extends WorkerMessage[Nothing, Unit]
+    // number of completed messages
+    case Completed()           extends WorkerMessage[Nothing, Int]
+    // sets `context`, then waits until interrupted
+    case SetContextAndBlock()  extends WorkerMessage[Nothing, Unit]
+    // the value of `context`
+    case Context()             extends WorkerMessage[Nothing, String]
   }
 
   object Worker extends EntityType[WorkerMessage]("worker")
+
+  // a fiber ref that a forked fiber inherits
+  val context: FiberRef[String] = Unsafe.unsafe(implicit unsafe => FiberRef.unsafe.make("initial"))
 
   def startWorker(options: EntityOptions[WorkerMessage] = EntityOptions()): RIO[Sharding & Scope, WorkerState] =
     WorkerState.make.tap(state => Sharding.registerEntity(Worker, options)(worker(state)) *> Sharding.registerScoped)
@@ -1681,6 +1752,18 @@ object WorkerActor {
           case Gated()               => running(state.gate.await) *> state.completed.update(_ + 1)
           case Instance()            => ZIO.succeed(instance)
           case Log()                 => ZIO.log("message")
+          case ForkGated()           => (state.gate.await *> state.completed.update(_ + 1)).fork.unit
+          case JoinGatedCleanup()    =>
+            ZIO.never.onInterrupt(state.gate.await *> state.completed.update(_ + 1)).fork.flatMap(_.join)
+          case Completed()           => state.completed.get
+          case SetContextAndBlock()  => context.set("set") *> ZIO.never
+          case Context()             => context.get
+          case ForkOnInterrupt()     =>
+            running(ZIO.never).onInterrupt(
+              state.gate.await.interruptible
+                .onInterrupt(state.finalized.get.flatMap(finalized => state.completed.set(if (finalized == 0) 1 else 2)))
+                .fork
+            )
         }
     }
 }
