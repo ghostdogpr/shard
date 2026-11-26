@@ -27,3 +27,4 @@ project/project/project/metals.sbt
 .cursor
 .claude
 build.sbt.semanticdb
+.worktrees/

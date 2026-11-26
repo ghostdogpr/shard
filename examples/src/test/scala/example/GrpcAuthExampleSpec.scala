@@ -5,7 +5,7 @@ import zio.{Config => _, _}
 import zio.test._
 
 import shard._
-import shard.interfaces.{Pods, Storage}
+import shard.interfaces.{MessageStorage, Pods, Storage}
 
 object GrpcAuthExampleSpec extends ZIOSpecDefault {
 
@@ -55,6 +55,7 @@ object GrpcAuthExampleSpec extends ZIOSpecDefault {
     ).provide(
       ShardManagerClient.local,
       Storage.memory,
+      MessageStorage.memory,
       config,
       grpcConfigLayer(validAuthenticationKey),
       Sharding.live,

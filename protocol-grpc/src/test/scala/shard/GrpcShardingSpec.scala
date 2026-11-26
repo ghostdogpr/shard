@@ -4,6 +4,7 @@ import java.net.{InetSocketAddress, Socket}
 import java.util.concurrent.CompletableFuture
 
 import io.grpc.{Attributes, Metadata, Server, ServerBuilder, ServerCall, ServerCallHandler, ServerServiceDefinition}
+import proteus.{Modifiers, ProtobufCodec, ProtobufDeriver}
 import proteus.server.GrpcContext
 import zio.{Config => _, _}
 import zio.stream.{SubscriptionRef, ZStream}
@@ -15,9 +16,10 @@ import shard.BroadcastingSpec.IncrementerActor.{Incrementer, IncrementerMessage}
 import shard.Messenger.MessengerTimeout
 import shard.WorkerActor._
 import shard.errors._
-import shard.interfaces.{MessageCodec, Pods, Storage}
-import shard.interfaces.MessageCodec.Codec
-import shard.interfaces.Pods.BinaryMessage
+import shard.interfaces.{MessageCodec, MessageStorage, Pods, Storage}
+import shard.interfaces.MessageCodec.{Codec, ReplyCodec}
+import shard.interfaces.Pods.{BinaryMessage, BinaryReply}
+import shard.internal.Replies
 import shard.protocol.{Sharding => ProtocolSharding}
 import shard.protocol.Sharding.{PingShardsRequest, PingShardsResponse, SendResponse}
 
@@ -170,6 +172,7 @@ object GrpcShardingSpec extends ZIOSpecDefault {
               .provide(
                 ShardManagerClient.local,
                 Storage.memory,
+                MessageStorage.memory,
                 ZLayer.succeed(Config.default.copy(shardingPort = 14331, simulateRemotePods = true)),
                 ZLayer.succeed(GrpcConfig.default.copy(shutdownTimeout = Duration.Zero)),
                 GrpcPods.live,
@@ -197,10 +200,43 @@ object GrpcShardingSpec extends ZIOSpecDefault {
               closed.isDefined,
               late.isFailure
             )
+          },
+          test("A StorageUnavailable reply reaches a pod of an earlier version as a Defect, and the reverse") {
+            val reply   = BinaryReply.Defect("unavailable", Some(BinaryReply.DeliveryError.StorageUnavailable))
+            val bytes   = summon[ProtobufCodec[SendResponse]].encode(SendResponse(reply))
+            val decoded = summon[ProtobufCodec[SendResponse]].decode(bytes).reply
+            val earlier = summon[ProtobufCodec[EarlierVersion.SendResponse]].decode(bytes)
+            val fromOld = summon[ProtobufCodec[SendResponse]]
+              .decode(summon[ProtobufCodec[EarlierVersion.SendResponse]].encode(EarlierVersion.SendResponse(EarlierVersion.Reply.Defect("boom"))))
+              .reply
+            val codec   = ReplyCodec(Codec.nothing, Codec.unit, Codec.nothing, Codec.nothing)
+            assertTrue(
+              Replies.decodeReply(decoded, codec, Worker.name, "w1") == Exit.fail(StorageUnavailable(Worker.name, "w1")),
+              earlier == EarlierVersion.SendResponse(EarlierVersion.Reply.Defect("unavailable")),
+              fromOld == BinaryReply.Defect("boom", None)
+            )
           }
         )
       )
     ) @@ sequential @@ withLiveClock @@ TestAspect.timeout(60.seconds)
+
+  // the replies of a pod that has no delivery errors, up to Defect
+  object EarlierVersion {
+    given ProtobufDeriver =
+      ProtobufDeriver.modifier[Reply](Modifiers.oneOf(Modifiers.OneOfFlag.Inline, Modifiers.OneOfFlag.Nested))
+
+    sealed trait Reply
+    object Reply {
+      final case class Success(body: Array[Byte])       extends Reply
+      final case class Failure(body: Array[Byte])       extends Reply
+      final case class Element(body: Array[Byte])       extends Reply
+      final case class StreamFailure(body: Array[Byte]) extends Reply
+      final case class Defect(message: String)          extends Reply
+    }
+
+    given ProtobufCodec[Reply] = ProtobufCodec.derived
+    final case class SendResponse(reply: Reply) derives ProtobufCodec
+  }
 
   private val grpcPods: RIO[Scope, Pods] =
     (ZLayer.succeed(GrpcConfig.default) >>> GrpcPods.live).build.map(_.get[Pods])
@@ -226,10 +262,11 @@ object GrpcShardingSpec extends ZIOSpecDefault {
       .acquireRelease(ZIO.attempt(ServerBuilder.forPort(0).addService(service).build().start()))(server => ZIO.succeed(server.shutdownNow()))
   }
 
-  private def overGrpc(config: Config)(spec: Spec[Sharding & Storage & Config & Scope, Any]): Spec[Scope, Any] =
+  private def overGrpc(config: Config)(spec: Spec[Sharding & Storage & MessageStorage & Config & Scope, Any]): Spec[Scope, Any] =
     spec.provideSomeShared[Scope](
       ShardManagerClient.local,
       Storage.memory,
+      MessageStorage.memory,
       // `simulateRemotePods` forces the gRPC transport for the local pod
       ZLayer.succeed(config.copy(simulateRemotePods = true)),
       ZLayer.succeed(GrpcConfig.default),

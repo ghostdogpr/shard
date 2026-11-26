@@ -8,7 +8,7 @@ import zio.test._
 import zio.test.TestAspect.{sequential, withLiveClock}
 
 import shard.errors.EntityDefect
-import shard.interfaces.Storage
+import shard.interfaces.{MessageStorage, Storage}
 import shard.internal.LocalShardManagerClient
 import shard.proteus.given
 
@@ -30,12 +30,14 @@ object ProteusShardingSpec extends ZIOSpecDefault {
         LocalSharding.live,
         LocalShardManagerClient.live,
         Storage.memory,
+        MessageStorage.memory,
         ZLayer.succeed(Config.default)
       ),
       suite("simulate remote pods (forces proteus serialization on every hop)")(tests*).provideSomeShared[Scope](
         LocalSharding.live,
         LocalShardManagerClient.live,
         Storage.memory,
+        MessageStorage.memory,
         ZLayer.succeed(Config.default.copy(simulateRemotePods = true))
       )
     ) @@ sequential @@ withLiveClock

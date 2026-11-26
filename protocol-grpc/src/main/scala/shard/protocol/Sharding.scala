@@ -3,10 +3,17 @@ package shard.protocol
 import proteus._
 
 import shard.interfaces.Pods.{BinaryMessage, BinaryReply}
+import shard.interfaces.Pods.BinaryReply.DeliveryError
 
 object Sharding {
   given ProtobufDeriver =
-    ProtobufDeriver.modifier[BinaryReply](Modifiers.oneOf(Modifiers.OneOfFlag.Inline, Modifiers.OneOfFlag.Nested))
+    ProtobufDeriver
+      .modifier[BinaryReply](Modifiers.oneOf(Modifiers.OneOfFlag.Inline, Modifiers.OneOfFlag.Nested))
+      .instance[Option[DeliveryError]](
+        ProtobufCodec
+          .derived[Option[String]](using ProtobufDeriver)
+          .transform(_.flatMap(name => DeliveryError.values.find(_.toString == name)), _.map(_.toString))
+      )
 
   case class AssignShardsRequest(shards: List[Int], role: String) derives ProtobufCodec
   case class AssignShardsResponse() derives ProtobufCodec

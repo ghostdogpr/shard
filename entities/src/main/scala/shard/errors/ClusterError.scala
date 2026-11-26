@@ -47,6 +47,13 @@ final case class DeliveryUnknown(entityType: String, entityId: String)
   extends ClusterError(s"Message to $entityType $entityId may or may not have been processed")
 
 /**
+  * Message storage can't be reached, so the outcome of an `AtLeastOnce` message is unknown. It may have been processed:
+  * sending it again with the same key gets its result if that was stored, and processes it again otherwise.
+  */
+final case class StorageUnavailable(entityType: String, entityId: String)
+  extends ClusterError(s"Message storage is unavailable for a message to $entityType $entityId")
+
+/**
   * The entity was not running and `loadEntity` rejected the message.
   */
 final case class MessageDiscarded(entityType: String, entityId: String)

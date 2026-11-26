@@ -17,7 +17,7 @@ import zio.test.TestAspect.{sequential, withLiveClock}
 
 import shard._
 import shard.errors.SendTimeout
-import shard.interfaces.PodsHealth
+import shard.interfaces.{MessageStorage, PodsHealth}
 
 object EndToEndSpec extends ZIOSpecDefault {
 
@@ -145,6 +145,7 @@ object EndToEndSpec extends ZIOSpecDefault {
       GrpcPods.live,
       ShardManagerClient.live,
       StorageRedis.live,
+      MessageStorage.none,
       ShardManager.live,
       PodsHealth.noop,
       GrpcShardingService.live,

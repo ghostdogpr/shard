@@ -3,7 +3,7 @@ package shard
 import zio.{Promise, RLayer, Task, ZIO, ZLayer}
 import zio.stream.ZStream
 
-import shard.interfaces.{Pods, ShardManagerClient, Storage}
+import shard.interfaces.{MessageStorage, Pods, ShardManagerClient, Storage}
 import shard.interfaces.Pods.{BinaryMessage, BinaryReply}
 
 object LocalSharding {
@@ -35,14 +35,14 @@ object LocalSharding {
     * A special layer meant for testing that delivers messages locally rather than with an external transport.
     * This layer will only work in a single JVM and is not suitable for production use.
     */
-  val live: RLayer[ShardManagerClient & Storage & Config, Sharding] =
+  val live: RLayer[ShardManagerClient & Storage & MessageStorage & Config, Sharding] =
     withPods(identity)
 
-  private[shard] def withPods(wrap: Pods => Pods): RLayer[ShardManagerClient & Storage & Config, Sharding] =
+  private[shard] def withPods(wrap: Pods => Pods): RLayer[ShardManagerClient & Storage & MessageStorage & Config, Sharding] =
     ZLayer.fromZIO(Promise.make[Nothing, Sharding]).flatMap { env =>
       val sharding = env.get
       ZLayer
-        .makeSome[ShardManagerClient & Storage & Config, Sharding](
+        .makeSome[ShardManagerClient & Storage & MessageStorage & Config, Sharding](
           ZLayer.succeed(wrap(localPods(sharding))),
           Sharding.live
         )

@@ -5,7 +5,7 @@ import zio.test._
 import zio.test.TestAspect.{sequential, withLiveClock}
 
 import shard.Messenger.MessengerTimeout
-import shard.interfaces.Storage
+import shard.interfaces.{MessageStorage, Storage}
 import shard.internal.LocalShardManagerClient
 import shard.javaSerialization.given
 
@@ -59,16 +59,18 @@ object BroadcastingSpec extends ZIOSpecDefault {
       LocalSharding.live,
       LocalShardManagerClient.live,
       Storage.memory,
+      MessageStorage.memory,
       config
     ) @@ sequential @@ withLiveClock
 
   object IncrementerActor {
     enum IncrementerMessage[E, A] {
-      case BroadcastIncrement() extends IncrementerMessage[Nothing, Unit]
-      case IncrementOnce()      extends IncrementerMessage[Nothing, Unit] with AtMostOnce
-      case GetIncrement()       extends IncrementerMessage[Nothing, Int]
-      case Fail()               extends IncrementerMessage[String, Unit]
-      case Hang()               extends IncrementerMessage[Nothing, Unit]
+      case BroadcastIncrement()        extends IncrementerMessage[Nothing, Unit]
+      case IncrementOnce()             extends IncrementerMessage[Nothing, Unit] with AtMostOnce
+      case KeyedIncrement(key: String) extends IncrementerMessage[Nothing, Unit] with AtLeastOnce(key)
+      case GetIncrement()              extends IncrementerMessage[Nothing, Int]
+      case Fail()                      extends IncrementerMessage[String, Unit]
+      case Hang()                      extends IncrementerMessage[Nothing, Unit]
     }
 
     object Incrementer extends TopicType[IncrementerMessage]("incrementer")
@@ -81,10 +83,11 @@ object BroadcastingSpec extends ZIOSpecDefault {
             new Incrementer.Handler {
               def handle[E, A](message: IncrementerMessage[E, A]): IO[E, A] =
                 message match {
-                  case IncrementerMessage.BroadcastIncrement() | IncrementerMessage.IncrementOnce() => ref.update(_ + 1)
-                  case IncrementerMessage.GetIncrement()                                            => ref.get
-                  case IncrementerMessage.Fail()                                                    => ZIO.fail("failed")
-                  case IncrementerMessage.Hang()                                                    => ZIO.never
+                  case IncrementerMessage.BroadcastIncrement() | IncrementerMessage.IncrementOnce() | IncrementerMessage.KeyedIncrement(_) =>
+                    ref.update(_ + 1)
+                  case IncrementerMessage.GetIncrement()                                                                                   => ref.get
+                  case IncrementerMessage.Fail()                                                                                           => ZIO.fail("failed")
+                  case IncrementerMessage.Hang()                                                                                           => ZIO.never
                 }
             }
           )

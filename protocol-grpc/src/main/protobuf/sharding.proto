@@ -49,6 +49,7 @@ message SendResponse {
 
     message Defect {
         string message = 1;
+        optional string error = 2;
     }
 
     message Interrupted {}
