@@ -127,6 +127,8 @@ final private[shard] class EntityManager[Msg[_, _]] private (
 
   private val gauge = Metrics.entities.tagged("role", config.role.name).tagged("type", recipientType.name)
 
+  private val decrementGauge = FiberRef.currentTags.locally(registered.getOrDefault(FiberRef.currentTags))(gauge.decrement)
+
   private val interrupted: Exit[Any, Any] = Exit.interrupt(FiberId.None)
 
   private val sequential = options.concurrency <= 1
@@ -340,7 +342,7 @@ final private[shard] class EntityManager[Msg[_, _]] private (
     // compared by reference, since an entity with the same ID may have started since
     entities.modify { current =>
       if (current.running.get(entity.entityId).contains(entity))
-        (gauge.decrement, current.copy(running = current.running - entity.entityId))
+        (decrementGauge, current.copy(running = current.running - entity.entityId))
       else (ZIO.unit, current)
     }.flatten
 

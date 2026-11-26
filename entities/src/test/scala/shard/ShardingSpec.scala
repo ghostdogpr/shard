@@ -351,6 +351,29 @@ object ShardingSpec extends ZIOSpecDefault {
                       })
         } yield assertTrue(warnings == 2)
       },
+      test("The entities gauge is back to 0 once an entity stops, whatever tags its interceptor added") {
+        // a role of its own, since the gauge is shared by all the pods of a role in this JVM
+        val config      = Config.default.copy(role = Role("entity-gauge"))
+        val interceptor = new EntityInterceptor[WorkerMessage] {
+          override def aroundEntity[E, A](recipientType: RecipientType[?], entityId: String)(effect: IO[E, A]): IO[E, A] =
+            effect @@ ZIOAspect.tagged("entity" -> entityId)
+        }
+        val gauge       = Metrics.entities.tagged("role", "entity-gauge").tagged("type", Worker.name)
+        (for {
+          _       <- startWorker(EntityOptions(interceptor = interceptor))
+          worker  <- Sharding.messenger(Worker)
+          _       <- worker.send("w1")(Ping())
+          running <- gauge.value
+          _       <- Sharding.terminateLocalEntity(Worker, "w1")
+          _       <- Sharding.localEntities(Worker).repeatUntil(_.isEmpty)
+          stopped <- gauge.value
+        } yield assertTrue(running.value == 1.0, stopped.value == 0.0)).provideSome[Scope](
+          LocalSharding.live,
+          LocalShardManagerClient.live,
+          Storage.memory,
+          ZLayer.succeed(config)
+        )
+      },
       test("Assigning shards that a pod already has doesn't change its shards gauge") {
         // a role of its own, since the gauge is shared by all the pods of a role in this JVM
         val config = Config.default.copy(role = Role("gauge"))
