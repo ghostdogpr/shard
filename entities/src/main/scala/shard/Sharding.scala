@@ -47,19 +47,19 @@ class Sharding private (
       shardManager.getAssignments(config.role) *>
         ZIO.logDebug(s"Stopping local entities") *>
         isShuttingDownRef.set(true) *>
-        entityManagers.flatMap(
+        (entityManagers.flatMap(
           ZIO.foreachParDiscard(_) { case (name, entity) =>
             entity.terminateAllEntities.interruptible.forkDaemon // run in a daemon fiber to make sure it doesn't get interrupted
               .flatMap(_.join)
               .catchAllCause(ZIO.logErrorCause(s"Error during stop of entity $name", _))
           }
-        ) *>
-        // in a fresh fiber, so that a pending interruption of a finalizer doesn't skip the unregister
-        stopSingletonsIfNeeded.disconnect
-          .timeout(config.entityTerminationTimeout)
-          .interruptible
-          .forkDaemon
-          .flatMap(_.join) *>
+        ) <&>
+          // in a fresh fiber, so that a pending interruption of a finalizer doesn't skip the unregister
+          stopSingletonsIfNeeded.disconnect
+            .timeout(config.entityTerminationTimeout)
+            .interruptible
+            .forkDaemon
+            .flatMap(_.join)) *>
         ZIO.logDebug(s"Unregistering pod $address to Shard Manager") *>
         shardManager.unregister(address)
     ).retry(config.unregisterRetrySchedule)
